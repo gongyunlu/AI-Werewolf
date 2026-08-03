@@ -1,0 +1,51 @@
+{
+  "name": "ai-werewolf",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=11"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "dev:web": "pnpm --filter @ai-werewolf/web dev",
+    "dev:api": "pnpm --filter @ai-werewolf/api dev",
+    "build": "pnpm -r run build",
+    "preview": "pnpm -r --parallel run preview",
+    "preview:web": "pnpm --filter @ai-werewolf/web preview",
+    "preview:api": "pnpm --filter @ai-werewolf/api preview",
+    "docker:up": "docker compose up -d --wait",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "lint": "pnpm -r run lint",
+    "lint:fix": "pnpm -r run lint:fix",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,mjs,cjs,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,mjs,cjs,yml,yaml}\"",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
+    "@types/node": "catalog:",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.1.1",
+    "prettier": "^3.9.6",
+    "typescript": "catalog:"
+  },
+  "lint-staged": {
+    "apps/web/**/*.{ts,tsx,js,jsx,mjs,cjs}": [
+      "prettier --write",
+      "pnpm --filter @ai-werewolf/web lint:fix"
+    ],
+    "apps/api/**/*.{ts,js,mjs,cjs}": [
+      "prettier --write",
+      "pnpm --filter @ai-werewolf/api lint:fix"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  }
+}

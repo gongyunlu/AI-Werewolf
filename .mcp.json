@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "shadcn": {
+      "command": "npx",
+      "args": ["shadcn@latest", "mcp"],
+      "routing": {
+        "mode": "prefer",
+        "priority": 80,
+        "keywords": ["shadcn", "UI库", "组件"]
+      }
+    }
+  }
+}

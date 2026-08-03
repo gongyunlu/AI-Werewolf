@@ -1,0 +1,12 @@
+{
+  "name": "@ai-werewolf/oxlint-config",
+  "version": "0.0.0",
+  "private": true,
+  "description": "共享 oxlint 配置",
+  "files": [
+    "*.json"
+  ],
+  "devDependencies": {
+    "oxlint": "^1.71.0"
+  }
+}

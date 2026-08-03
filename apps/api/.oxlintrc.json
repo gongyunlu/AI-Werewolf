@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "extends": ["../../packages/oxlint-config/node.json"],
+  "env": {
+    "jest": true
+  },
+  "rules": {
+    "typescript/no-explicit-any": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.spec.ts", "**/*.e2e-spec.ts", "test/**/*.ts"],
+      "rules": {
+        "no-console": "off"
+      }
+    }
+  ]
+}
