@@ -13,6 +13,8 @@ export default defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
+    // 用 tsx 而非 ts-node：generated Prisma Client 用了 NodeNext ESM 风格的 `.js` 扩展 import
+    seed: 'node --import tsx prisma/seed.ts',
   },
   datasource: {
     url: databaseUrl,

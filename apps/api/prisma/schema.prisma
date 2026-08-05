@@ -50,27 +50,48 @@ model Game {
   @@map("games")
 }
 
-// 对局中的玩家信息
+// AI Agent 持久身份，跨对局存在。
+// Player 是"这局的一个座位快照"，Agent 是"这个 AI 参赛者的持久身份"。
+// 同一 Agent 可被多次拉进不同对局，Memory 挂 Agent 实现跨局积累。
+model Agent {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String   @unique @db.VarChar(64) // 唯一标识，如 "阿三"
+  defaultModelName String   @map("default_model_name") @db.VarChar(64) // 默认模型，可被 Player.modelName 单局覆盖
+  memoryLabel      String   @map("memory_label") @db.VarChar(128) // 当前记忆集标签，如 "张三"；改此字段等于切换到另一批 Memory
+  isActive         Boolean  @default(true) @map("is_active") // 软删除：false 时不可再被开局选中，但历史 Player 外键仍有效
+  notes            String?  @db.Text
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  memories Memory[]
+  players  Player[]
+
+  @@map("agents")
+}
+
+// 对局中的玩家信息（Agent 在这局的座位快照）
 model Player {
   id          String  @id @default(uuid()) @db.Uuid
   gameId      String  @map("game_id") @db.Uuid
+  agentId     String  @map("agent_id") @db.Uuid // 引用的持久 Agent 身份
   seatNo      Int     @map("seat_no") @db.SmallInt // 游戏中的座次号
   role        String  @db.VarChar(32) // 游戏角色，板子(Ruleset.definition.roles)驱动，取值口径见 packages/shared 的 ROLES
   faction     String  @db.VarChar(16) // 所属阵营，取值口径见 packages/shared 的 FACTIONS（villager/werewolf）
-  displayName String  @map("display_name") @db.VarChar(64) // 游戏中显示的昵称
-  modelName   String  @map("model_name") @db.VarChar(64) // 绑定的模型
+  displayName String  @map("display_name") @db.VarChar(64) // 开局时从 Agent.name 拷贝，可本局覆盖
+  modelName   String  @map("model_name") @db.VarChar(64) // 开局时从 Agent.defaultModelName 拷贝快照，历史局不受 Agent 升级影响
   deathDay    Int?    @map("death_day") @db.SmallInt // 玩家死亡的天数
   // 玩家死亡原因，取值口径见 packages/shared 的 DEATH_CAUSES（night_kill/execution/hunter_shot/witch_poison）
   deathCause  String? @map("death_cause") @db.VarChar(32)
   isSheriff   Boolean @default(false) @map("is_sheriff") // 是否是警长
 
   game              Game               @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  agent             Agent              @relation(fields: [agentId], references: [id]) // Agent 不可硬删（软删走 isActive），故不设 onDelete
   events            Event[]
   modelCalls        ModelCall[]
-  memories          Memory[]
   agentPerformances AgentPerformance[]
 
   @@unique([gameId, seatNo])
+  @@unique([gameId, agentId]) // 同一 Agent 一局最多一个座位
   @@map("players")
 }
 
@@ -138,7 +159,8 @@ model ModelCall {
 // 每条记忆属于特定玩家，可关联到产生它的对局和事件，也可由多局提炼生成。
 model Memory {
   id              String    @id @default(uuid()) @db.Uuid
-  playerId        String    @map("player_id") @db.Uuid // 所属玩家
+  agentId         String    @map("agent_id") @db.Uuid // 所属 Agent，跨对局持久化
+  label           String    @db.VarChar(128) // 记忆集标签，配合 Agent.memoryLabel 实现"切换记忆版本"（如 "张三" → "张三super"）
   gameId          String?   @map("game_id") @db.Uuid // 产生该记忆的对局（多局提炼时为 NULL）
   eventId         String?   @map("event_id") @db.Uuid // 触发事件（可选）
   type            String    @db.VarChar(32) // 类型，取值口径见 packages/shared 的 MEMORY_TYPES
@@ -154,13 +176,14 @@ model Memory {
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
-  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  game   Game?  @relation(fields: [gameId], references: [id], onDelete: SetNull)
-  event  Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  agent Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  game  Game?  @relation(fields: [gameId], references: [id], onDelete: SetNull)
+  event Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
 
-  @@index([playerId, type])
-  @@index([playerId, importance])
-  @@index([playerId, lastRetrievedAt])
+  @@index([agentId, label])
+  @@index([agentId, type])
+  @@index([agentId, importance])
+  @@index([agentId, lastRetrievedAt])
   @@map("memories")
 }
 
