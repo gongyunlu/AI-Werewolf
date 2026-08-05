@@ -11,3 +11,229 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+// 对局规则
+model Ruleset {
+  id          String   @id @db.VarChar(64)
+  name        String   @db.VarChar(128)
+  playerCount Int      @map("player_count")
+  definition  Json     @db.JsonB
+  isFrozen    Boolean  @default(false) @map("is_frozen")
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  games       Game[]
+
+  @@map("rulesets")
+}
+
+// 对局信息
+model Game {
+  id            String    @id @default(uuid()) @db.Uuid
+  rulesetId     String    @map("ruleset_id") @db.VarChar(64)
+  skillVersion  String    @map("skill_version") @db.VarChar(32)
+  status        String    @default("pending") @db.VarChar(32) // 对局状态，取值口径见 packages/shared 的 GAME_STATUSES
+  winnerFaction String?   @map("winner_faction") @db.VarChar(16) // 胜利者阵营，目前只有好人、狼人阵营，丘比特等第三方阵营后续加入时再说，目前不考虑使用 enum 定义
+  totalDays     Int?      @map("total_days") // 游戏总天数
+  totalCost     Decimal?  @map("total_cost") @db.Decimal(10, 8) // 游戏总花费，精度与 ModelCall.cost/GameSummary.totalCost 统一为 (10,8)，避免累加单次调用费时丢精度
+  totalTokens   Int?      @map("total_tokens") // 总计消费 token
+  startedAt     DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  endedAt       DateTime? @map("ended_at") @db.Timestamptz
+
+  ruleset           Ruleset            @relation(fields: [rulesetId], references: [id])
+  players           Player[]
+  events            Event[]
+  modelCalls        ModelCall[]
+  memories          Memory[]
+  agentPerformances AgentPerformance[]
+  gameSummary       GameSummary?
+
+  @@map("games")
+}
+
+// 对局中的玩家信息
+model Player {
+  id          String  @id @default(uuid()) @db.Uuid
+  gameId      String  @map("game_id") @db.Uuid
+  seatNo      Int     @map("seat_no") @db.SmallInt // 游戏中的座次号
+  role        String  @db.VarChar(32) // 游戏角色，板子(Ruleset.definition.roles)驱动，取值口径见 packages/shared 的 ROLES
+  faction     String  @db.VarChar(16) // 所属阵营，取值口径见 packages/shared 的 FACTIONS（villager/werewolf）
+  displayName String  @map("display_name") @db.VarChar(64) // 游戏中显示的昵称
+  modelName   String  @map("model_name") @db.VarChar(64) // 绑定的模型
+  deathDay    Int?    @map("death_day") @db.SmallInt // 玩家死亡的天数
+  // 玩家死亡原因，取值口径见 packages/shared 的 DEATH_CAUSES（night_kill/execution/hunter_shot/witch_poison）
+  deathCause  String? @map("death_cause") @db.VarChar(32)
+  isSheriff   Boolean @default(false) @map("is_sheriff") // 是否是警长
+
+  game              Game               @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  events            Event[]
+  modelCalls        ModelCall[]
+  memories          Memory[]
+  agentPerformances AgentPerformance[]
+
+  @@unique([gameId, seatNo])
+  @@map("players")
+}
+
+// 事件溯源不可变日志，记录对局中所有发生的动作。
+// 设计原则：
+// - 只允许 INSERT，禁止 UPDATE/DELETE，保证事件完整可追溯。
+// - 所有 Game/Player 状态变更本质上是该表的投影，可从事件流回放重建任何时刻的游戏状态。
+model Event {
+  id         String   @id @default(uuid()) @db.Uuid
+  gameId     String   @map("game_id") @db.Uuid // 所属对局
+  sequence   Int      @db.Integer // 对局内全局递增顺序号（从1开始），用于保证事件严格有序
+  day        Int?     @db.SmallInt // 游戏天数，0=准备阶段，null=对局外的元事件
+  phase      String   @db.VarChar(32) // 阶段，取值口径见 packages/shared 的 PHASES（night/day_announce/speech/vote/execute/check_win）
+  actionType String   @map("action_type") @db.VarChar(64) // 事件类型，取值口径见 packages/shared 的 ACTION_TYPES；决定同行 content(JSON)的负载结构如何解读
+  // 事件可见范围（粗粒度），取值口径见 packages/shared 的 CHANNEL_TYPES：
+  //   public - 全员可见（白天发言、死讯公布、投票结果）
+  //   wolf   - 仅狼队可见（夜间商议 WolfChatEvent/WolfProposalEvent）
+  //   system - 系统私信（预言家查验结果、女巫死讯等，收件人靠 actorId/targetIds 判定）
+  channel    String   @default("public") @db.VarChar(16)
+  actorId    String?  @map("actor_id") @db.Uuid // 动作执行者，NULL 表示系统事件
+  targetIds  Json?    @map("target_ids") @db.JsonB // 目标玩家ID数组，如 ["uuid1","uuid2"]，具体场景：死亡结算、平票 PK、殉情双死、平安夜（空数组）
+  content    Json     @db.JsonB // 事件负载，结构随 actionType 变化（发言文本、投票详情、夜间行动结果等）
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz // 记录写入时间，不可修改
+
+  game       Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  actor      Player?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  modelCalls ModelCall[]
+  memories   Memory[]
+
+  @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
+  @@map("events")
+}
+
+// 模型调用
+// 每次 LLM API 调用的不可变记录，用于成本追踪、决策审计和 prompt 优化。
+model ModelCall {
+  id            String   @id @default(uuid()) @db.Uuid
+  gameId        String   @map("game_id") @db.Uuid // 所属对局
+  playerId      String?  @map("player_id") @db.Uuid // 发起调用的玩家，NULL 表示系统级调用
+  eventId       String?  @map("event_id") @db.Uuid // 关联的事件，一个事件可能触发多次调用
+  modelName     String   @map("model_name") @db.VarChar(128) // 实际调用的模型名称
+  provider      String   @db.VarChar(32) // 模型提供商，如 deepseek/openai
+  purpose       String   @db.VarChar(64) // 调用目的，取值口径见 packages/shared 的 PURPOSES
+  requestPrompt String   @map("request_prompt") @db.Text // 发送给模型的完整 prompt
+  responseText  String   @map("response_text") @db.Text // 模型返回的原始文本
+  inputTokens   Int      @map("input_tokens") @db.Integer // 输入 token 数
+  outputTokens  Int      @map("output_tokens") @db.Integer // 输出 token 数
+  cost          Decimal  @db.Decimal(10, 8) // 本次调用费用（单位统一，如 CNY）
+  latencyMs     Int?     @map("latency_ms") // 调用耗时（毫秒）
+  status        String   @default("success") @db.VarChar(32) // 状态：success/error/timeout
+  errorMessage  String?  @map("error_message") @db.Text // 失败时的错误信息
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  game   Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player? @relation(fields: [playerId], references: [id], onDelete: SetNull)
+  event  Event?  @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([gameId])
+  @@index([playerId])
+  @@index([eventId])
+  @@map("model_calls")
+}
+
+// Agent 长期记忆表，跨对局持久化，用于自我进化。
+// 每条记忆属于特定玩家，可关联到产生它的对局和事件，也可由多局提炼生成。
+model Memory {
+  id              String    @id @default(uuid()) @db.Uuid
+  playerId        String    @map("player_id") @db.Uuid // 所属玩家
+  gameId          String?   @map("game_id") @db.Uuid // 产生该记忆的对局（多局提炼时为 NULL）
+  eventId         String?   @map("event_id") @db.Uuid // 触发事件（可选）
+  type            String    @db.VarChar(32) // 类型，取值口径见 packages/shared 的 MEMORY_TYPES
+  title           String    @db.VarChar(256) // 简短标题
+  content         String    @db.Text // 详细内容，自然语言或结构化 JSON
+  importance      Float     @default(0.5) @db.Real // 重要性评分 0.0~1.0
+  confidence      Float     @default(0.5) @db.Real // 置信度评分 0.0~1.0
+  retrievalCount  Int       @default(0) @map("retrieval_count") // 被检索使用次数
+  lastRetrievedAt DateTime? @map("last_retrieved_at") @db.Timestamptz // 最近一次被检索时间
+  isActive        Boolean   @default(true) @map("is_active") // 是否活跃（可归档）
+  source          String?   @db.VarChar(32) // 来源：auto/manual/refined
+  metadata        Json?     @db.JsonB // 扩展元数据（如向量ID、标签）
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  game   Game?  @relation(fields: [gameId], references: [id], onDelete: SetNull)
+  event  Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([playerId, type])
+  @@index([playerId, importance])
+  @@index([playerId, lastRetrievedAt])
+  @@map("memories")
+}
+
+// 全局共享记忆表，存储跨对局、跨玩家的通用知识和统计规律。
+model GlobalMemory {
+  id              String    @id @default(uuid()) @db.Uuid
+  type            String    @db.VarChar(32) // 类型，取值口径见 packages/shared 的 GLOBAL_MEMORY_TYPES
+  title           String    @db.VarChar(256) // 简短标题
+  content         String    @db.Text // 详细内容
+  importance      Float     @default(0.5) @db.Real
+  confidence      Float     @default(0.5) @db.Real
+  source          String?   @db.VarChar(32) // 来源：auto_stats/manual/aggregated
+  retrievalCount  Int       @default(0) @map("retrieval_count")
+  lastRetrievedAt DateTime? @map("last_retrieved_at") @db.Timestamptz
+  isActive        Boolean   @default(true) @map("is_active")
+  tags            Json?     @db.JsonB // 标签，如 ["wolf","night1","kill"]
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([type])
+  @@index([importance])
+  @@index([lastRetrievedAt])
+  @@map("global_memories")
+}
+
+// 玩家单局表现度量，用于记忆进化和性能分析。
+model AgentPerformance {
+  id                  String   @id @default(uuid()) @db.Uuid
+  gameId              String   @map("game_id") @db.Uuid
+  playerId            String   @map("player_id") @db.Uuid
+  role                String   @db.VarChar(32) // 取值口径见 packages/shared 的 ROLES（从 Player 冗余复制）
+  faction             String   @db.VarChar(16) // 取值口径见 packages/shared 的 FACTIONS
+  survivalDays        Int      @map("survival_days") @db.SmallInt
+  deathCause          String?  @map("death_cause") @db.VarChar(32) // 取值口径见 packages/shared 的 DEATH_CAUSES
+  isWinner            Boolean  @map("is_winner")
+  voteAccuracy        Float?   @map("vote_accuracy") @db.Real
+  abilityUseCount     Int      @default(0) @map("ability_use_count")
+  speechCount         Int      @default(0) @map("speech_count")
+  speechAvgTokens     Int?     @map("speech_avg_tokens")
+  reflectionGenerated Boolean  @default(false) @map("reflection_generated")
+  score               Float?   @db.Real
+  metadata            Json?    @db.JsonB
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId])
+  @@index([playerId])
+  @@map("agent_performances")
+}
+
+/// 对局结束后的统计摘要，便于快速查询和分析。
+/// 所有计数类字段为去规范化缓存，权威写入方是对局结束时的结算服务（读取 Event/ModelCall/Player 聚合后写入），
+/// 业务代码只读，不直接修改这些字段。
+model GameSummary {
+  id                   String   @id @default(uuid()) @db.Uuid
+  gameId               String   @unique @map("game_id") @db.Uuid
+  totalDays            Int      @map("total_days") @db.SmallInt
+  winnerFaction        String   @map("winner_faction") @db.VarChar(16) // 取值口径见 packages/shared 的 FACTIONS
+  // 按阵营统计存活人数（源数据来自 Player 表），三列一一对应 FACTIONS 三个阵营
+  villagerAliveCount   Int      @map("villager_alive_count") @db.SmallInt // villager 阵营存活数（含预言家/女巫等神职）
+  werewolfAliveCount   Int      @map("werewolf_alive_count") @db.SmallInt // werewolf 阵营存活数
+  thirdPartyAliveCount Int      @default(0) @map("third_party_alive_count") @db.SmallInt // third_party 阵营存活数（多数板子无，默认 0）
+  keyEvents            Json?    @map("key_events") @db.JsonB // 关键事件摘要
+  mvpPlayerId          String?  @map("mvp_player_id") @db.Uuid // 本局 MVP 玩家
+  totalSpeechCount     Int      @map("total_speech_count") // 发言总数（从 Event 聚合）
+  totalModelCalls      Int      @map("total_model_calls") // LLM 调用总数（从 ModelCall 聚合）
+  totalTokens          Int      @map("total_tokens") // 总 token 消耗（从 ModelCall 聚合，勿用 SmallInt 会溢出）
+  totalCost            Decimal  @map("total_cost") @db.Decimal(10, 8) // 总费用（从 ModelCall 聚合）
+  generatedAt          DateTime @default(now()) @map("generated_at") @db.Timestamptz
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@map("game_summaries")
+}
