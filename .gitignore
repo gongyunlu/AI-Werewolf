@@ -38,6 +38,7 @@ pnpm-debug.log*
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+!.vscode/launch.json
 *.pem
 
 # TypeScript 增量缓存

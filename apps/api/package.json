@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "pnpm -w run docker:up && nest start --watch",
+    "dev:debug": "pnpm -w run docker:up && nest start --watch --debug 0.0.0.0:9229",
     "build": "nest build",
     "postinstall": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
