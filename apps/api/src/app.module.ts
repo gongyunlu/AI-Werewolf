@@ -8,6 +8,7 @@ import { GamesModule } from './games/games.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { AgentsModule } from './agents/agents.module';
+import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
 import { DebugModule } from './debug/debug.module';
 
 @Module({
@@ -22,6 +23,7 @@ import { DebugModule } from './debug/debug.module';
     RedisModule,
     GamesModule,
     AgentsModule,
+    AgentRuntimeModule,
     DebugModule,
   ],
   controllers: [AppController],

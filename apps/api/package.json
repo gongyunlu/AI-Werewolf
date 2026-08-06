@@ -10,6 +10,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio",
+    "prisma:check": "prisma migrate diff --from-schema prisma/schema.prisma --to-config-datasource --exit-code",
     "start:prod": "pnpm -w run docker:up && node dist/main",
     "preview": "pnpm run start:prod",
     "lint": "oxlint",

@@ -5,7 +5,8 @@
     "jest": true
   },
   "rules": {
-    "typescript/no-explicit-any": "off"
+    "typescript/no-explicit-any": "off",
+    "no-await-in-loop": "off"
   },
   "overrides": [
     {
