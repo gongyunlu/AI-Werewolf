@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@ai-werewolf/shared": "workspace:*",
+    "@langchain/core": "^1.2.4",
+    "@langchain/langgraph": "^1.4.9",
+    "@langchain/openai": "^1.5.5",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",

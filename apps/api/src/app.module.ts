@@ -8,18 +8,21 @@ import { GamesModule } from './games/games.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { AgentsModule } from './agents/agents.module';
+import { DebugModule } from './debug/debug.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: join(__dirname, '../../../.env'),
+      // 数组前项优先：.env.local（本地私密覆盖）> .env（仓库/生产默认）
+      envFilePath: [join(__dirname, '../../../.env.local'), join(__dirname, '../../../.env')],
       validate: validateEnv,
     }),
     PrismaModule,
     RedisModule,
     GamesModule,
     AgentsModule,
+    DebugModule,
   ],
   controllers: [AppController],
   providers: [AppService],
