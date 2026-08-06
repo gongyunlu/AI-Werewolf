@@ -70,6 +70,7 @@ export class GamesService {
             faction: shuffledRoles[index]!.faction,
             displayName: agent.name,
             modelName: agent.defaultModelName,
+            memoryLabelSnapshot: agent.memoryLabel,
             agentId: agent.id,
           })),
         },

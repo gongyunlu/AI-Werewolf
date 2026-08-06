@@ -79,6 +79,8 @@ model Player {
   faction     String  @db.VarChar(16) // 所属阵营，取值口径见 packages/shared 的 FACTIONS（villager/werewolf）
   displayName String  @map("display_name") @db.VarChar(64) // 开局时从 Agent.name 拷贝，可本局覆盖
   modelName   String  @map("model_name") @db.VarChar(64) // 开局时从 Agent.defaultModelName 拷贝快照，历史局不受 Agent 升级影响
+  // 开局时从 Agent.memoryLabel 拷贝快照，历史局不受 Agent 换记忆影响；用于回溯"这局当时用的是哪批记忆"
+  memoryLabelSnapshot String @map("memory_label_snapshot") @db.VarChar(128)
   deathDay    Int?    @map("death_day") @db.SmallInt // 玩家死亡的天数
   // 玩家死亡原因，取值口径见 packages/shared 的 DEATH_CAUSES（night_kill/execution/hunter_shot/witch_poison）
   deathCause  String? @map("death_cause") @db.VarChar(32)
