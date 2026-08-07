@@ -50,22 +50,29 @@ export class GameEngine {
           currentDay: state.currentDay + 1,
         };
       })
-      // 胜负判定：按阵营统计存活人数，判断是否分出胜负
+      // 胜负判定：标准屠边规则
       .addNode(GAME_NODE.CHECK_WIN, async (state: GameGraphState): Promise<GameGraphUpdate> => {
         const alive = state.players.filter((p) => p.isAlive);
-        const wolves = alive.filter((p) => p.faction === 'werewolf').length;
-        const villagers = alive.filter((p) => p.faction === 'villager').length;
+        const aliveWerewolves = alive.filter((p) => p.faction === 'werewolf');
+        const aliveGods = alive.filter((p) => p.faction === 'villager' && p.role !== 'villager');
+        const aliveVillagers = alive.filter(
+          (p) => p.faction === 'villager' && p.role === 'villager',
+        );
 
-        // 狼人胜利：狼数 >= 好人数（狼人可以在白天控票）
-        if (wolves > 0 && wolves >= villagers) {
-          log.log(`[${GAME_NODE.CHECK_WIN}] 狼人阵营胜利`);
-          return { currentPhase: 'check_win', isGameOver: true, winner: 'werewolf' };
-        }
-        // 好人胜利：狼数归零
-        if (wolves === 0) {
-          log.log(`[${GAME_NODE.CHECK_WIN}] 好人阵营胜利`);
+        // 好人胜利：所有狼人死亡
+        if (aliveWerewolves.length === 0) {
+          log.log(`[${GAME_NODE.CHECK_WIN}] 好人阵营胜利（狼人全灭）`);
           return { currentPhase: 'check_win', isGameOver: true, winner: 'villager' };
         }
+
+        // 狼人胜利（屠边）：所有神职死亡 OR 所有平民死亡
+        if (aliveGods.length === 0 || aliveVillagers.length === 0) {
+          log.log(
+            `[${GAME_NODE.CHECK_WIN}] 狼人阵营胜利（屠边：${aliveGods.length === 0 ? '神职全灭' : '平民全灭'}）`,
+          );
+          return { currentPhase: 'check_win', isGameOver: true, winner: 'werewolf' };
+        }
+
         log.log(`[${GAME_NODE.CHECK_WIN}] 游戏继续`);
         return { currentPhase: 'check_win' };
       })

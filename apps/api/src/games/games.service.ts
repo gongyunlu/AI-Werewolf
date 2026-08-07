@@ -1,9 +1,9 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateGameDto } from './dto/create-game.dto';
-import { type RoleAssignment, RulesetDefinitionSchema } from './ruleset-definition';
+import { RulesetDefinitionSchema } from './ruleset-definition';
+import { assignRolesAndSeats } from '../game-engine/role-assignment';
 
-// 硬编码的技能版本号，Phase 8+ 引入 Agent 提示词版本管理后再改
 const SKILL_VERSION = 'v1';
 
 @Injectable()
@@ -27,10 +27,10 @@ export class GamesService {
     if (!parsed.success) {
       throw new BadRequestException(`Ruleset ${ruleset.id} 的 definition 结构非法`);
     }
-    const assignments = parsed.data.roles;
-    if (assignments.length !== ruleset.playerCount) {
+    const roleAssignments = parsed.data.roles;
+    if (roleAssignments.length !== ruleset.playerCount) {
       throw new BadRequestException(
-        `Ruleset ${ruleset.id} 的 definition.roles 数量(${assignments.length}) 与 playerCount(${ruleset.playerCount}) 不匹配`,
+        `Ruleset ${ruleset.id} 的 definition.roles 数量(${roleAssignments.length}) 与 playerCount(${ruleset.playerCount}) 不匹配`,
       );
     }
     if (dto.agentIds.length !== ruleset.playerCount) {
@@ -56,22 +56,21 @@ export class GamesService {
     }
 
     // 随机分配座次与角色
-    const shuffledRoles = shuffle(assignments);
-    const shuffledAgents = shuffle(agents);
+    const assignments = assignRolesAndSeats(roleAssignments, dto.agentIds);
 
     return this.prisma.game.create({
       data: {
         rulesetId: ruleset.id,
         skillVersion: SKILL_VERSION,
         players: {
-          create: shuffledAgents.map((agent, index) => ({
-            seatNo: index + 1,
-            role: shuffledRoles[index]!.role,
-            faction: shuffledRoles[index]!.faction,
-            displayName: agent.name,
-            modelName: agent.defaultModelName,
-            memoryLabelSnapshot: agent.memoryLabel,
-            agentId: agent.id,
+          create: assignments.map((assignment) => ({
+            seatNo: assignment.seatNo,
+            role: assignment.role,
+            faction: assignment.faction,
+            displayName: agents.find((a) => a.id === assignment.agentId)!.name,
+            modelName: agents.find((a) => a.id === assignment.agentId)!.defaultModelName,
+            memoryLabelSnapshot: agents.find((a) => a.id === assignment.agentId)!.memoryLabel,
+            agentId: assignment.agentId,
           })),
         },
       },
@@ -104,21 +103,3 @@ export class GamesService {
     return game;
   }
 }
-
-/**
- * Fisher-Yates 洗牌算法
- * 对传入的数组进行随机打乱，返回一个新数组，不修改原数组
- *
- * @param arr - 需要打乱的数组
- * @returns 打乱后的新数组
- */
-function shuffle<T>(arr: readonly T[]): T[] {
-  const result = [...arr];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j]!, result[i]!];
-  }
-  return result;
-}
-
-export type { RoleAssignment };
