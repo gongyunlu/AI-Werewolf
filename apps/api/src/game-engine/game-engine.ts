@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
-import { StateGraph, START, END } from '@langchain/langgraph';
+import { StateGraph, START, END, MemorySaver } from '@langchain/langgraph';
+import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import { GameStateAnnotation, GAME_NODE, type GameGraphState, type GameGraphUpdate } from './types';
 
 /**
@@ -8,9 +9,14 @@ import { GameStateAnnotation, GAME_NODE, type GameGraphState, type GameGraphUpda
 export class GameEngine {
   private readonly logger = new Logger(GameEngine.name);
   private graph: ReturnType<typeof GameEngine.prototype.buildGraph>;
+  private checkpointer: MemorySaver | PostgresSaver;
 
-  constructor() {
+  /**
+   * @param checkpointer 可选的 checkpointer 实例，不传则使用 MemorySaver
+   */
+  constructor(checkpointer?: MemorySaver | PostgresSaver) {
     this.graph = this.buildGraph();
+    this.checkpointer = checkpointer ?? new MemorySaver();
   }
 
   /**
@@ -32,17 +38,17 @@ export class GameEngine {
         log.log(`[${GAME_NODE.DAY_ANNOUNCE}] Day ${state.currentDay} 公布夜晚死讯`);
         return { currentPhase: 'day_announce' };
       })
-      // 发言阶段（Phase 6 会加入 Agent 发言逻辑，Phase 5 只打日志）
+      // 发言阶段（后续会加入 Agent 发言逻辑，当前只打日志）
       .addNode(GAME_NODE.SPEECH, async (state: GameGraphState): Promise<GameGraphUpdate> => {
         log.log(`[${GAME_NODE.SPEECH}] Day ${state.currentDay} 白天发言`);
         return { currentPhase: 'speech' };
       })
-      // 投票阶段（Phase 6 会加入计票逻辑，Phase 5 只打日志）
+      // 投票阶段（后续会加入计票逻辑，当前只打日志）
       .addNode(GAME_NODE.VOTE, async (state: GameGraphState): Promise<GameGraphUpdate> => {
         log.log(`[${GAME_NODE.VOTE}] Day ${state.currentDay} 投票`);
         return { currentPhase: 'vote' };
       })
-      // 处决阶段：执行放逐，同时天数 +1（Phase 6 会加入死亡结算逻辑）
+      // 处决阶段：执行放逐，同时天数 +1（后续会加入死亡结算逻辑）
       .addNode(GAME_NODE.EXECUTE, async (state: GameGraphState): Promise<GameGraphUpdate> => {
         log.log(`[${GAME_NODE.EXECUTE}] Day ${state.currentDay} 执行放逐`);
         return {
@@ -95,7 +101,7 @@ export class GameEngine {
   }
 
   compile() {
-    return this.graph.compile();
+    return this.graph.compile({ checkpointer: this.checkpointer });
   }
 
   /**

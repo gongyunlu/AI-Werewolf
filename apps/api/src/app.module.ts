@@ -10,6 +10,8 @@ import { RedisModule } from './redis/redis.module';
 import { AgentsModule } from './agents/agents.module';
 import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
 import { DebugModule } from './debug/debug.module';
+import { EventBusModule } from './event-bus/event-bus.module';
+import { GameEngineModule } from './game-engine/game-engine.module';
 
 @Module({
   imports: [
@@ -25,6 +27,8 @@ import { DebugModule } from './debug/debug.module';
     AgentsModule,
     AgentRuntimeModule,
     DebugModule,
+    EventBusModule,
+    GameEngineModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,5 +1,7 @@
 export * from './types';
 export * from './game-engine';
+export * from './game-engine.service';
+export * from './game-engine.module';
 export * from './role-assignment';
 export * from './night-resolution';
 export * from './vote-resolution';
