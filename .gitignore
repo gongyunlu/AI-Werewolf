@@ -46,3 +46,4 @@ pnpm-debug.log*
 
 # 里程碑缓存文档
 *-roadmap.md
+docs/architecture-main-graph.md
