@@ -27,6 +27,8 @@ export interface PlayerState {
   protectedByGuard: boolean; // 本晚是否被守卫守护
   hasAntidoteUsed: boolean; // 女巫解药是否已用
   hasPoisonUsed: boolean; // 女巫毒药是否已用
+  isLover?: boolean; // 是否处于情侣关系
+  loverId?: string | null; // 情侣的另一方 ID（若 isLover 为 true）
 }
 
 /**
