@@ -47,6 +47,7 @@ pnpm-debug.log*
 # 里程碑缓存文档
 *-roadmap.md
 docs
+apps/api/src/game-engine/phase-8.0.5-validation
 
 # Claude Code 本地配置
 .claude

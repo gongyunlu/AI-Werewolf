@@ -9,6 +9,7 @@
     "postinstall": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "prisma db seed",
+    "prisma:reset": "prisma migrate reset",
     "prisma:studio": "prisma studio",
     "prisma:check": "prisma migrate diff --from-schema prisma/schema.prisma --to-config-datasource --exit-code",
     "start:prod": "pnpm -w run docker:up && node dist/main",
@@ -74,19 +75,23 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)s$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "rootDir": "."
+          }
+        }
+      ]
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node",
-    "globals": {
-      "ts-jest": {
-        "tsconfig": {
-          "rootDir": "."
-        }
-      }
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/$1",
+      "^(\\.{1,2}/.*)\\.js$": "$1"
     }
   }
 }

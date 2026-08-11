@@ -2,9 +2,132 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client';
 import { RulesetDefinitionSchema, type RulesetDefinition } from '../src/games/ruleset-definition';
 
+// 狼人杀规则 Skill（通用，所有角色共享）
+const werewolfRuleSkill = {
+  type: 'rule',
+  label: 'werewolf-rules-v1',
+  title: '狼人杀基础规则',
+  content: `
+## 游戏目标
+- **好人阵营**：投票放逐所有狼人
+- **狼人阵营**：刀光所有好人，或数量与好人持平
+
+## 游戏流程
+1. **夜晚阶段**：狼人刀人，神职行动（预言家查验、女巫用药）
+2. **白天阶段**：公布死亡，发言讨论，投票放逐
+
+## 胜负判定
+- 狼人全部出局 → 好人阵营胜利
+- 好人数量 ≤ 狼人数量 → 狼人阵营胜利
+
+## 基本规则
+- 狼人每晚必须刀一个人（除非特殊情况）
+- 预言家每晚可以查验一个玩家的身份
+- 女巫有解药（救人）和毒药（毒人）各一瓶
+- 白天每人按座位号顺序发言，然后投票
+- 得票最多的玩家被放逐出局
+  `.trim(),
+};
+
+// 角色技能 Skill（每个角色专属）
+const roleSkills = [
+  {
+    role: 'werewolf',
+    type: 'skill',
+    label: 'werewolf-skill-v1',
+    title: '狼人玩法指南',
+    content: `
+## 夜间策略
+- **与队友讨论刀人目标**：优先刀神职（预言家、女巫），避免刀平民浪费刀口
+- **记住队友身份**：避免白天发言时暴露队友
+
+## 白天策略
+- **隐藏身份**：伪装成好人，不要过度防守
+- **带节奏**：找理由质疑他人，引导好人内斗
+- **保护队友**：当队友被质疑时，适当帮忙辩护但不要太明显
+- **关键时刻自爆**：如果即将被放逐且能带走关键神职，可以选择自爆
+
+## 发言技巧
+- 不要过度防守，会暴露身份
+- 适当质疑他人，制造混乱
+- 记住队友的发言，避免矛盾
+- 伪装成平民或神职，混淆视听
+    `.trim(),
+  },
+  {
+    role: 'seer',
+    type: 'skill',
+    label: 'seer-skill-v1',
+    title: '预言家玩法指南',
+    content: `
+## 夜间策略
+- **查验可疑玩家**：优先查验发言激进或逻辑可疑的玩家
+- **记录查验结果**：记住每晚的查验，白天可以公开
+
+## 白天策略
+- **选择跳身份时机**：通常在第一天或第二天跳出报警
+- **公开查验信息**：清晰报告查验结果，指挥好人阵营
+- **警惕悍跳狼**：注意是否有狼人假冒预言家
+- **保护自己**：不要过早暴露，被刀后损失巨大
+
+## 发言技巧
+- 报查验结果要清晰："我昨晚查验了X号位，他是狼人/好人"
+- 指挥投票："今天我们投X号位"
+- 防守真实身份："我是预言家，已查验..."
+- 对比悍跳狼的发言，找出漏洞
+    `.trim(),
+  },
+  {
+    role: 'witch',
+    type: 'skill',
+    label: 'witch-skill-v1',
+    title: '女巫玩法指南',
+    content: `
+## 夜间策略
+- **看到刀口信息**：系统会告诉你谁被狼人刀中
+- **解药使用**：优先救神职（如果知道身份），第一晚可以盲救，不要浪费
+- **毒药使用**：确定狼人身份后使用，不要浪费在平民身上
+- **可以不用药**：如果不确定，可以选择不使用任何药
+
+## 白天策略
+- **低调行事**：不要过早暴露身份，收集信息
+- **判断狼人**：听发言，找出逻辑漏洞
+- **关键时刻跳身份**：当需要指挥或证明清白时，可以公开用药记录
+
+## 用药原则
+- 解药：第一晚可以救，后续看情况（可能是平民）
+- 毒药：确认狼人后再用，不要盲毒
+- 记住用药记录，白天可以作为证据
+    `.trim(),
+  },
+  {
+    role: 'villager',
+    type: 'skill',
+    label: 'villager-skill-v1',
+    title: '平民玩法指南',
+    content: `
+## 白天策略
+- **仔细听发言**：找出逻辑漏洞和矛盾之处
+- **跟随神职**：相信预言家的指挥
+- **不要乱带节奏**：避免误伤好人阵营
+
+## 发言技巧
+- 表明自己是平民："我是平民，没有特殊身份"
+- 分析场上局势："我觉得X号位发言可疑..."
+- 投票时说明理由："我投X号位，因为..."
+
+## 生存策略
+- 不要过度表现，避免吸引狼刀
+- 配合神职，不要抢风头
+- 即使知道自己会被放逐，也要留下有价值的信息
+- 用自己的出局换取信息价值
+    `.trim(),
+  },
+];
+
 // 6 人预女双民板：本次学习期主要用它跑通接口和主图
 const std6p: { id: string; name: string; notes: string; definition: RulesetDefinition } = {
-  id: 'std-6p-v1',
+  id: 'standard6p',
   name: '标准 6 人预女双民板',
   notes: 'Phase 2 验证用板：2 狼 + 预言家 + 女巫 + 2 平民',
   definition: {
@@ -326,6 +449,144 @@ async function main() {
       const strategyCount = preset.items.length - personaCount;
       console.log(
         `[seed] agent ${agent.name} (label=${agent.memoryLabel}) 人设 Memory 重置：删除 ${removed.count} 条，插入 ${personaCount} 条 persona + ${strategyCount} 条 strategy`,
+      );
+    }
+
+    // ========== Skill Memory（规则 + 角色技能）==========
+    console.log('\n[seed] 创建 Skill Memory...');
+
+    // 1. 创建通用规则 Skill（所有 Agent 共享）
+    const allAgents = await prisma.agent.findMany();
+
+    for (const agent of allAgents) {
+      // 删除旧的规则 Skill
+      await prisma.memory.deleteMany({
+        where: {
+          agentId: agent.id,
+          label: agent.memoryLabel,
+          type: 'rule',
+        },
+      });
+
+      // 创建规则 Skill
+      await prisma.memory.create({
+        data: {
+          agentId: agent.id,
+          label: agent.memoryLabel,
+          type: werewolfRuleSkill.type,
+          title: werewolfRuleSkill.title,
+          content: werewolfRuleSkill.content,
+          importance: 0.9, // 规则非常重要
+          confidence: 1.0,
+          source: 'manual',
+          isActive: true,
+        },
+      });
+    }
+    console.log(`[seed] ✅ 为 ${allAgents.length} 个 Agent 创建了规则 Skill`);
+
+    // 2. 为每个角色创建专属技能 Skill
+    // 注意：这里我们为每个 Agent 创建所有角色的技能，这样 Agent 可以扮演任何角色
+    for (const agent of allAgents) {
+      // 删除旧的角色技能 Skill
+      await prisma.memory.deleteMany({
+        where: {
+          agentId: agent.id,
+          label: agent.memoryLabel,
+          type: 'skill',
+        },
+      });
+
+      // 为每个角色创建技能
+      for (const roleSkill of roleSkills) {
+        await prisma.memory.create({
+          data: {
+            agentId: agent.id,
+            label: agent.memoryLabel,
+            type: roleSkill.type,
+            title: roleSkill.title,
+            content: roleSkill.content,
+            importance: 0.85, // 角色技能很重要
+            confidence: 1.0,
+            source: 'manual',
+            isActive: true,
+            // 使用 gameId 字段存储角色信息（用于后续过滤）
+            gameId: null, // null 表示通用技能
+          },
+        });
+      }
+    }
+    console.log(
+      `[seed] ✅ 为 ${allAgents.length} 个 Agent 各创建了 ${roleSkills.length} 个角色技能 Skill`,
+    );
+
+    // ========== Phase 8.4 测试游戏数据 ==========
+    console.log('\n[seed] 创建 Phase 8.4 测试游戏...');
+
+    // 使用固定的 UUID 作为测试游戏 ID（方便后续测试脚本引用）
+    const testGameId = '00000000-0000-0000-0000-000000000001';
+
+    // 删除旧的测试游戏（如果存在）
+    await prisma.game.deleteMany({
+      where: { id: testGameId },
+    });
+
+    // 创建测试游戏
+    const testGame = await prisma.game.create({
+      data: {
+        id: testGameId,
+        rulesetId: 'standard6p',
+        skillVersion: 'v1',
+        status: 'in_progress',
+        totalDays: 1,
+        startedAt: new Date(),
+      },
+    });
+
+    // 获取前 6 个 Agent（阿三到阿八）
+    const agents = await prisma.agent.findMany({
+      where: { name: { in: ['阿三', '阿四', '阿五', '阿六', '阿七', '阿八'] } },
+      orderBy: { name: 'asc' },
+      take: 6,
+    });
+
+    if (agents.length < 6) {
+      throw new Error(`[seed] Agent 数量不足，需要 6 个，实际找到 ${agents.length} 个`);
+    }
+
+    // 创建 6 个玩家：2 狼人 + 1 预言家 + 1 女巫 + 2 平民
+    const playerRoles = [
+      { role: 'werewolf', faction: 'werewolf' },
+      { role: 'werewolf', faction: 'werewolf' },
+      { role: 'seer', faction: 'villager' },
+      { role: 'witch', faction: 'villager' },
+      { role: 'villager', faction: 'villager' },
+      { role: 'villager', faction: 'villager' },
+    ];
+
+    for (let i = 0; i < 6; i++) {
+      await prisma.player.create({
+        data: {
+          gameId: testGame.id,
+          agentId: agents[i].id,
+          seatNo: i + 1,
+          role: playerRoles[i].role,
+          faction: playerRoles[i].faction,
+          displayName: agents[i].name,
+          modelName: agents[i].defaultModelName,
+          memoryLabelSnapshot: agents[i].memoryLabel,
+          deathDay: null,
+          deathCause: null,
+          isSheriff: false,
+        },
+      });
+    }
+
+    console.log(`[seed] ✅ 测试游戏创建完成: ${testGame.id}`);
+    console.log(`[seed]    玩家配置:`);
+    for (let i = 0; i < 6; i++) {
+      console.log(
+        `[seed]      ${i + 1}号位: ${agents[i].name} - ${playerRoles[i].role} (${playerRoles[i].faction})`,
       );
     }
   } finally {

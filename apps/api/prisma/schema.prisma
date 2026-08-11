@@ -31,7 +31,7 @@ model Game {
   id            String    @id @default(uuid()) @db.Uuid
   rulesetId     String    @map("ruleset_id") @db.VarChar(64)
   skillVersion  String    @map("skill_version") @db.VarChar(32)
-  status        String    @default("pending") @db.VarChar(32) // 对局状态，取值口径见 packages/shared 的 GAME_STATUSES
+  status        String    @default("created") @db.VarChar(32) // 对局状态，取值口径见 packages/shared 的 GAME_STATUSES
   winnerFaction String?   @map("winner_faction") @db.VarChar(16) // 胜利者阵营，目前只有好人、狼人阵营，丘比特等第三方阵营后续加入时再说，目前不考虑使用 enum 定义
   totalDays     Int?      @map("total_days") // 游戏总天数
   totalCost     Decimal?  @map("total_cost") @db.Decimal(14, 8) // 游戏总花费，精度与 ModelCall.cost/GameSummary.totalCost 统一为 (14,8)：scale=8 保证累加不丢精度，整数位 6 位避免单局费用破百的天花板
@@ -74,9 +74,9 @@ model Player {
   id                  String  @id @default(uuid()) @db.Uuid
   gameId              String  @map("game_id") @db.Uuid
   agentId             String  @map("agent_id") @db.Uuid // 引用的持久 Agent 身份
-  seatNo              Int     @map("seat_no") @db.SmallInt // 游戏中的座次号
-  role                String  @db.VarChar(32) // 游戏角色，板子(Ruleset.definition.roles)驱动，取值口径见 packages/shared 的 ROLES
-  faction             String  @db.VarChar(16) // 所属阵营，取值口径见 packages/shared 的 FACTIONS（villager/werewolf）
+  seatNo              Int?    @map("seat_no") @db.SmallInt // 游戏中的座次号
+  role                String? @db.VarChar(32) // 游戏角色，板子(Ruleset.definition.roles)驱动，取值口径见 packages/shared 的 ROLES
+  faction             String? @db.VarChar(16) // 所属阵营，取值口径见 packages/shared 的 FACTIONS（villager/werewolf）
   displayName         String  @map("display_name") @db.VarChar(64) // 开局时从 Agent.name 拷贝，可本局覆盖
   modelName           String  @map("model_name") @db.VarChar(64) // 开局时从 Agent.defaultModelName 拷贝快照，历史局不受 Agent 升级影响
   // 开局时从 Agent.memoryLabel 拷贝快照，历史局不受 Agent 换记忆影响；用于回溯"这局当时用的是哪批记忆"
@@ -110,11 +110,14 @@ model Event {
   day        Int?     @db.SmallInt // 游戏天数，0=准备阶段，null=对局外的元事件
   phase      String   @db.VarChar(32) // 阶段，取值口径见 packages/shared 的 PHASES（night/day_announce/speech/vote/execute/check_win）
   actionType String   @map("action_type") @db.VarChar(64) // 事件类型，取值口径见 packages/shared 的 ACTION_TYPES；决定同行 content(JSON)的负载结构如何解读
-  // 事件可见范围（粗粒度），取值口径见 packages/shared 的 CHANNEL_TYPES：
-  //   public - 全员可见（白天发言、死讯公布、投票结果）
-  //   wolf   - 仅狼队可见（夜间商议 WolfChatEvent/WolfProposalEvent）
-  //   system - 系统私信（预言家查验结果、女巫死讯等，收件人靠 actorId/targetIds 判定）
-  channel    String   @default("public") @db.VarChar(16)
+  // 事件可见性，取值口径见 packages/shared 的 VISIBILITY_TYPES：
+  //   public - 所有人可见（白天发言、死讯公布、投票结果）
+  //   wolf   - 狼人可见（狼人刀人决策）
+  //   seer   - 预言家可见（预言家查验结果）
+  //   witch  - 女巫可见（女巫用药决策、刀口信息）
+  //   guard  - 守卫可见（守卫守护记录）
+  //   system - 系统内部（不对任何玩家可见）
+  visibility String   @default("public") @db.VarChar(16)
   actorId    String?  @map("actor_id") @db.Uuid // 动作执行者，NULL 表示系统事件
   targetIds  Json?    @map("target_ids") @db.JsonB // 目标玩家ID数组，如 ["uuid1","uuid2"]，具体场景：死亡结算、平票 PK、殉情双死、平安夜（空数组）
   content    Json     @db.JsonB // 事件负载，结构随 actionType 变化（发言文本、投票详情、夜间行动结果等）

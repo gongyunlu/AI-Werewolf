@@ -1,0 +1,91 @@
+import { Logger } from '@nestjs/common';
+import type { NodeFactory } from '../node.types';
+import type { GameGraphState } from '../../core/types';
+import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
+import {
+  createMakeSpeechTool,
+  type MakeSpeechOutput,
+} from '@/agent-runtime/tools/make-speech.tool';
+import { createSkipActionTool } from '@/agent-runtime/tools/skip-action.tool';
+
+const logger = new Logger('PkSpeechNode');
+
+/**
+ * PK 发言节点
+ *
+ * 平票后，PK 候选人进行补充发言
+ */
+export const createPkSpeechNode: NodeFactory = (context) => {
+  return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
+    logger.log(`[PK发言] Day ${state.currentDay} - PK轮次 ${state.pkRound}`);
+
+    // 检查是否有 PK 候选人
+    if (!state.pkCandidates || state.pkCandidates.length === 0) {
+      logger.log('[PK发言] 无PK候选人，跳过');
+      return {};
+    }
+
+    logger.log(`[PK发言] PK候选人: ${state.pkCandidates.join(', ')}号位`);
+
+    // 获取 PK 候选人的 Player 对象
+    const pkPlayers = state.players.filter(
+      (p) => p.isAlive && state.pkCandidates!.includes(p.seatNo!),
+    );
+
+    // PK 候选人按座位号顺序发言
+    pkPlayers.sort((a, b) => a.seatNo! - b.seatNo!);
+
+    for (const player of pkPlayers) {
+      logger.log(`[PK发言] ${player.seatNo}号位开始PK发言...`);
+
+      try {
+        const tools = [
+          createMakeSpeechTool({ gameId: state.gameId, currentPlayerId: player.id }),
+          createSkipActionTool({ gameId: state.gameId, currentPlayerId: player.id }),
+        ];
+
+        const result = await context.agentRuntime.run({
+          gameId: state.gameId,
+          playerId: player.id,
+          scenario: AGENT_SCENARIOS.DAY_SPEECH,
+          availableTools: tools,
+          maxIterations: 3,
+          threadId: getPlayerThreadId(state.gameId, player.id),
+          additionalContext: `你正在进行PK发言。这是第${state.pkRound}轮PK，你需要为自己辩护，说服其他玩家不要投你。`,
+        });
+
+        if (result.success && result.result) {
+          const toolResult = result.result as MakeSpeechOutput;
+
+          if (toolResult.action === 'make_speech') {
+            logger.log(`[PK发言] ${player.seatNo}号位: ${toolResult.content}`);
+
+            // 写入 Event 表
+            await context.eventWriter.writePlayerSpeechEvent({
+              gameId: state.gameId,
+              day: state.currentDay,
+              actorId: player.id,
+              seatNo: player.seatNo!,
+              content: toolResult.content,
+              thinking: result.thinking,
+            });
+          } else {
+            logger.log(`[PK发言] ${player.seatNo}号位跳过发言`);
+          }
+        } else {
+          logger.warn(
+            `[PK发言] ${player.seatNo}号位 Agent 调用失败。原因: ${result.error || 'success=false 或 result 为空'}`,
+          );
+        }
+      } catch (error) {
+        logger.error(
+          `[PK发言] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    logger.log('[PK发言] PK发言阶段结束');
+    return {};
+  };
+};

@@ -9,9 +9,9 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { AgentsModule } from './agents/agents.module';
 import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
-import { DebugModule } from './debug/debug.module';
 import { EventBusModule } from './event-bus/event-bus.module';
-import { GameEngineModule } from './game-engine/game-engine.module';
+import { GameEngineModule } from './game-engine/core/game-engine.module';
+import { RulesetsModule } from './rulesets/rulesets.module';
 
 @Module({
   imports: [
@@ -25,8 +25,8 @@ import { GameEngineModule } from './game-engine/game-engine.module';
     RedisModule,
     GamesModule,
     AgentsModule,
+    RulesetsModule,
     AgentRuntimeModule,
-    DebugModule,
     EventBusModule,
     GameEngineModule,
   ],

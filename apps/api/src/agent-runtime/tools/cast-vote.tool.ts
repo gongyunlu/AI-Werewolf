@@ -1,70 +1,69 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
-import type { PrismaService } from '../../prisma/prisma.service';
 import type { ToolContext } from './tool-context';
 
+/**
+ * 投票工具上下文（扩展）
+ */
+export interface CastVoteToolContext extends ToolContext {
+  allowAbstain?: boolean; // 是否允许弃票（默认 true）
+  validTargets?: number[]; // 有效目标座位号列表（PK投票时使用）
+}
+
 const InputSchema = z.object({
-  targetSeatNo: z
-    .number()
-    .int()
-    .min(1)
-    .describe('要投票放逐的目标玩家座位号,必须是当前存活玩家的座位号'),
+  targetSeatNo: z.number().int().min(0).describe('要投票的目标玩家座位号（0表示弃票）'),
 });
 
 const OutputSchema = z.object({
-  voterPlayerId: z.string().uuid(),
-  voterSeatNo: z.number().int().min(1),
-  targetPlayerId: z.string().uuid(),
-  targetSeatNo: z.number().int().min(1),
+  action: z.literal('cast_vote'),
+  actorId: z.string(),
+  targetSeatNo: z.number().int().min(0),
 });
 
 export type CastVoteOutput = z.infer<typeof OutputSchema>;
 
 /**
- * 发起投票放逐
- * @param prisma
- * @param ctx
- * @returns
+ * 投票工具
  */
-export const createCastVoteTool = (prisma: PrismaService, ctx: ToolContext) =>
-  tool(
+export const createCastVoteTool = (ctx: CastVoteToolContext) => {
+  const { allowAbstain = true, validTargets } = ctx;
+
+  let description = '白天投票：投票放逐目标玩家。得票最多的玩家将被放逐出局。';
+
+  if (!allowAbstain) {
+    description += ' 注意：这是平票 PK 阶段投票，不允许弃票。';
+  } else {
+    description += ' 你可以选择弃票（targetSeatNo=0）。';
+  }
+
+  if (validTargets && validTargets.length > 0) {
+    description += ` 你只能投给以下座位号: ${validTargets.join(', ')}。`;
+  }
+
+  return tool(
     async (input): Promise<CastVoteOutput> => {
-      const voter = await prisma.player.findUnique({
-        where: { id: ctx.currentPlayerId },
-        select: { id: true, seatNo: true, gameId: true, deathDay: true },
-      });
-      if (!voter || voter.gameId !== ctx.gameId) {
-        throw new Error('玩家不存在');
+      // 平票 PK 阶段投票不允许弃票
+      if (!allowAbstain && input.targetSeatNo === 0) {
+        throw new Error('PK投票不允许弃票，请选择一个有效目标');
       }
 
-      if (voter.deathDay !== null) {
-        throw new Error('你已出局，无法投票');
+      // 平票 PK 阶段投票只能投有效目标
+      if (validTargets && validTargets.length > 0 && input.targetSeatNo !== 0) {
+        if (!validTargets.includes(input.targetSeatNo)) {
+          throw new Error(`无效的投票目标，只能投给: ${validTargets.join(', ')}`);
+        }
       }
-
-      const target = await prisma.player.findUnique({
-        where: { gameId_seatNo: { gameId: ctx.gameId, seatNo: input.targetSeatNo } },
-        select: { id: true, seatNo: true, deathDay: true },
-      });
-      if (!target) {
-        throw new Error(`本局不存在座次 ${input.targetSeatNo}`);
-      }
-      if (target.deathDay !== null) {
-        throw new Error(`目标 ${input.targetSeatNo} 号已出局,不能投票给已出局玩家`);
-      }
-
-      // TODO: 在引擎结算逻辑接入后补全落库操作(需要 sequence/day/phase 上下文写 Event 表)
 
       return {
-        voterPlayerId: voter.id,
-        voterSeatNo: voter.seatNo,
-        targetPlayerId: target.id,
-        targetSeatNo: target.seatNo,
+        action: 'cast_vote',
+        actorId: ctx.currentPlayerId,
+        targetSeatNo: input.targetSeatNo,
       };
     },
     {
       name: 'cast_vote',
-      description:
-        '对目标玩家投出放逐票。这是最终动作,一旦调用即视为本轮投票已确定。目标必须是存活玩家的座位号(先用 get_alive_players 确认)。',
+      description,
       schema: InputSchema,
     },
   );
+};

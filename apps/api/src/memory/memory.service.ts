@@ -1,14 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MemoryType } from '@ai-werewolf/shared';
+import { Prisma } from '../generated/prisma/client';
 
-export type ActiveMemory = {
-  id: string;
-  type: MemoryType;
-  title: string;
-  content: string;
-  importance: number;
-};
+export type ActiveMemory = Prisma.MemoryGetPayload<{
+  select: {
+    id: true;
+    type: true;
+    title: true;
+    content: true;
+    importance: true;
+  };
+}>;
 
 export type RetrieveActiveMemoriesOptions = {
   types?: MemoryType[]; // 指定类型集合，缺省不过滤
