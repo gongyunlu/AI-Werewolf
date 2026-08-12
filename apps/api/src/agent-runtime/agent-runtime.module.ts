@@ -5,11 +5,12 @@ import { AgentToolsFactory } from './tools/agent-tools.factory';
 import { RoleToolsInitializer } from './tools/role-tools-initializer.provider';
 import { MemoryModule } from '../memory/memory.module';
 import { PrismaModule } from '../prisma/prisma.module';
-import { SkillLoaderService } from '../skills/skill-loader.service';
+import { SkillLoaderModule } from '../skills/skill-loader.module';
+import { PromptLoaderModule } from '../prompts/prompt-loader.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, MemoryModule],
-  providers: [AgentRuntimeService, AgentToolsFactory, SkillLoaderService, RoleToolsInitializer],
-  exports: [AgentRuntimeService, AgentToolsFactory, SkillLoaderService],
+  imports: [ConfigModule, PrismaModule, MemoryModule, PromptLoaderModule, SkillLoaderModule],
+  providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer],
+  exports: [AgentRuntimeService, AgentToolsFactory],
 })
 export class AgentRuntimeModule {}

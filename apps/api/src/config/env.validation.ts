@@ -8,6 +8,7 @@ const envSchema = z.object({
   ARK_BASE_URL: z.url(),
   ARK_DEFAULT_MODEL: z.string().min(1),
   SKILLS_DIR: z.string().optional(), // Skill 文件存储路径（可选）
+  PROMPTS_DIR: z.string().optional(), // Prompt 模板存储路径（可选）
 });
 
 export type Env = z.infer<typeof envSchema>;

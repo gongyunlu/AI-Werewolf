@@ -6,6 +6,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
+import { PromptLoaderService } from '../prompts/prompt-loader.service';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { Env } from '../config/env.validation';
 import type { StructuredToolInterface } from '@langchain/core/tools';
@@ -80,6 +81,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
+    private readonly promptLoader: PromptLoaderService,
   ) {}
 
   /**
@@ -364,10 +366,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 步骤 1.2: Assemble System Prompt（组装 System Prompt）
    *
    * 渐进式披露架构：
-   * - Layer 0: 核心决策框架（永远加载）
-   * - Layer 1: 狼人杀规则（根据板子加载）
-   * - Layer 2: 角色技能（根据身份加载）
-   * - Layer 3: 战术（根据场景按需加载）
+   * - Prompts: 基础行为约束 + 场景指令
+   * - Skills Layer 0: 核心决策框架（永远加载）
+   * - Skills Layer 1: 狼人杀规则（根据板子加载）
+   * - Skills Layer 2: 角色技能（根据身份加载）
+   * - Skills Layer 3: 战术（根据场景按需加载）
    * - 人设 + 策略
    * - 角色特定历史
    * - 分层上下文
@@ -381,13 +384,17 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }): Promise<string> {
     const { scenario, player, memories, context, additionalContext } = options;
 
+    // ===== 从 Prompts 加载（行为约束 + 场景指令）=====
+    const constraints = this.promptLoader.loadConstraints();
+    const scenarioPrompt = this.promptLoader.loadScenarioPrompt(scenario);
+
     // 基础角色信息（只告诉玩家自己的身份）
     const roleView = `
-你是：${player.displayName}
-座位号：${player.seatNo}
-你的角色：${player.role}
-你的阵营：${player.faction === FACTIONS.WEREWOLF ? '狼人阵营' : '好人阵营'}
-存活状态：${player.deathDay === null ? '存活' : '已出局'}
+      你是：${player.displayName}\n
+      座位号：${player.seatNo}\n
+      你的角色：${player.role}\n
+      你的阵营：${player.faction === FACTIONS.WEREWOLF ? '狼人阵营' : '好人阵营'}\n
+      存活状态：${player.deathDay === null ? '存活' : '已出局'}\n
     `.trim();
 
     // 如果是狼人，注入队友信息
@@ -408,30 +415,35 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // 场景提示
-    const scenarioPrompt = this.getScenarioPrompt(scenario);
+    // ===== 从 Skills 加载（决策框架 + 规则 + 角色 + 战术）=====
 
-    // Layer 0: 核心决策框架（永远加载）
+    // Skills Layer 0: 核心决策框架（永远加载）
     const coreFramework = await this.skillLoader.loadCoreFramework();
 
-    // Layer 1: 从文件加载规则 Skill（使用 game.skillVersion）
+    // Skills Layer 1: 从文件加载规则 Skill（使用 game.skillVersion）
     const skillVersion = player.game.skillVersion || 'v1';
     const ruleSkill = await this.skillLoader.loadRuleSkill(skillVersion);
 
-    // Layer 2: 从文件加载角色 Skill
+    // Skills Layer 2: 从文件加载角色 Skill
     if (!player.role) {
       throw new Error(`Player ${player.id} 没有分配角色`);
     }
     const roleSkill = await this.skillLoader.loadRoleSkill(player.role, skillVersion);
 
-    // Layer 3: 根据场景按需加载战术
+    // Skills Layer 3: 根据场景按需加载战术
     let tactics = '';
     if (scenario === AGENT_SCENARIOS.NIGHT_ACTION && player.role === ROLES.WEREWOLF) {
       // 狼人夜间行动：加载狼人战术（悍跳、倒钩）
       tactics = await this.skillLoader.loadTacticsByCategory('wolf', skillVersion);
     } else if (scenario === AGENT_SCENARIOS.DAY_SPEECH) {
-      // 白天发言：加载反制战术（识别悍跳）
-      tactics = await this.skillLoader.loadTacticsByCategory('counter', skillVersion);
+      // 白天发言：根据阵营加载不同战术
+      if (player.faction === FACTIONS.WEREWOLF) {
+        // 狼人：加载狼人战术（悍跳、倒钩、自刀）
+        tactics = await this.skillLoader.loadTacticsByCategory('wolf', skillVersion);
+      } else {
+        // 好人：加载反制战术（识别悍跳、识别倒钩）
+        tactics = await this.skillLoader.loadTacticsByCategory('counter', skillVersion);
+      }
     }
 
     // 提取人设和策略记忆
@@ -470,6 +482,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     // 组合完整 System Prompt（渐进式披露）
     const fullPrompt = `
+${constraints}
+
 ${roleView}
 
 ${teammateInfo}
@@ -508,59 +522,6 @@ ${context.history}
     `.trim();
 
     return fullPrompt;
-  }
-
-  /**
-   * 获取场景提示词
-   */
-  private getScenarioPrompt(scenario: AgentScenario): string {
-    switch (scenario) {
-      case AGENT_SCENARIOS.VOTE:
-        return `
-## 当前场景：投票阶段
-- 根据当前信息，决定投票给谁
-- 使用 cast_vote 工具投票
-- 如果不确定，可以弃权
-        `.trim();
-
-      case AGENT_SCENARIOS.DAY_SPEECH:
-        return `
-## 当前场景：白天发言
-- 分析当前局势，表达你的观点
-- 使用 make_speech 工具发言
-- 发言要有逻辑，符合你的角色
-        `.trim();
-
-      case AGENT_SCENARIOS.NIGHT_ACTION:
-        return `
-## 当前场景：夜间行动
-- **重要**：你必须亲自调用工具来表达你的决策
-- 即使你看到其他人的决策，你仍然需要调用工具表达你自己的选择
-- 不要只输出文字说明，必须调用工具
-- 根据可用的工具列表，选择一个并调用
-        `.trim();
-
-      case AGENT_SCENARIOS.LAST_WORDS:
-        return `
-## 当前场景：遗言
-你昨晚死亡，现在是你发表遗言的时刻。
-
-**遗言策略**：
-- 如果你是神职（预言家/女巫/守卫）：公开你的身份和关键信息
-  - 预言家：公开你查验的结果（哪些人是好人/狼人）
-  - 女巫：说明你的药剂使用情况
-  - 守卫：说明你守护了谁
-- 如果你是平民：分享你的观察和推理
-- 遗言是你最后影响局势的机会，务必清晰、有价值
-
-**操作**：
-- 使用 make_speech 工具发表遗言
-- 遗言要简洁、清晰、有说服力
-        `.trim();
-
-      default:
-        return '';
-    }
   }
 
   /**

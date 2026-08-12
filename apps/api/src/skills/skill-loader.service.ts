@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -20,7 +20,7 @@ export interface SkillContent {
  * - Layer 3: 战术（根据场景按需加载）
  */
 @Injectable()
-export class SkillLoaderService {
+export class SkillLoaderService implements OnModuleInit {
   private readonly skillsDir: string;
   private cache = new Map<string, string>(); // 缓存 Skill 内容
 
@@ -28,6 +28,18 @@ export class SkillLoaderService {
     // 从环境变量读取 SKILLS_DIR，如果未配置则使用默认路径
     const envSkillsDir = this.configService.get('SKILLS_DIR');
     this.skillsDir = envSkillsDir || path.join(__dirname, '..', 'skills');
+  }
+
+  async onModuleInit() {
+    // 预加载核心文件，确保启动时发现问题
+    await this.loadCoreFramework();
+    await this.loadRuleSkill('v1');
+
+    // 验证所有角色文件是否存在
+    const requiredRoles = ['werewolf', 'seer', 'witch', 'villager'];
+    for (const role of requiredRoles) {
+      await this.loadRoleSkill(role, 'v1');
+    }
   }
 
   /**
