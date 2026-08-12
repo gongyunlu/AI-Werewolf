@@ -1,18 +1,16 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateGameDto } from './dto/create-game.dto';
 import { RulesetDefinitionSchema } from './ruleset-definition';
 import { assignRolesAndSeats } from '../game-engine/rules/role-assignment';
-import { GameExecutorService } from './game-executor.service';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
+import { GameExecutorService } from '../game-executor/game-executor.service';
 
 const SKILL_VERSION = 'v1';
 
 @Injectable()
 export class GamesService {
-  private readonly logger = new Logger(GamesService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly gameExecutor: GameExecutorService,
@@ -179,7 +177,7 @@ export class GamesService {
   }
 
   /**
-   * 开始游戏对局（启动游戏引擎）
+   * 开始游戏对局（更新状态为 running）
    *
    * @param gameId - 游戏对局ID
    * @returns 更新后的游戏记录
@@ -206,23 +204,112 @@ export class GamesService {
     }
 
     // 2. 更新状态为 running
-    await this.prisma.game.update({
+    return this.prisma.game.update({
       where: { id: gameId },
       data: { status: GAME_STATUSES.RUNNING },
-    });
-
-    // 3. 启动游戏引擎（异步执行）
-    // 注意：这里不 await，让游戏在后台执行
-    this.gameExecutor.executeGame(gameId).catch((error) => {
-      this.logger.error(`游戏对局 ${gameId} 执行失败:`, error);
-    });
-
-    // 4. 立即返回（不等待游戏结束）
-    return this.prisma.game.findUnique({
-      where: { id: gameId },
       include: {
         players: { orderBy: { seatNo: 'asc' }, include: { agent: true } },
       },
     });
+  }
+
+  /**
+   * 获取所有需要恢复的对局
+   */
+  async getPendingRecoveryGames() {
+    return this.prisma.game.findMany({
+      where: { status: GAME_STATUSES.PENDING_RECOVERY },
+      select: {
+        id: true,
+        startedAt: true,
+        rulesetId: true,
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+  }
+
+  /**
+   * 暂停对局
+   */
+  async pauseGame(gameId: string) {
+    const game = await this.getGameById(gameId);
+
+    if (game.status !== GAME_STATUSES.RUNNING) {
+      throw new Error(`只能暂停 running 状态的对局，当前状态: ${game.status}`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.game.update({
+        where: { id: gameId },
+        data: { status: GAME_STATUSES.PAUSED },
+      });
+    });
+    this.gameExecutor.abortGame(gameId);
+    return this.prisma.game.findUnique({ where: { id: gameId } });
+  }
+
+  /**
+   * 更新游戏状态
+   */
+  async updateGameStatus(gameId: string, status: string) {
+    return this.prisma.game.update({
+      where: { id: gameId },
+      data: { status },
+    });
+  }
+
+  /**
+   * 继续对局
+   */
+  async resumeGame(gameId: string) {
+    const game = await this.getGameById(gameId);
+
+    if (game.status !== GAME_STATUSES.PAUSED) {
+      throw new Error(`只能继续 paused 状态的对局，当前状态: ${game.status}`);
+    }
+
+    return this.prisma.game.update({
+      where: { id: gameId },
+      data: { status: GAME_STATUSES.RUNNING },
+    });
+  }
+
+  /**
+   * 取消对局
+   */
+  async cancelGame(gameId: string): Promise<boolean> {
+    const game = await this.getGameById(gameId);
+
+    if (game.status === GAME_STATUSES.FINISHED || game.status === GAME_STATUSES.ABORTED) {
+      throw new Error(`对局已结束，无法取消`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.game.update({
+        where: { id: gameId },
+        data: {
+          status: GAME_STATUSES.ABORTED,
+          endedAt: new Date(),
+        },
+      });
+    });
+
+    this.gameExecutor.abortGame(gameId);
+
+    return true;
+  }
+
+  /**
+   * 清理所有待恢复对局（标记为 aborted）
+   */
+  async clearPendingRecovery(): Promise<number> {
+    const result = await this.prisma.game.updateMany({
+      where: { status: GAME_STATUSES.PENDING_RECOVERY },
+      data: {
+        status: GAME_STATUSES.ABORTED,
+        endedAt: new Date(),
+      },
+    });
+    return result.count;
   }
 }

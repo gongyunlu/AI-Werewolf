@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
@@ -8,8 +7,7 @@ import {
 } from '@/agent-runtime/tools/make-speech.tool';
 import { createSkipActionTool } from '@/agent-runtime/tools/skip-action.tool';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
-
-const logger = new Logger('SpeechNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 发言阶段节点
@@ -22,7 +20,7 @@ const logger = new Logger('SpeechNode');
  */
 export const createSpeechNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    logger.log(`[发言阶段] Day ${state.currentDay} 开始发言`);
+    gameLogger.debug(`[发言阶段] Day ${state.currentDay} 开始发言`);
 
     const alivePlayers = state.players.filter((p) => p.isAlive);
 
@@ -59,7 +57,7 @@ export const createSpeechNode: NodeFactory = (context) => {
           const toolResult = result.result as MakeSpeechOutput;
 
           if (toolResult.action === 'make_speech') {
-            logger.log(`[发言阶段] ${player.seatNo}号位发言: ${toolResult.content}`);
+            gameLogger.debug(`[发言阶段] ${player.seatNo}号位发言: ${toolResult.content}`);
 
             // 写入 Event 表
             await context.eventWriter.writePlayerSpeechEvent({
@@ -71,15 +69,15 @@ export const createSpeechNode: NodeFactory = (context) => {
               thinking: result.thinking, // 传递推理过程
             });
           } else {
-            logger.log(`[发言阶段] ${player.seatNo}号位跳过发言`);
+            gameLogger.debug(`[发言阶段] ${player.seatNo}号位跳过发言`);
           }
         } else {
-          logger.warn(
+          gameLogger.warn(
             `[发言阶段] ${player.seatNo}号位 Agent 调用失败。原因: ${result.error || 'success=false 或 result 为空'}`,
           );
         }
       } catch (error) {
-        logger.error(
+        gameLogger.error(
           `[发言阶段] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,
         );
       }

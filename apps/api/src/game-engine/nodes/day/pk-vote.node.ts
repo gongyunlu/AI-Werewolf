@@ -1,12 +1,10 @@
-import { Logger } from '@nestjs/common';
 import type { NodeFactory } from '../node.types';
 import type { GameGraphState } from '../../core/types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
 import { createCastVoteTool, type CastVoteOutput } from '@/agent-runtime/tools/cast-vote.tool';
 import { resolveVotes } from '../../rules/vote-resolution';
-
-const logger = new Logger('PkVoteNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * PK 投票节点
@@ -16,22 +14,22 @@ const logger = new Logger('PkVoteNode');
  */
 export const createPkVoteNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    logger.log(`[PK投票] Day ${state.currentDay} - PK轮次 ${state.pkRound}`);
+    gameLogger.debug(`[PK投票] Day ${state.currentDay} - PK轮次 ${state.pkRound}`);
 
     // 检查是否有 PK 候选人
     if (!state.pkCandidates || state.pkCandidates.length === 0) {
-      logger.log('[PK投票] 无PK候选人，跳过');
+      gameLogger.debug('[PK投票] 无PK候选人，跳过');
       return {};
     }
 
-    logger.log(`[PK投票] PK候选人: ${state.pkCandidates.join(', ')}号位`);
+    gameLogger.debug(`[PK投票] PK候选人: ${state.pkCandidates.join(', ')}号位`);
 
     // 获取所有存活玩家（排除 PK 候选人）
     const alivePlayers = state.players.filter((p) => p.isAlive);
     const voters = alivePlayers.filter((p) => !state.pkCandidates!.includes(p.seatNo!));
 
     if (voters.length === 0) {
-      logger.warn('[PK投票] 没有可投票的玩家（所有存活玩家都在PK台上），跳过放逐');
+      gameLogger.warn('[PK投票] 没有可投票的玩家（所有存活玩家都在PK台上），跳过放逐');
       return {
         exileTarget: null,
         exileVoteCount: 0,
@@ -40,11 +38,11 @@ export const createPkVoteNode: NodeFactory = (context) => {
       };
     }
 
-    logger.log(`[PK投票] 投票玩家: ${voters.map((p) => p.seatNo).join(', ')}号位`);
+    gameLogger.debug(`[PK投票] 投票玩家: ${voters.map((p) => p.seatNo).join(', ')}号位`);
 
     // 并行投票
     const votePromises = voters.map(async (player) => {
-      logger.log(`[PK投票] ${player.seatNo}号位开始投票...`);
+      gameLogger.debug(`[PK投票] ${player.seatNo}号位开始投票...`);
 
       try {
         const tools = [
@@ -70,7 +68,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
           const toolResult = result.result as CastVoteOutput;
 
           if (toolResult.action === 'cast_vote') {
-            logger.log(`[PK投票] ${player.seatNo}号位投票给 ${toolResult.targetSeatNo}号位`);
+            gameLogger.debug(`[PK投票] ${player.seatNo}号位投票给 ${toolResult.targetSeatNo}号位`);
 
             await context.eventWriter.writePlayerVoteEvent({
               gameId: state.gameId,
@@ -87,12 +85,12 @@ export const createPkVoteNode: NodeFactory = (context) => {
             };
           }
         } else {
-          logger.warn(
+          gameLogger.warn(
             `[PK投票] ${player.seatNo}号位 Agent 调用失败。原因: ${result.error || 'success=false 或 result 为空'}`,
           );
         }
       } catch (error) {
-        logger.error(
+        gameLogger.error(
           `[PK投票] ${player.seatNo}号位投票出错: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -108,7 +106,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
 
     // 降级策略：如果没有有效投票，随机从PK候选人中选一个
     if (votes.length === 0) {
-      logger.warn('[PK投票] 无有效投票，启用降级策略：随机选择一个PK候选人放逐');
+      gameLogger.warn('[PK投票] 无有效投票，启用降级策略：随机选择一个PK候选人放逐');
       const randomSeatNo =
         state.pkCandidates[Math.floor(Math.random() * state.pkCandidates.length)];
       const exiledPlayer = state.players.find((p) => p.seatNo === randomSeatNo);
@@ -135,7 +133,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
 
     // 二次降级：如果构建的投票数据为空（理论上不应发生）
     if (votesMap.size === 0) {
-      logger.warn('[PK投票] 投票数据为空，启用降级策略：随机选择一个PK候选人放逐');
+      gameLogger.warn('[PK投票] 投票数据为空，启用降级策略：随机选择一个PK候选人放逐');
       const randomSeatNo =
         state.pkCandidates[Math.floor(Math.random() * state.pkCandidates.length)];
       const exiledPlayer = state.players.find((p) => p.seatNo === randomSeatNo);
@@ -168,7 +166,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
       }
     }
 
-    logger.log(
+    gameLogger.debug(
       `[PK投票] 得票统计: ${Array.from(voteCountBySeat.entries())
         .map(([seat, count]) => `${seat}号位(${count}票)`)
         .join(', ')}`,
@@ -180,7 +178,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
         .map((id) => state.players.find((p) => p.id === id)?.seatNo)
         .filter((seatNo): seatNo is number => seatNo !== undefined);
 
-      logger.log(`[PK投票] PK再次平票: ${tiedSeatNos.join(', ')}号位，无人被放逐`);
+      gameLogger.debug(`[PK投票] PK再次平票: ${tiedSeatNos.join(', ')}号位，无人被放逐`);
       return {
         exileTarget: null,
         exileVoteCount: voteCountBySeat.size > 0 ? Math.max(...voteCountBySeat.values()) : 0,
@@ -193,7 +191,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
     const exiledPlayer = state.players.find((p) => p.id === result.executedPlayerId);
 
     if (exiledPlayer) {
-      logger.log(`[PK投票] 放逐目标: ${exiledPlayer.seatNo}号位 (${exiledPlayer.id})`);
+      gameLogger.debug(`[PK投票] 放逐目标: ${exiledPlayer.seatNo}号位 (${exiledPlayer.id})`);
       return {
         exileTarget: exiledPlayer.id,
         exileVoteCount: voteCountBySeat.get(exiledPlayer.seatNo) || 0,
@@ -202,7 +200,7 @@ export const createPkVoteNode: NodeFactory = (context) => {
       };
     }
 
-    logger.warn('[PK投票] 未找到放逐目标，跳过');
+    gameLogger.warn('[PK投票] 未找到放逐目标，跳过');
     return {
       exileTarget: null,
       pkCandidates: null,

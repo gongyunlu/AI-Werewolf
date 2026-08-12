@@ -1,14 +1,13 @@
 import { Module } from '@nestjs/common';
 import { GamesController } from './games.controller';
 import { GamesService } from './games.service';
-import { GameExecutorService } from './game-executor.service';
-import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
-import { GameEngineModule } from '../game-engine/core/game-engine.module';
+import { GameExecutorModule } from '../game-executor/game-executor.module';
+import { GameQueueModule } from '../game-queue/game-queue.module';
 
 @Module({
-  imports: [AgentRuntimeModule, GameEngineModule],
+  imports: [GameExecutorModule, GameQueueModule],
   controllers: [GamesController],
-  providers: [GamesService, GameExecutorService],
+  providers: [GamesService],
   exports: [GamesService],
 })
 export class GamesModule {}

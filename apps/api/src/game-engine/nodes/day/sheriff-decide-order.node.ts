@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
 import type { GameGraphState } from '@/game-engine/core/types';
 import type { NodeFactory } from '@/game-engine/nodes/node.types';
@@ -12,6 +11,7 @@ import {
   type SpeechOrderConfig,
 } from '@/game-engine/utils/speech-order.utils';
 import type { TypedRuleset } from '@/prisma/typed-models';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 警长决定发言顺序节点
@@ -22,8 +22,6 @@ import type { TypedRuleset } from '@/prisma/typed-models';
  * - 如果警长决策失败，使用默认规则
  */
 export const createSheriffDecideOrderNode: NodeFactory = (context) => {
-  const logger = new Logger('SheriffDecideOrderNode');
-
   return async (state: GameGraphState) => {
     const alivePlayers = state.players.filter((p) => p.isAlive);
     const sheriff = alivePlayers.find((p) => p.isSheriff);
@@ -88,7 +86,7 @@ export const createSheriffDecideOrderNode: NodeFactory = (context) => {
         }
       }
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -101,7 +99,7 @@ export const createSheriffDecideOrderNode: NodeFactory = (context) => {
       sheriffChoice,
     });
 
-    logger.log(
+    gameLogger.debug(
       `[警长决定发言顺序] 按 ${orderResult.direction === 'clockwise' ? '顺时针' : '逆时针'}顺序发言`,
     );
 

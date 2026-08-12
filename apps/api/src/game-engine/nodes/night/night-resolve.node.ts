@@ -1,21 +1,16 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { resolveNightPhase } from '../../coordinators/phase-resolvers';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 夜间结算节点
  */
 export const createNightResolveNode: NodeFactory = (context) => {
-  const logger = new Logger('NightResolveNode');
-
   return async (state: GameGraphState) => {
-    logger.log('[夜间结算] 开始结算');
-
-    // 复用已有的结算逻辑
     const result = await resolveNightPhase(state);
 
-    logger.log(`[夜间结算] 完成，死亡人数: ${result.nightDeaths?.length ?? 0}`);
+    gameLogger.debug(`[夜间结算] 完成，死亡人数: ${result.nightDeaths?.length ?? 0}`);
 
     // 更新数据库中的玩家死亡状态
     if (result.players) {

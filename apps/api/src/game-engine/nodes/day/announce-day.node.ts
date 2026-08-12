@@ -1,17 +1,15 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 白天公布死讯节点
  */
 export const createAnnounceDayNode: NodeFactory = (context) => {
-  const logger = new Logger('AnnounceDayNode');
-
   return async (state: GameGraphState) => {
     if (state.nightDeaths?.length) {
       const deadPlayerIds = state.nightDeaths.map((d) => d.playerId).join(', ');
-      logger.log(`[白天公布] 昨晚死亡的玩家是: ${deadPlayerIds}`);
+      gameLogger.log(`[死亡公告] 昨晚死亡的玩家: ${deadPlayerIds}`);
 
       // 写入死亡公告 Event
       const deaths = state.nightDeaths.map((d) => {
@@ -32,7 +30,7 @@ export const createAnnounceDayNode: NodeFactory = (context) => {
         deaths,
       });
     } else {
-      logger.log(`[白天公布] 昨晚平安夜`);
+      gameLogger.log(`[死亡公告] 昨晚平安夜`);
 
       // 写入平安夜 Event
       await context.eventWriter.writePeacefulNightEvent({

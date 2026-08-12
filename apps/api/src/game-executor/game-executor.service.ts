@@ -10,6 +10,10 @@ import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.validation';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
+import {
+  GamePausedException,
+  GameAbortedException,
+} from '../game-engine/core/game-engine.exception';
 
 /**
  * 游戏执行服务
@@ -23,6 +27,7 @@ import { GAME_STATUSES } from '@ai-werewolf/shared';
 export class GameExecutorService {
   private readonly logger = new Logger(GameExecutorService.name);
   private checkpointer: PostgresSaver | null = null;
+  private abortControllers = new Map<string, AbortController>(); // 存储每个游戏的 AbortController
 
   constructor(
     private readonly prisma: PrismaService,
@@ -94,11 +99,24 @@ export class GameExecutorService {
       this.eventWriter,
     );
 
-    // 4. 运行游戏
-    try {
-      const finalState = await engine.run(initialState, 100, checkpointer, preset); // maxRecursion = 100
+    // 4. 创建 AbortController（用于中断游戏）
+    const abortController = new AbortController();
+    this.abortControllers.set(gameId, abortController);
 
-      // 5. 更新游戏结束状态
+    // 5. 运行游戏
+    try {
+      // LangGraph 会自动检测 checkpoint 是否存在：
+      // - 如果存在同 thread_id 的 checkpoint，会从断点恢复
+      // - 如果不存在，会从 initialState 开始执行
+      const finalState = await engine.run(
+        initialState,
+        100,
+        checkpointer,
+        preset,
+        abortController.signal,
+      );
+
+      // 6. 更新游戏结束状态
       await this.prisma.game.update({
         where: { id: gameId },
         data: {
@@ -110,22 +128,36 @@ export class GameExecutorService {
       });
 
       this.logger.log(`游戏对局 ${gameId} 执行完成，胜方: ${finalState.winner}`);
+
       return finalState;
     } catch (error) {
-      this.logger.error(
-        `游戏对局 ${gameId} 执行失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (error instanceof GamePausedException) {
+        return initialState;
+      }
 
-      await this.prisma.game.update({
-        where: { id: gameId },
-        data: {
-          status: GAME_STATUSES.ABORTED,
-          endedAt: new Date(),
-        },
-      });
-
+      if (error instanceof GameAbortedException) {
+        return initialState;
+      }
       throw error;
+    } finally {
+      this.abortControllers.delete(gameId);
     }
+  }
+
+  /**
+   * 中断游戏执行（立即终止 LLM 调用）
+   *
+   * @param gameId - 游戏对局ID
+   * @returns 是否成功中断
+   */
+  abortGame(gameId: string): boolean {
+    const abortController = this.abortControllers.get(gameId);
+    if (abortController) {
+      abortController.abort();
+      this.logger.log(`已发送中断信号到游戏: ${gameId}`);
+      return true;
+    }
+    return false;
   }
 
   /**

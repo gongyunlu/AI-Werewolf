@@ -1,6 +1,6 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
 import type { GameNode } from '../node.types';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 初始化节点
@@ -14,16 +14,14 @@ import type { GameNode } from '../node.types';
  * 输出：完整的初始化状态
  */
 export const initNode: GameNode = async (state: GameGraphState) => {
-  const logger = new Logger('InitNode');
-
-  logger.log('[初始化] 游戏开始');
+  gameLogger.log('[初始化] 游戏开始');
 
   // 验证玩家配置
   if (!state.players || state.players.length === 0) {
     throw new Error('[初始化] 玩家列表为空');
   }
 
-  logger.log(`[初始化] 玩家数量: ${state.players.length}`);
+  gameLogger.debug(`[初始化] 玩家数量: ${state.players.length}`);
 
   // 设置初始状态
   return {

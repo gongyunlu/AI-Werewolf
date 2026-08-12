@@ -6,6 +6,8 @@ export const GAME_STATUSES = {
   INITIALIZED: 'initialized', // 已初始化
   PENDING: 'pending', // 待开始
   RUNNING: 'running', // 进行中
+  PAUSED: 'paused', // 已暂停
+  PENDING_RECOVERY: 'pending_recovery', // 待恢复（重启后需要手动恢复）
   FINISHED: 'finished', // 正常结束
   ABORTED: 'aborted', // 异常终止
 } as const;

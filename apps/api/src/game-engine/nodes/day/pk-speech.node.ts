@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import type { NodeFactory } from '../node.types';
 import type { GameGraphState } from '../../core/types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
@@ -8,8 +7,7 @@ import {
   type MakeSpeechOutput,
 } from '@/agent-runtime/tools/make-speech.tool';
 import { createSkipActionTool } from '@/agent-runtime/tools/skip-action.tool';
-
-const logger = new Logger('PkSpeechNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * PK 发言节点
@@ -18,15 +16,15 @@ const logger = new Logger('PkSpeechNode');
  */
 export const createPkSpeechNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    logger.log(`[PK发言] Day ${state.currentDay} - PK轮次 ${state.pkRound}`);
+    gameLogger.debug(`[PK发言] Day ${state.currentDay} - PK轮次 ${state.pkRound}`);
 
     // 检查是否有 PK 候选人
     if (!state.pkCandidates || state.pkCandidates.length === 0) {
-      logger.log('[PK发言] 无PK候选人，跳过');
+      gameLogger.debug('[PK发言] 无PK候选人，跳过');
       return {};
     }
 
-    logger.log(`[PK发言] PK候选人: ${state.pkCandidates.join(', ')}号位`);
+    gameLogger.debug(`[PK发言] PK候选人: ${state.pkCandidates.join(', ')}号位`);
 
     // 获取 PK 候选人的 Player 对象
     const pkPlayers = state.players.filter(
@@ -37,7 +35,7 @@ export const createPkSpeechNode: NodeFactory = (context) => {
     pkPlayers.sort((a, b) => a.seatNo! - b.seatNo!);
 
     for (const player of pkPlayers) {
-      logger.log(`[PK发言] ${player.seatNo}号位开始PK发言...`);
+      gameLogger.debug(`[PK发言] ${player.seatNo}号位开始PK发言...`);
 
       try {
         const tools = [
@@ -59,7 +57,7 @@ export const createPkSpeechNode: NodeFactory = (context) => {
           const toolResult = result.result as MakeSpeechOutput;
 
           if (toolResult.action === 'make_speech') {
-            logger.log(`[PK发言] ${player.seatNo}号位: ${toolResult.content}`);
+            gameLogger.debug(`[PK发言] ${player.seatNo}号位: ${toolResult.content}`);
 
             // 写入 Event 表
             await context.eventWriter.writePlayerSpeechEvent({
@@ -71,21 +69,21 @@ export const createPkSpeechNode: NodeFactory = (context) => {
               thinking: result.thinking,
             });
           } else {
-            logger.log(`[PK发言] ${player.seatNo}号位跳过发言`);
+            gameLogger.debug(`[PK发言] ${player.seatNo}号位跳过发言`);
           }
         } else {
-          logger.warn(
+          gameLogger.warn(
             `[PK发言] ${player.seatNo}号位 Agent 调用失败。原因: ${result.error || 'success=false 或 result 为空'}`,
           );
         }
       } catch (error) {
-        logger.error(
+        gameLogger.error(
           `[PK发言] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
 
-    logger.log('[PK发言] PK发言阶段结束');
+    gameLogger.debug('[PK发言] PK发言阶段结束');
     return {};
   };
 };

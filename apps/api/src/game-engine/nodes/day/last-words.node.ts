@@ -1,10 +1,8 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState, GameGraphUpdate } from '../../core/types';
 import type { NodeContext, GameNode } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
-
-const logger = new Logger('LastWordsNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 遗言节点工厂
@@ -55,7 +53,7 @@ async function lastWordsNode(
 
   // 按座位号顺序发表遗言
   for (const player of deadLastNight) {
-    logger.log(`[遗言阶段] ${player.seatNo}号位开始遗言`);
+    gameLogger.debug(`[遗言阶段] ${player.seatNo}号位开始遗言`);
 
     // 调用 Agent 生成遗言
     try {
@@ -78,7 +76,7 @@ async function lastWordsNode(
         const toolResult = result.result as { action: string; content?: string };
 
         if (toolResult.action === 'make_speech' && toolResult.content) {
-          logger.log(`[遗言阶段] ${player.seatNo}号位遗言: ${toolResult.content}`);
+          gameLogger.debug(`[遗言阶段] ${player.seatNo}号位遗言: ${toolResult.content}`);
 
           // 写入遗言事件
           if (player.seatNo !== null) {
@@ -91,15 +89,15 @@ async function lastWordsNode(
             });
           }
         } else {
-          logger.log(`[遗言阶段] ${player.seatNo}号位选择不发表遗言`);
+          gameLogger.debug(`[遗言阶段] ${player.seatNo}号位选择不发表遗言`);
         }
       } else {
-        logger.warn(
+        gameLogger.warn(
           `[遗言阶段] ${player.seatNo}号位遗言 Agent 调用失败，跳过。原因: ${result.error || 'success=false 或 result 为空'}`,
         );
       }
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[遗言阶段] ${player.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,
       );
     }

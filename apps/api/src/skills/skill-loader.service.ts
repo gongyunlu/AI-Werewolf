@@ -28,8 +28,6 @@ export class SkillLoaderService {
     // 从环境变量读取 SKILLS_DIR，如果未配置则使用默认路径
     const envSkillsDir = this.configService.get('SKILLS_DIR');
     this.skillsDir = envSkillsDir || path.join(__dirname, '..', 'skills');
-
-    console.log(`[SkillLoader] Skill 目录: ${this.skillsDir}`);
   }
 
   /**
@@ -100,8 +98,6 @@ export class SkillLoaderService {
       this.cache.set(cacheKey, content);
       return content;
     } catch {
-      // 战术文件不存在时返回空字符串（战术是可选的）
-      console.warn(`[SkillLoader] 战术文件不存在: ${filePath}`);
       return '';
     }
   }
@@ -135,7 +131,6 @@ export class SkillLoaderService {
       this.cache.set(cacheKey, combined);
       return combined;
     } catch {
-      console.warn(`[SkillLoader] 战术目录不存在: ${dirPath}`);
       return '';
     }
   }
@@ -176,7 +171,6 @@ export class SkillLoaderService {
 
     // 复制整个目录
     await fs.cp(fromDir, toDir, { recursive: true });
-    console.log(`[SkillLoader] 创建新版本: ${fromVersion} -> ${toVersion}`);
   }
 
   /**

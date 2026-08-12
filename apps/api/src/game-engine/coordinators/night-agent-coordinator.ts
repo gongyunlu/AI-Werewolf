@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { PrismaService } from '@/prisma/prisma.service';
 import type { GameGraphState } from '../core/types';
 import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
+import { gameLogger } from '../utils/game-logger';
 
 /**
  * 夜间 Agent 协调器
@@ -15,8 +16,6 @@ import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
  */
 @Injectable()
 export class NightAgentCoordinator {
-  private readonly logger = new Logger(NightAgentCoordinator.name);
-
   constructor(
     private readonly agentRuntime: AgentRuntimeService,
     private readonly toolsFactory: AgentToolsFactory,
@@ -38,7 +37,7 @@ export class NightAgentCoordinator {
     const { gameId, players } = state;
     const alivePlayers = players.filter((p) => p.isAlive);
 
-    this.logger.log(`[夜间派发] 开始派发夜间 Agent，存活玩家: ${alivePlayers.length}`);
+    gameLogger.debug(`[夜间派发] 开始派发夜间 Agent，存活玩家: ${alivePlayers.length}`);
 
     // 找出需要行动的角色
     const werewolves = alivePlayers.filter((p) => p.role === ROLES.WEREWOLF);
@@ -53,10 +52,10 @@ export class NightAgentCoordinator {
         const wolfResult = await this.dispatchWerewolfTeam(gameId, werewolves);
         if (wolfResult) {
           updates.wolfTarget = wolfResult.targetPlayerId;
-          this.logger.log(`[夜间派发] 狼队决定刀: ${wolfResult.targetPlayerId}`);
+          gameLogger.debug(`[夜间派发] 狼队决定刀: ${wolfResult.targetPlayerId}`);
         }
       } catch (error) {
-        this.logger.warn(
+        gameLogger.warn(
           `[夜间派发] 狼队决策失败: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -74,15 +73,15 @@ export class NightAgentCoordinator {
         if (witchResult) {
           if (witchResult.antidoteTarget) {
             updates.witchAntidoteTarget = witchResult.antidoteTarget;
-            this.logger.log(`[夜间派发] 女巫使用解药: ${witchResult.antidoteTarget}`);
+            gameLogger.debug(`[夜间派发] 女巫使用解药: ${witchResult.antidoteTarget}`);
           }
           if (witchResult.poisonTarget) {
             updates.witchPoisonTarget = witchResult.poisonTarget;
-            this.logger.log(`[夜间派发] 女巫使用毒药: ${witchResult.poisonTarget}`);
+            gameLogger.debug(`[夜间派发] 女巫使用毒药: ${witchResult.poisonTarget}`);
           }
         }
       } catch (error) {
-        this.logger.warn(
+        gameLogger.warn(
           `[夜间派发] 女巫决策失败: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -94,16 +93,16 @@ export class NightAgentCoordinator {
         const seerResult = await this.dispatchSeer(gameId, seer.id);
         if (seerResult) {
           updates.seerCheckTarget = seerResult.targetSeatNo;
-          this.logger.log(`[夜间派发] 预言家查验: ${seerResult.targetSeatNo} 号位`);
+          gameLogger.debug(`[夜间派发] 预言家查验: ${seerResult.targetSeatNo} 号位`);
         }
       } catch (error) {
-        this.logger.warn(
+        gameLogger.warn(
           `[夜间派发] 预言家决策失败: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
 
-    this.logger.log(`[夜间派发] 所有 Agent 决策完成`);
+    gameLogger.debug(`[夜间派发] 所有 Agent 决策完成`);
 
     return updates;
   }
@@ -133,7 +132,7 @@ export class NightAgentCoordinator {
     });
 
     if (!result.success || !result.result) {
-      this.logger.warn(`[狼队] Agent 执行失败: ${result.error}`);
+      gameLogger.warn(`[狼队] Agent 执行失败: ${result.error}`);
       return null;
     }
 
@@ -151,14 +150,14 @@ export class NightAgentCoordinator {
       });
 
       if (!player) {
-        this.logger.warn(`[狼队] 未找到座位号 ${toolResult.targetSeatNo} 对应的玩家`);
+        gameLogger.warn(`[狼队] 未找到座位号 ${toolResult.targetSeatNo} 对应的玩家`);
         return null;
       }
 
       return { targetPlayerId: player.id };
     }
 
-    this.logger.warn(`[狼队] Agent 未调用 propose_kill 工具`);
+    gameLogger.warn(`[狼队] Agent 未调用 propose_kill 工具`);
     return null;
   }
 
@@ -183,7 +182,7 @@ export class NightAgentCoordinator {
     });
 
     if (!result.success || !result.result) {
-      this.logger.warn(`[预言家] Agent 执行失败: ${result.error}`);
+      gameLogger.warn(`[预言家] Agent 执行失败: ${result.error}`);
       return null;
     }
 
@@ -194,7 +193,7 @@ export class NightAgentCoordinator {
       return { targetSeatNo: toolResult.targetSeatNo };
     }
 
-    this.logger.warn(`[预言家] Agent 未调用 check_identity 工具`);
+    gameLogger.warn(`[预言家] Agent 未调用 check_identity 工具`);
     return null;
   }
 
@@ -239,7 +238,7 @@ export class NightAgentCoordinator {
     });
 
     if (!result.success || !result.result) {
-      this.logger.warn(`[女巫] Agent 执行失败: ${result.error}`);
+      gameLogger.warn(`[女巫] Agent 执行失败: ${result.error}`);
       return null;
     }
 

@@ -3,13 +3,16 @@ import { StateGraph, START, END, MemorySaver } from '@langchain/langgraph';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import { GameStateAnnotation, GAME_NODE, type GameGraphState, type GameGraphUpdate } from './types';
 import { nodeRegistry } from '../nodes/node-registry';
-import type { NodeContext } from '../nodes/node.types';
+import type { NodeContext, GameNode } from '../nodes/node.types';
 import type { GamePreset } from '../presets/game-presets';
 import { DEFAULT_PRESET } from '../presets/game-presets';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EventWriterService } from '../events/event-writer.service';
+import { GamePausedException, GameAbortedException } from './game-engine.exception';
+import { GAME_STATUSES } from '@ai-werewolf/shared';
+import { gameLogger } from '../utils/game-logger';
 
 /**
  * 狼人杀游戏引擎（配置驱动的管道架构）
@@ -29,6 +32,8 @@ export class GameEngine {
   private nodeContext: NodeContext;
   private preset?: GamePreset;
   private initialized = false;
+  private pauseCheckCache: { status: string; timestamp: number } | null = null;
+  private readonly PAUSE_CHECK_CACHE_TTL = 1000; // 1秒缓存
 
   /**
    * @param agentRuntime Agent 运行时服务
@@ -59,16 +64,68 @@ export class GameEngine {
 
     // 设置板子配置
     this.preset = preset ?? DEFAULT_PRESET;
-    this.logger.log(`使用板子配置: ${this.preset.name}`);
+    gameLogger.log(`使用板子配置: ${this.preset.name}`);
 
     // 验证配置合法性
     this.validatePreset(this.preset);
+
+    // 将 preset 注入到 nodeContext，供 NIGHT/DAY 节点使用
+    this.nodeContext.preset = this.preset;
+
+    // 注入暂停检查包装器到 nodeRegistry
+    // 这样所有从 nodeRegistry 获取的节点都会自动被包装
+    nodeRegistry.setPauseCheckWrapper((node: GameNode) => {
+      return this.wrapNodeWithPauseCheck(node);
+    });
 
     // 构建图
     this.checkpointer = checkpointer ?? new MemorySaver();
     this.graph = this.buildGraph();
 
     this.initialized = true;
+  }
+
+  /**
+   * 检查游戏是否被暂停或取消
+   */
+  private async checkPause(state: GameGraphState): Promise<void> {
+    const now = Date.now();
+
+    if (this.pauseCheckCache && now - this.pauseCheckCache.timestamp < this.PAUSE_CHECK_CACHE_TTL) {
+      if (this.pauseCheckCache.status === GAME_STATUSES.ABORTED) {
+        throw new GameAbortedException(state.gameId);
+      }
+      if (this.pauseCheckCache.status === GAME_STATUSES.PAUSED) {
+        throw new GamePausedException(state.gameId);
+      }
+      return;
+    }
+
+    const game = await this.prisma.game.findUnique({
+      where: { id: state.gameId },
+      select: { status: true },
+    });
+
+    if (game) {
+      this.pauseCheckCache = { status: game.status, timestamp: now };
+    }
+
+    if (game?.status === GAME_STATUSES.ABORTED) {
+      throw new GameAbortedException(state.gameId);
+    }
+    if (game?.status === GAME_STATUSES.PAUSED) {
+      throw new GamePausedException(state.gameId);
+    }
+  }
+
+  /**
+   * 自动注入暂停检查
+   */
+  private wrapNodeWithPauseCheck(node: GameNode): GameNode {
+    return async (state: GameGraphState): Promise<GameGraphUpdate> => {
+      await this.checkPause(state);
+      return node(state);
+    };
   }
 
   /**
@@ -95,7 +152,7 @@ export class GameEngine {
       }
     }
 
-    this.logger.log(`配置验证通过: ${preset.name}`);
+    gameLogger.debug(`配置验证通过: ${preset.name}`);
   }
 
   /**
@@ -114,7 +171,6 @@ export class GameEngine {
     }
 
     const log = this.logger;
-    const preset = this.preset; // 提取到局部变量，避免类型问题
 
     const workflow = new StateGraph(GameStateAnnotation)
       // 1. 初始化节点
@@ -123,52 +179,17 @@ export class GameEngine {
         return await node(state);
       })
 
-      // 2. 夜晚阶段：管道化执行所有夜间节点
+      // 2. 夜晚阶段
       .addNode(GAME_NODE.NIGHT, async (state: GameGraphState): Promise<GameGraphUpdate> => {
-        log.log(`[${GAME_NODE.NIGHT}] Day ${state.currentDay} 夜晚开始`);
-
-        // 执行夜间管道
-        let currentState = state;
-        for (const nodeName of preset.nightPipeline) {
-          const node = nodeRegistry.getNode(nodeName, this.nodeContext);
-          const updates = await node(currentState);
-          currentState = Object.assign({}, currentState, updates);
-        }
-
-        log.log(`[${GAME_NODE.NIGHT}] 夜晚阶段完成`);
-
-        // 夜晚结束，标记下一阶段是白天
-        return Object.assign({}, currentState, { nextIsDay: true });
+        const node = nodeRegistry.getNode('nightPipeline', this.nodeContext);
+        return await node(state);
       })
 
-      // 3. 白天阶段：管道化执行所有白天节点
       .addNode(GAME_NODE.DAY, async (state: GameGraphState): Promise<GameGraphUpdate> => {
-        log.log(`[day] Day ${state.currentDay} 白天阶段`);
-
-        // 执行白天管道
-        let currentState = state;
-        for (const nodeName of preset.dayPipeline) {
-          const node = nodeRegistry.getNode(nodeName, this.nodeContext);
-          const updates = await node(currentState);
-          currentState = Object.assign({}, currentState, updates);
-
-          // 如果游戏已结束，立即中断白天管道
-          if (currentState.isGameOver) {
-            log.log(`[day] 游戏结束，胜方: ${currentState.winner}`);
-            break;
-          }
-        }
-
-        log.log(`[day] 白天阶段完成`);
-
-        // 白天结束，天数 +1，标记下一阶段是夜晚
-        return Object.assign({}, currentState, {
-          currentDay: currentState.currentDay + 1,
-          nextIsDay: false,
-        });
+        const node = nodeRegistry.getNode('dayPipeline', this.nodeContext);
+        return await node(state);
       })
 
-      // 4. 胜负判定节点
       .addNode(GAME_NODE.CHECK_WIN, async (state: GameGraphState): Promise<GameGraphUpdate> => {
         const node = nodeRegistry.getNode('checkWin', this.nodeContext);
         return await node(state);
@@ -233,27 +254,52 @@ export class GameEngine {
    * @param maxRecursion 最大递归深度（默认 25，防止无限循环）
    * @param checkpointer 可选的 checkpointer（首次运行时设置）
    * @param preset 可选的板子配置（首次运行时设置）
+   * @param signal AbortSignal 用于中断执行
    */
   async run(
     initialState: GameGraphState,
     maxRecursion = 25,
     checkpointer?: MemorySaver | PostgresSaver,
     preset?: GamePreset,
+    signal?: AbortSignal,
   ) {
     // 延迟初始化：仅在首次 run 时执行
     this.initialize(checkpointer, preset);
 
+    // 将 signal 注入到 nodeContext，传递给所有节点
+    if (signal) {
+      this.nodeContext.signal = signal;
+    }
+
     const compiled = this.compile();
-    this.logger.log('对局开始');
+    gameLogger.log(`[游戏开始] gameId: ${initialState.gameId}`);
 
-    const result = await compiled.invoke(initialState, {
-      recursionLimit: maxRecursion,
-      configurable: {
-        thread_id: initialState.gameId, // 使用 gameId 作为 thread_id
-      },
-    });
+    try {
+      // LangGraph 的 invoke 方法会自动检查 checkpoint：
+      // - 如果存在相同 thread_id 的 checkpoint，会从断点恢复
+      // - 如果不存在，会使用 initialState 开始执行
+      const result = await compiled.invoke(initialState, {
+        recursionLimit: maxRecursion,
+        configurable: {
+          thread_id: initialState.gameId, // 使用 gameId 作为 thread_id
+        },
+      });
 
-    this.logger.log(`对局结束，胜方: ${result.winner ?? '未产生'}`);
-    return result;
+      gameLogger.log(`[游戏结束] 胜方: ${result.winner ?? '未产生'}`);
+      return result;
+    } catch (error) {
+      if (error instanceof GamePausedException) {
+        throw error;
+      }
+
+      if (error instanceof GameAbortedException) {
+        throw error;
+      }
+
+      throw error;
+    } finally {
+      this.pauseCheckCache = null;
+      nodeRegistry.clearPauseCheckWrapper();
+    }
   }
 }

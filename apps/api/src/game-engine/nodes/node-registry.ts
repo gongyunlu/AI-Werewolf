@@ -19,6 +19,8 @@ import { createSheriffDecideOrderNode } from './day/sheriff-decide-order.node';
 import { createCalculateSpeechOrderNode } from './day/calculate-speech-order.node';
 import { createPkSpeechNode } from './day/pk-speech.node';
 import { createPkVoteNode } from './day/pk-vote.node';
+import { createNightPipelineNode } from './pipeline/night-pipeline.node';
+import { createDayPipelineNode } from './pipeline/day-pipeline.node';
 
 /**
  * 节点注册表
@@ -28,9 +30,24 @@ import { createPkVoteNode } from './day/pk-vote.node';
 export class NodeRegistry {
   private factories: Map<string, NodeFactory> = new Map();
   private staticNodes: Map<string, GameNode> = new Map();
+  private pauseCheckWrapper?: (node: GameNode) => GameNode;
 
   constructor() {
     this.registerDefaultNodes();
+  }
+
+  /**
+   * 设置暂停检查包装器（由 GameEngine 注入）
+   */
+  setPauseCheckWrapper(wrapper: (node: GameNode) => GameNode) {
+    this.pauseCheckWrapper = wrapper;
+  }
+
+  /**
+   * 清除暂停检查包装器
+   */
+  clearPauseCheckWrapper() {
+    this.pauseCheckWrapper = undefined;
   }
 
   /**
@@ -38,6 +55,8 @@ export class NodeRegistry {
    */
   private registerDefaultNodes() {
     // 需要依赖注入的节点（工厂模式）
+    this.factories.set('nightPipeline', createNightPipelineNode);
+    this.factories.set('dayPipeline', createDayPipelineNode);
     this.factories.set('werewolfKill', createWerewolfKillNode);
     this.factories.set('witchAntidote', createWitchAntidoteNode);
     this.factories.set('witchPoison', createWitchPoisonNode);
@@ -83,13 +102,14 @@ export class NodeRegistry {
     // 优先查找静态节点
     const staticNode = this.staticNodes.get(name);
     if (staticNode) {
-      return staticNode;
+      return this.pauseCheckWrapper ? this.pauseCheckWrapper(staticNode) : staticNode;
     }
 
     // 查找工厂并构建节点
     const factory = this.factories.get(name);
     if (factory) {
-      return factory(context);
+      const node = factory(context);
+      return this.pauseCheckWrapper ? this.pauseCheckWrapper(node) : node;
     }
 
     throw new Error(`Node '${name}' not found in registry`);

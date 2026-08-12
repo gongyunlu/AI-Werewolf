@@ -1,8 +1,8 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 女巫毒药节点
@@ -14,24 +14,22 @@ import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
  * - 女巫可以选择不使用毒药
  */
 export const createWitchPoisonNode: NodeFactory = (context) => {
-  const logger = new Logger('WitchPoisonNode');
-
   return async (state: GameGraphState) => {
     const witch = state.players.find((p) => p.isAlive && p.role === ROLES.WITCH);
 
     if (!witch) {
-      logger.debug('[女巫毒药] 无存活女巫，跳过');
+      gameLogger.debug('[女巫毒药] 无存活女巫，跳过');
       return {};
     }
 
     if (witch.hasPoisonUsed) {
-      logger.debug('[女巫毒药] 毒药已使用，跳过');
+      gameLogger.debug('[女巫毒药] 毒药已使用，跳过');
       return {};
     }
 
     // 检查当前回合是否已使用解药
     if (state.witchAntidoteTarget) {
-      logger.debug('[女巫毒药] 当前回合已使用解药，不能使用毒药');
+      gameLogger.debug('[女巫毒药] 当前回合已使用解药，不能使用毒药');
       return {};
     }
 
@@ -62,7 +60,7 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
             );
           }
 
-          logger.log(`[女巫毒药] 使用毒药毒: ${targetPlayer.seatNo}号位`);
+          gameLogger.debug(`[女巫毒药] 使用毒药毒: ${targetPlayer.seatNo}号位`);
 
           await context.eventWriter.writeWitchPoisonEvent({
             gameId: state.gameId,
@@ -75,7 +73,7 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
 
           return { witchPoisonTarget: targetPlayer.id };
         } else {
-          logger.debug('[女巫毒药] 选择不使用毒药');
+          gameLogger.debug('[女巫毒药] 选择不使用毒药');
 
           await context.eventWriter.writeWitchPoisonEvent({
             gameId: state.gameId,
@@ -90,16 +88,16 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
         }
       }
 
-      logger.debug('[女巫毒药] Agent 调用失败，不使用毒药');
+      gameLogger.debug('[女巫毒药] Agent 调用失败，不使用毒药');
       return {};
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[女巫毒药] Agent 执行异常，降级为不使用: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
     // 降级决策：不使用毒药
-    logger.debug('[女巫毒药] 降级策略：不使用毒药');
+    gameLogger.debug('[女巫毒药] 降级策略：不使用毒药');
     return {};
   };
 };

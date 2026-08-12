@@ -1,21 +1,19 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { checkSeerResult } from '../../rules/seer-check';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 预言家查验节点
  */
 export const createSeerCheckNode: NodeFactory = (context) => {
-  const logger = new Logger('SeerCheckNode');
-
   return async (state: GameGraphState) => {
     const seer = state.players.find((p) => p.isAlive && p.role === ROLES.SEER);
 
     if (!seer) {
-      logger.debug('[预言家查验] 无存活预言家，跳过');
+      gameLogger.debug('[预言家查验] 无存活预言家，跳过');
       return {};
     }
 
@@ -43,12 +41,12 @@ export const createSeerCheckNode: NodeFactory = (context) => {
           const targetPlayer = state.players.find((p) => p.seatNo === targetSeatNo);
 
           if (!targetPlayer) {
-            logger.warn(`[预言家查验] 目标座位号 ${targetSeatNo} 不存在，降级为随机查验`);
+            gameLogger.warn(`[预言家查验] 目标座位号 ${targetSeatNo} 不存在，降级为随机查验`);
             // 跳到降级逻辑
           } else {
             const checkResult = checkSeerResult(targetPlayer);
 
-            logger.log(`[预言家查验] 查验 ${targetSeatNo} 号位: ${checkResult}`);
+            gameLogger.debug(`[预言家查验] 查验 ${targetSeatNo} 号位: ${checkResult}`);
 
             await context.eventWriter.writeSeerCheckEvent({
               gameId: state.gameId,
@@ -65,13 +63,13 @@ export const createSeerCheckNode: NodeFactory = (context) => {
             };
           }
         } else {
-          logger.warn('[预言家查验] Agent 未调用 check_identity，降级为随机查验');
+          gameLogger.warn('[预言家查验] Agent 未调用 check_identity，降级为随机查验');
         }
       } else {
-        logger.warn('[预言家查验] Agent 执行失败，降级为随机查验');
+        gameLogger.warn('[预言家查验] Agent 执行失败，降级为随机查验');
       }
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[预言家查验] Agent 执行异常，降级为随机查验: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -83,7 +81,7 @@ export const createSeerCheckNode: NodeFactory = (context) => {
       const target = candidates[Math.floor(Math.random() * candidates.length)];
       const checkResult = checkSeerResult(target);
 
-      logger.debug(`[预言家查验] 随机决策：查验 ${target.seatNo} 号位: ${checkResult}`);
+      gameLogger.debug(`[预言家查验] 随机决策：查验 ${target.seatNo} 号位: ${checkResult}`);
 
       await context.eventWriter.writeSeerCheckEvent({
         gameId: state.gameId,

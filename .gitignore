@@ -51,3 +51,7 @@ apps/api/src/game-engine/phase-8.0.5-validation
 
 # Claude Code 本地配置
 .claude
+
+# 爬取狼人杀官方规则相关
+data
+scripts

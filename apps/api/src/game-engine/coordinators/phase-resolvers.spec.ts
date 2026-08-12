@@ -1,4 +1,5 @@
-import { resolveNightPhase, announceDayPhase, checkWinConditionPhase } from './phase-resolvers';
+import { resolveNightPhase, announceDayPhase } from './phase-resolvers';
+import { checkWinNode } from '../nodes/shared/check-win.node';
 import { createPlayer, createGameState } from '../testing/test-utils';
 
 describe('resolveNightPhase - 夜间结算节点', () => {
@@ -235,7 +236,7 @@ describe('announceDayPhase - 白天公布节点', () => {
   });
 });
 
-describe('checkWinConditionPhase - 胜负判定节点', () => {
+describe('checkWinNode - 胜负判定节点', () => {
   describe('好人胜利', () => {
     it('狼人全灭时好人应获胜', async () => {
       const players = [
@@ -245,10 +246,11 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
       ];
       const state = createGameState({ gameId: 'test-game', players });
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.isGameOver).toBe(true);
       expect(result.winner).toBe('villager');
+      expect(result.currentPhase).toBe('check_win');
     });
   });
 
@@ -262,10 +264,11 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
       ];
       const state = createGameState({ gameId: 'test-game', players });
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.isGameOver).toBe(true);
       expect(result.winner).toBe('werewolf');
+      expect(result.currentPhase).toBe('check_win');
     });
 
     it('所有平民死亡时狼人应获胜（屠边）', async () => {
@@ -276,10 +279,11 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
       ];
       const state = createGameState({ gameId: 'test-game', players });
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.isGameOver).toBe(true);
       expect(result.winner).toBe('werewolf');
+      expect(result.currentPhase).toBe('check_win');
     });
   });
 
@@ -301,10 +305,11 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
         },
       );
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.isGameOver).toBe(true);
       expect(result.winner).toBe('third_party');
+      expect(result.currentPhase).toBe('check_win');
     });
   });
 
@@ -317,10 +322,11 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
       ];
       const state = createGameState({ gameId: 'test-game', players });
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.isGameOver).toBe(false);
       expect(result.winner).toBeNull();
+      expect(result.currentPhase).toBe('check_win');
     });
   });
 
@@ -331,7 +337,7 @@ describe('checkWinConditionPhase - 胜负判定节点', () => {
       ];
       const state = createGameState({ gameId: 'test-game', players });
 
-      const result = await checkWinConditionPhase(state);
+      const result = await checkWinNode(state);
 
       expect(result.currentPhase).toBe('check_win');
     });

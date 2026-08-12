@@ -1,8 +1,8 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 女巫解药节点
@@ -13,24 +13,22 @@ import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
  * - 女巫可以选择不使用解药
  */
 export const createWitchAntidoteNode: NodeFactory = (context) => {
-  const logger = new Logger('WitchAntidoteNode');
-
   return async (state: GameGraphState) => {
     const witch = state.players.find((p) => p.isAlive && p.role === ROLES.WITCH);
 
     if (!witch) {
-      logger.debug('[女巫解药] 无存活女巫，跳过');
+      gameLogger.debug('[女巫解药] 无存活女巫，跳过');
       return {};
     }
 
     if (witch.hasAntidoteUsed) {
-      logger.debug('[女巫解药] 解药已使用，跳过');
+      gameLogger.debug('[女巫解药] 解药已使用，跳过');
       return {};
     }
 
     // 空刀时无法使用解药，直接跳过
     if (!state.wolfTarget) {
-      logger.debug('[女巫解药] 今晚空刀，无法使用解药');
+      gameLogger.debug('[女巫解药] 今晚空刀，无法使用解药');
       return {};
     }
 
@@ -74,7 +72,7 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
             );
           }
 
-          logger.log(`[女巫解药] 使用解药救: ${target.seatNo}号位`);
+          gameLogger.debug(`[女巫解药] 使用解药救: ${target.seatNo}号位`);
 
           await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
@@ -87,7 +85,7 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
 
           return { witchAntidoteTarget: target.id };
         } else {
-          logger.debug('[女巫解药] 选择不使用解药');
+          gameLogger.debug('[女巫解药] 选择不使用解药');
 
           await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
@@ -103,14 +101,14 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
       }
 
       // Agent 调用失败，触发降级策略
-      logger.warn('[女巫解药] Agent 执行失败，降级为自动使用');
+      gameLogger.warn('[女巫解药] Agent 执行失败，降级为自动使用');
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
-    logger.log(`[女巫解药] 降级决策，使用解药救: ${targetPlayer.seatNo}号位`);
+    gameLogger.debug(`[女巫解药] 降级决策，使用解药救: ${targetPlayer.seatNo}号位`);
 
     await context.eventWriter.writeWitchAntidoteEvent({
       gameId: state.gameId,

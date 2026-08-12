@@ -1,7 +1,6 @@
 import type { GameGraphState } from '../core/types';
 import { resolveNightActions } from '../rules/night-resolution';
 import { checkSeerResult } from '../rules/seer-check';
-import { checkWinCondition } from '../rules/win-condition';
 import { ROLES } from '@ai-werewolf/shared';
 
 /**
@@ -127,28 +126,5 @@ export async function announceDayPhase(state: GameGraphState): Promise<Partial<G
     currentDay: state.currentDay + 1,
     currentPhase: 'speech', // 进入发言阶段
     // nightDeaths 保留，供日志/Event 使用
-  };
-}
-
-/**
- * 胜负判定节点
- *
- * 1. 检查所有胜利条件
- * 2. 判断游戏是否结束
- * 3. 记录获胜阵营
- */
-export async function checkWinConditionPhase(
-  state: GameGraphState,
-): Promise<Partial<GameGraphState>> {
-  // 调用胜利条件判定函数
-  const result = checkWinCondition(
-    state.players,
-    state.loverPair, // 如果有丘比特情侣
-  );
-
-  return {
-    isGameOver: result.isGameOver,
-    winner: result.winner,
-    currentPhase: 'check_win',
   };
 }

@@ -1,9 +1,7 @@
-import { Logger } from '@nestjs/common';
 import { DEATH_CAUSES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-
-const logger = new Logger('ExecuteNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 放逐执行节点
@@ -15,12 +13,12 @@ const logger = new Logger('ExecuteNode');
  */
 export const createExecuteNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    logger.log(`[放逐执行] Day ${state.currentDay} 执行放逐`);
+    gameLogger.debug(`[放逐执行] Day ${state.currentDay} 执行放逐`);
 
     const { exileTarget } = state;
 
     if (!exileTarget) {
-      logger.warn('[放逐执行] 无放逐目标，跳过');
+      gameLogger.warn('[放逐执行] 无放逐目标，跳过');
       return {};
     }
 
@@ -29,7 +27,7 @@ export const createExecuteNode: NodeFactory = (context) => {
       throw new Error(`[放逐执行] 数据一致性错误：未找到放逐目标玩家 ${exileTarget}`);
     }
 
-    logger.log(`[放逐执行] 放逐 ${target.seatNo}号位 (${target.role})`);
+    gameLogger.log(`[放逐执行] 放逐 ${target.seatNo}号位 (${target.role})`);
 
     // 更新玩家状态
     const updatedPlayers = state.players.map((p) => {
@@ -62,7 +60,7 @@ export const createExecuteNode: NodeFactory = (context) => {
       },
     });
 
-    logger.log(`[放逐执行] ${target.seatNo}号位已出局`);
+    gameLogger.debug(`[放逐执行] ${target.seatNo}号位已出局`);
 
     return {
       players: updatedPlayers,

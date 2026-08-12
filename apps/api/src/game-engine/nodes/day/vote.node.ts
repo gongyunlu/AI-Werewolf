@@ -1,12 +1,10 @@
-import { Logger } from '@nestjs/common';
 import type { NodeFactory } from '../node.types';
 import type { GameGraphState } from '../../core/types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
 import { createCastVoteTool, type CastVoteOutput } from '@/agent-runtime/tools/cast-vote.tool';
 import { resolveVotes } from '../../rules/vote-resolution';
-
-const logger = new Logger('VoteNode');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 投票节点 - 第一轮投票
@@ -19,13 +17,13 @@ const logger = new Logger('VoteNode');
  */
 export const createVoteNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    logger.log(`[投票阶段] Day ${state.currentDay} 开始投票`);
+    gameLogger.debug(`[投票阶段] Day ${state.currentDay} 开始投票`);
 
     const alivePlayers = state.players.filter((p) => p.isAlive);
 
     // 并行投票
     const votePromises = alivePlayers.map(async (player) => {
-      logger.log(`[投票阶段] ${player.seatNo}号位开始投票...`);
+      gameLogger.debug(`[投票阶段] ${player.seatNo}号位开始投票...`);
 
       try {
         const tools = [
@@ -51,7 +49,7 @@ export const createVoteNode: NodeFactory = (context) => {
           if (toolResult.action === 'cast_vote') {
             const voteTarget =
               toolResult.targetSeatNo === 0 ? '弃票' : `${toolResult.targetSeatNo}号位`;
-            logger.log(`[投票阶段] ${player.seatNo}号位投票: ${voteTarget}`);
+            gameLogger.debug(`[投票阶段] ${player.seatNo}号位投票: ${voteTarget}`);
 
             await context.eventWriter.writePlayerVoteEvent({
               gameId: state.gameId,
@@ -68,12 +66,12 @@ export const createVoteNode: NodeFactory = (context) => {
             };
           }
         } else {
-          logger.warn(
+          gameLogger.warn(
             `[投票阶段] ${player.seatNo}号位 Agent 调用失败。原因: ${result.error || 'success=false 或 result 为空'}`,
           );
         }
       } catch (error) {
-        logger.error(
+        gameLogger.error(
           `[投票阶段] ${player.seatNo}号位投票出错: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -89,7 +87,7 @@ export const createVoteNode: NodeFactory = (context) => {
 
     // 降级策略：如果没有有效投票，视为全体弃票
     if (votes.length === 0) {
-      logger.warn('[投票阶段] 无有效投票，降级策略：视为全体弃票');
+      gameLogger.warn('[投票阶段] 无有效投票，降级策略：视为全体弃票');
       return {
         exileTarget: null,
         exileVoteCount: 0,
@@ -116,7 +114,7 @@ export const createVoteNode: NodeFactory = (context) => {
 
     // 检查是否全体弃票（提前返回，避免空调用）
     if (votesMap.size === 0) {
-      logger.log('[投票阶段] 全体弃票，无人被放逐');
+      gameLogger.debug('[投票阶段] 全体弃票，无人被放逐');
       return {
         exileTarget: null,
         exileVoteCount: 0,
@@ -146,7 +144,7 @@ export const createVoteNode: NodeFactory = (context) => {
       }
     }
 
-    logger.log(
+    gameLogger.debug(
       `[投票阶段] 得票统计: ${Array.from(voteCountBySeat.entries())
         .map(([seat, count]) => `${seat}号位(${count}票)`)
         .join(', ')}`,
@@ -158,7 +156,7 @@ export const createVoteNode: NodeFactory = (context) => {
         .map((id) => state.players.find((p) => p.id === id)?.seatNo)
         .filter((seatNo): seatNo is number => seatNo !== undefined);
 
-      logger.log(`[投票阶段] 平票: ${pkSeatNos.join(', ')}号位，进入PK阶段`);
+      gameLogger.debug(`[投票阶段] 平票: ${pkSeatNos.join(', ')}号位，进入PK阶段`);
       return {
         exileTarget: null,
         exileVoteCount: voteCountBySeat.size > 0 ? Math.max(...voteCountBySeat.values()) : 0,
@@ -175,7 +173,7 @@ export const createVoteNode: NodeFactory = (context) => {
       throw new Error(`[投票阶段] 数据一致性错误：未找到玩家 ${result.executedPlayerId}`);
     }
 
-    logger.log(`[投票阶段] 放逐目标: ${exiledPlayer.seatNo}号位 (${exiledPlayer.id})`);
+    gameLogger.debug(`[投票阶段] 放逐目标: ${exiledPlayer.seatNo}号位 (${exiledPlayer.id})`);
     return {
       exileTarget: exiledPlayer.id,
       exileVoteCount: voteCountBySeat.get(exiledPlayer.seatNo) || 0,

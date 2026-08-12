@@ -37,6 +37,7 @@ export interface AgentInput {
   maxIterations?: number;
   threadId?: string; // 会话 ID，默认使用 gameId-playerId
   additionalContext?: string; // 额外的上下文信息（例如狼人投票时的讨论摘要）
+  signal?: AbortSignal; // 用于中断 LLM 调用
 }
 
 /**
@@ -136,7 +137,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       });
 
       // 2-3. Reason & Execute Tool（推理 + 执行工具）
-      const result = await this.reasonLoop(context, input.availableTools, maxIterations, threadId);
+      const result = await this.reasonLoop(
+        context,
+        input.availableTools,
+        maxIterations,
+        threadId,
+        input.signal,
+      );
 
       return {
         success: true,
@@ -146,6 +153,14 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         thinking: result.thinking,
       };
     } catch (error) {
+      // 如果是 AbortError（AbortController 触发），重新抛出
+      if (
+        error instanceof Error &&
+        (error.name === 'AbortError' || error.message.includes('aborted'))
+      ) {
+        throw error;
+      }
+
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -589,6 +604,7 @@ ${context.history}
     tools: StructuredToolInterface[],
     maxIterations: number,
     threadId: string,
+    signal?: AbortSignal,
   ): Promise<{ finalResult: unknown; iterations: number; thinking?: string }> {
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -610,7 +626,7 @@ ${context.history}
     let thinking: string | undefined;
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
-      const response = await model.invoke(messages);
+      const response = await model.invoke(messages, { signal });
       messages.push(response);
 
       // 捕获推理内容

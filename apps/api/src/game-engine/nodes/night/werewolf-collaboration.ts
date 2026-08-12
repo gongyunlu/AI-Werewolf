@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import { AGENT_SCENARIOS, FACTIONS } from '@ai-werewolf/shared';
 import type { GameGraphState, PlayerState } from '../../core/types';
 import type { NodeContext } from '../node.types';
@@ -6,8 +5,7 @@ import { createWolfChatTool, type WolfChatOutput } from '@/agent-runtime/tools/w
 import { createSkipDiscussionTool } from '@/agent-runtime/tools/skip-discussion.tool';
 import { createProposeKillTool, type ProposeKillOutput } from '@/agent-runtime/tools/werewolf.tool';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
-
-const logger = new Logger('WerewolfCollaboration');
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * Agent Thinking 记录
@@ -76,7 +74,7 @@ export async function singleWolfDecision(
   state: GameGraphState,
   context: NodeContext,
 ): Promise<string | null> {
-  logger.log(`[单狼决策] ${wolf.seatNo}号位独自决策`);
+  gameLogger.debug(`[单狼决策] ${wolf.seatNo}号位独自决策`);
 
   // 只给 propose_kill 工具
   const tools = [createProposeKillTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
@@ -102,7 +100,7 @@ export async function singleWolfDecision(
           );
         }
 
-        logger.log(
+        gameLogger.debug(
           `[单狼决策] ${wolf.seatNo}号位决定刀 ${toolResult.targetSeatNo}号位${toolResult.reason ? `: ${toolResult.reason}` : ''}`,
         );
 
@@ -122,10 +120,10 @@ export async function singleWolfDecision(
       }
     }
 
-    logger.warn(`[单狼决策] ${wolf.seatNo}号位未做出决策`);
+    gameLogger.warn(`[单狼决策] ${wolf.seatNo}号位未做出决策`);
     return null;
   } catch (error) {
-    logger.error(
+    gameLogger.error(
       `[单狼决策] ${wolf.seatNo}号位决策失败: ${error instanceof Error ? error.message : String(error)}`,
     );
     return null;
@@ -193,13 +191,13 @@ ${summary}
     const response = await model.invoke(prompt);
     const decision = response.content.toString().trim().toUpperCase();
 
-    logger.log(
+    gameLogger.debug(
       `[狼人讨论] 协调判断: ${decision} (${decision === 'YES' ? '继续讨论' : '进入投票'})`,
     );
 
     return decision === 'YES';
   } catch (error) {
-    logger.error(`[狼人讨论] 协调判断失败:`, error);
+    gameLogger.error(`[狼人讨论] 协调判断失败:`, error);
     // 降级：如果判断失败，按原有逻辑继续
     return currentRound < maxRounds;
   }
@@ -229,10 +227,10 @@ export async function wolfDiscussion(
   const maxRounds = 2;
   const maxSpeechPerWolf = 2;
 
-  logger.log(`[狼人讨论] 开始讨论，共 ${werewolves.length} 只狼，最多 ${maxRounds} 轮`);
+  gameLogger.debug(`[狼人讨论] 开始讨论，共 ${werewolves.length} 只狼，最多 ${maxRounds} 轮`);
 
   for (let round = 0; round < maxRounds; round++) {
-    logger.log(`[狼人讨论] 第 ${round + 1} 轮讨论`);
+    gameLogger.debug(`[狼人讨论] 第 ${round + 1} 轮讨论`);
 
     // 随机顺序发言
     const shuffled = [...werewolves].toSorted(() => Math.random() - 0.5);
@@ -242,7 +240,7 @@ export async function wolfDiscussion(
 
       // 检查是否超过发言次数限制
       if (currentSpeechCount >= maxSpeechPerWolf) {
-        logger.debug(`[狼人讨论] ${wolf.seatNo}号位已发言 ${currentSpeechCount} 次，跳过`);
+        gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位已发言 ${currentSpeechCount} 次，跳过`);
         continue;
       }
 
@@ -287,13 +285,13 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
               round: round + 1,
             });
             speechCount.set(wolf.id, currentSpeechCount + 1);
-            logger.log(`[狼人讨论] ${wolf.seatNo}号位: ${msg.message}`);
+            gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位: ${msg.message}`);
           } else {
-            logger.debug(`[狼人讨论] ${wolf.seatNo}号位跳过发言`);
+            gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位跳过发言`);
           }
         }
       } catch (error) {
-        logger.error(
+        gameLogger.error(
           `[狼人讨论] ${wolf.seatNo}号位发言失败: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -309,12 +307,12 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
     );
 
     if (!shouldContinue) {
-      logger.log(`[狼人讨论] 协调判断: 已达成共识，提前结束讨论`);
+      gameLogger.debug(`[狼人讨论] 协调判断: 已达成共识，提前结束讨论`);
       break;
     }
   }
 
-  logger.log(`[狼人讨论] 讨论结束，共 ${discussionHistory.length} 条发言`);
+  gameLogger.debug(`[狼人讨论] 讨论结束，共 ${discussionHistory.length} 条发言`);
   return discussionHistory;
 }
 
@@ -335,7 +333,7 @@ export async function wolfVoting(
   context: NodeContext,
   discussion: DiscussionMessage[],
 ): Promise<VoteRecord[]> {
-  logger.log(`[狼人投票] 开始投票，共 ${werewolves.length} 只狼`);
+  gameLogger.debug(`[狼人投票] 开始投票，共 ${werewolves.length} 只狼`);
 
   // 构建讨论记录（所有狼人共享）
   const discussionSummary =
@@ -369,7 +367,7 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
         const toolResult = result.result as ProposeKillOutput;
 
         if (toolResult.action === 'propose_kill') {
-          logger.log(
+          gameLogger.debug(
             `[狼人投票] ${wolf.seatNo}号位投票刀 ${toolResult.targetSeatNo}号位${toolResult.reason ? `: ${toolResult.reason}` : ''}`,
           );
           return {
@@ -380,10 +378,10 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
           };
         }
       } else {
-        logger.warn(`[狼人投票] ${wolf.seatNo}号位未投票`);
+        gameLogger.warn(`[狼人投票] ${wolf.seatNo}号位未投票`);
       }
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[狼人投票] ${wolf.seatNo}号位投票失败: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -395,7 +393,7 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
   const voteResults = await Promise.all(votePromises);
   const votes: VoteRecord[] = voteResults.filter((v): v is VoteRecord => v !== null);
 
-  logger.log(`[狼人投票] 投票结束，共收到 ${votes.length} 票`);
+  gameLogger.debug(`[狼人投票] 投票结束，共收到 ${votes.length} 票`);
   return votes;
 }
 
@@ -412,12 +410,12 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
  */
 export function selectTargetFromVotes(votes: VoteRecord[], state: GameGraphState): string | null {
   if (votes.length === 0) {
-    logger.warn('[狼人投票] 无有效投票，随机选择目标');
+    gameLogger.warn('[狼人投票] 无有效投票，随机选择目标');
     // 随机选择一个好人
     const villagers = state.players.filter((p) => p.isAlive && p.faction === FACTIONS.VILLAGER);
     if (villagers.length > 0) {
       const randomTarget = villagers[Math.floor(Math.random() * villagers.length)];
-      logger.log(`[狼人投票] 随机选择 ${randomTarget.seatNo}号位`);
+      gameLogger.debug(`[狼人投票] 随机选择 ${randomTarget.seatNo}号位`);
       return randomTarget.id;
     }
     return null;
@@ -438,7 +436,7 @@ export function selectTargetFromVotes(votes: VoteRecord[], state: GameGraphState
   // 平票随机选择
   const targetSeatNo = candidates[Math.floor(Math.random() * candidates.length)];
 
-  logger.log(
+  gameLogger.debug(
     `[狼人投票] ${targetSeatNo}号位得票最多 (${maxVotes}票)${candidates.length > 1 ? '，平票随机选择' : ''}`,
   );
 

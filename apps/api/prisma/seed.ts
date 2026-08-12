@@ -394,7 +394,6 @@ async function main() {
           notes: ruleset.notes,
         },
       });
-      console.log(`[seed] upsert ruleset ${ruleset.id} (${ruleset.name}) 完成`);
     }
 
     // Agent 用 name 作为 upsert 键（unique），重复跑 seed 不会重复创建
@@ -413,7 +412,6 @@ async function main() {
           notes: agent.notes,
         },
       });
-      console.log(`[seed] upsert agent ${agent.name} (${agent.defaultModelName}) 完成`);
     }
 
     // 灌入每个 Agent 的初始人设 Memory（persona + strategy 分层）
@@ -427,7 +425,7 @@ async function main() {
         );
       }
 
-      const removed = await prisma.memory.deleteMany({
+      await prisma.memory.deleteMany({
         where: { agentId: agent.id, label: agent.memoryLabel, source: 'manual' },
       });
 
@@ -444,16 +442,9 @@ async function main() {
           isActive: true,
         })),
       });
-
-      const personaCount = preset.items.filter((item) => item.type === 'persona').length;
-      const strategyCount = preset.items.length - personaCount;
-      console.log(
-        `[seed] agent ${agent.name} (label=${agent.memoryLabel}) 人设 Memory 重置：删除 ${removed.count} 条，插入 ${personaCount} 条 persona + ${strategyCount} 条 strategy`,
-      );
     }
 
     // ========== Skill Memory（规则 + 角色技能）==========
-    console.log('\n[seed] 创建 Skill Memory...');
 
     // 1. 创建通用规则 Skill（所有 Agent 共享）
     const allAgents = await prisma.agent.findMany();
@@ -483,7 +474,6 @@ async function main() {
         },
       });
     }
-    console.log(`[seed] ✅ 为 ${allAgents.length} 个 Agent 创建了规则 Skill`);
 
     // 2. 为每个角色创建专属技能 Skill
     // 注意：这里我们为每个 Agent 创建所有角色的技能，这样 Agent 可以扮演任何角色
@@ -516,12 +506,8 @@ async function main() {
         });
       }
     }
-    console.log(
-      `[seed] ✅ 为 ${allAgents.length} 个 Agent 各创建了 ${roleSkills.length} 个角色技能 Skill`,
-    );
 
     // ========== Phase 8.4 测试游戏数据 ==========
-    console.log('\n[seed] 创建 Phase 8.4 测试游戏...');
 
     // 使用固定的 UUID 作为测试游戏 ID（方便后续测试脚本引用）
     const testGameId = '00000000-0000-0000-0000-000000000001';
@@ -581,20 +567,11 @@ async function main() {
         },
       });
     }
-
-    console.log(`[seed] ✅ 测试游戏创建完成: ${testGame.id}`);
-    console.log(`[seed]    玩家配置:`);
-    for (let i = 0; i < 6; i++) {
-      console.log(
-        `[seed]      ${i + 1}号位: ${agents[i].name} - ${playerRoles[i].role} (${playerRoles[i].faction})`,
-      );
-    }
   } finally {
     await prisma.$disconnect();
   }
 }
 
-main().catch((err) => {
-  console.error('[seed] 失败：', err);
+main().catch(() => {
   process.exit(1);
 });

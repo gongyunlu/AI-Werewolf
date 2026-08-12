@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { ROLES } from '@ai-werewolf/shared';
@@ -8,6 +7,7 @@ import {
   selectTargetFromVotes,
   singleWolfDecision,
 } from './werewolf-collaboration';
+import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 狼人刀人节点
@@ -25,13 +25,11 @@ import {
  * - 无有效投票时随机选择目标
  */
 export const createWerewolfKillNode: NodeFactory = (context) => {
-  const logger = new Logger('WerewolfKillNode');
-
   return async (state: GameGraphState) => {
     const werewolves = state.players.filter((p) => p.isAlive && p.role === ROLES.WEREWOLF);
 
     if (werewolves.length === 0) {
-      logger.debug('[狼人刀人] 无存活狼人，跳过');
+      gameLogger.debug('[狼人刀人] 无存活狼人，跳过');
       return {};
     }
 
@@ -46,7 +44,7 @@ export const createWerewolfKillNode: NodeFactory = (context) => {
         targetPlayerId = selectTargetFromVotes(votes, state);
       }
     } catch (error) {
-      logger.error(
+      gameLogger.error(
         `[狼人刀人] 协作流程异常，降级为随机落刀: ${error instanceof Error ? error.message : String(error)}`,
       );
       targetPlayerId = null;
@@ -54,12 +52,12 @@ export const createWerewolfKillNode: NodeFactory = (context) => {
 
     // 降级策略：如果 Agent 决策失败，随机落刀
     if (!targetPlayerId) {
-      logger.warn('[狼人刀人] Agent 决策失败，降级为随机落刀');
+      gameLogger.warn('[狼人刀人] Agent 决策失败，降级为随机落刀');
       const nonWerewolves = state.players.filter((p) => p.isAlive && p.role !== ROLES.WEREWOLF);
       if (nonWerewolves.length > 0) {
         const randomTarget = nonWerewolves[Math.floor(Math.random() * nonWerewolves.length)];
         targetPlayerId = randomTarget.id;
-        logger.debug(`[狼人刀人] 随机选择 ${randomTarget.seatNo}号位 (${randomTarget.id})`);
+        gameLogger.debug(`[狼人刀人] 随机选择 ${randomTarget.seatNo}号位 (${randomTarget.id})`);
       }
     }
 
@@ -69,7 +67,7 @@ export const createWerewolfKillNode: NodeFactory = (context) => {
       throw new Error(`[狼人刀人] 数据一致性错误：未找到目标玩家 ${targetPlayerId}`);
     }
 
-    logger.log(
+    gameLogger.debug(
       `[狼人刀人] 最终决定${targetPlayerId ? `刀: ${target?.seatNo}号位 (${target?.role})` : '空刀'}`,
     );
 

@@ -1,7 +1,5 @@
-import { Logger } from '@nestjs/common';
 import type { GameGraphState, PlayerState } from '../core/types';
-
-const logger = new Logger('SpeechOrderUtils');
+import { gameLogger } from './game-logger';
 
 export interface SpeechOrderConfig {
   // 警长相关配置
@@ -75,7 +73,7 @@ export function calculateSpeechOrder(params: {
   }
 
   // 降级：从 1 号位开始顺时针
-  logger.warn('[发言顺序] 无匹配规则，降级为从 1 号位开始顺时针');
+  gameLogger.warn('[发言顺序] 无匹配规则，降级为从 1 号位开始顺时针');
   return generateOrder(alivePlayers, 1, 'clockwise', 'fallback_default', undefined);
 }
 
@@ -188,7 +186,7 @@ function calculateOrderFromTime(
 
   const reason = `time_rule_${minutes}_${direction}`;
 
-  logger.log(
+  gameLogger.debug(
     `[发言顺序] 时间规则: ${currentTime.getHours()}:${minutes} → ${tens}+${ones}=${sum} → 从${startSeatNo}号位开始${direction === 'clockwise' ? '顺时针' : '逆时针'}`,
   );
 

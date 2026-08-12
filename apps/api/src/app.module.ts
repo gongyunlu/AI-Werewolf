@@ -12,6 +12,8 @@ import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
 import { EventBusModule } from './event-bus/event-bus.module';
 import { GameEngineModule } from './game-engine/core/game-engine.module';
 import { RulesetsModule } from './rulesets/rulesets.module';
+import { GameQueueModule } from './game-queue/game-queue.module';
+import { GameExecutorModule } from './game-executor/game-executor.module';
 
 @Module({
   imports: [
@@ -29,6 +31,8 @@ import { RulesetsModule } from './rulesets/rulesets.module';
     AgentRuntimeModule,
     EventBusModule,
     GameEngineModule,
+    GameExecutorModule,
+    GameQueueModule,
   ],
   controllers: [AppController],
   providers: [AppService],
