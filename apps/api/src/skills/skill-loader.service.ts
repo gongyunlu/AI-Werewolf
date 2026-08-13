@@ -2,187 +2,355 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import matter from 'gray-matter';
 import type { Env } from '../config/env.validation';
 
+/**
+ * Skill 元数据（L1）
+ *
+ * 轻量级元数据，用于构建技能目录
+ */
+export interface SkillMetadata {
+  /** Skill ID（相对路径，例如 roles/werewolf） */
+  id: string;
+
+  name: string;
+
+  /** 简短描述 */
+  description: string;
+
+  /** 标签 */
+  tags?: string[];
+
+  /** 适用条件 */
+  conditions?: Record<string, any>;
+}
+
+/**
+ * 完整 Skill
+ */
+export interface Skill extends SkillMetadata {
+  /** 完整内容（Markdown） */
+  content: string;
+}
+
+/**
+ * 向后兼容的 Skill 内容格式
+ */
 export interface SkillContent {
   type: 'rule' | 'role';
-  role?: string; // 仅 type=role 时有效
+  role?: string;
   content: string;
 }
 
 /**
  * Skill Loader Service
  *
- * 渐进式披露架构：
- * - Layer 0: 核心决策框架（永远加载）
- * - Layer 1: 规则（根据板子加载）
- * - Layer 2: 角色（根据身份加载）
- * - Layer 3: 战术（根据场景按需加载）
+ * 遵循 LangChain Agent Skills Specification
+ * 支持三级渐进式披露（L1/L2/L3）：
+ * - L1: Metadata（元数据目录，启动时加载）
+ * - L2: Core Content（完整指令，按需加载）
+ * - L3: Supporting Resources（支持资源，按需加载，暂未实现）
+ *
+ * 架构：
+ * - Layer 0: 核心决策框架（加载到 System Prompt）
+ * - Layer 1: 角色技能
+ * - Layer 2: 板子规则
+ * - Layer 3: 战术技能
+ * - Layer 4: 高级套路
  */
 @Injectable()
 export class SkillLoaderService implements OnModuleInit {
   private readonly skillsDir: string;
-  private cache = new Map<string, string>(); // 缓存 Skill 内容
+  private readonly cache = new Map<string, Skill>();
+  private catalog: SkillMetadata[] = [];
 
   constructor(private readonly configService: ConfigService<Env, true>) {
-    // 从环境变量读取 SKILLS_DIR，如果未配置则使用默认路径
     const envSkillsDir = this.configService.get('SKILLS_DIR');
-    this.skillsDir = envSkillsDir || path.join(__dirname, '..', 'skills');
+    // 当前只支持 v1，未来可以根据配置或参数动态选择版本
+    this.skillsDir = envSkillsDir || path.join(__dirname, 'v1');
   }
 
   async onModuleInit() {
-    // 预加载核心文件，确保启动时发现问题
-    await this.loadCoreFramework();
-    await this.loadRuleSkill('v1');
-
-    // 验证所有角色文件是否存在
-    const requiredRoles = ['werewolf', 'seer', 'witch', 'villager'];
-    for (const role of requiredRoles) {
-      await this.loadRoleSkill(role, 'v1');
-    }
+    await this.loadCatalog();
   }
 
   /**
-   * Layer 0: 加载核心决策框架（永远加载）
-   */
-  async loadCoreFramework(): Promise<string> {
-    const cacheKey = 'core:framework';
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get(cacheKey)!;
-    }
-
-    const filePath = path.join(this.skillsDir, 'core', 'decision-framework.md');
-    const content = await fs.readFile(filePath, 'utf-8');
-    this.cache.set(cacheKey, content);
-    return content;
-  }
-
-  /**
-   * Layer 1: 加载狼人杀规则 Skill
-   */
-  async loadRuleSkill(version: string = 'v1'): Promise<string> {
-    const cacheKey = `rule:${version}`;
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get(cacheKey)!;
-    }
-
-    const filePath = path.join(this.skillsDir, version, 'rules', 'werewolf-rules.md');
-    const content = await fs.readFile(filePath, 'utf-8');
-    this.cache.set(cacheKey, content);
-    return content;
-  }
-
-  /**
-   * Layer 2: 加载角色 Skill
+   * 加载 L1 目录（所有 Skill 的元数据）
    *
-   * @param role - 角色名称（werewolf, seer, witch, villager）
-   * @param version - 版本号（默认 v1）
+   * 扫描所有 SKILL.md 文件，提取 frontmatter 作为元数据
    */
-  async loadRoleSkill(role: string, version: string = 'v1'): Promise<string> {
-    const cacheKey = `role:${role}:${version}`;
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get(cacheKey)!;
-    }
-
-    const filePath = path.join(this.skillsDir, version, 'roles', `${role}.md`);
-    const content = await fs.readFile(filePath, 'utf-8');
-    this.cache.set(cacheKey, content);
-    return content;
-  }
-
-  /**
-   * Layer 3: 加载战术 Skill（按需加载）
-   *
-   * @param category - 战术分类（wolf/good/counter）
-   * @param tactic - 具体战术名称（bluff/backstab/identify-bluff 等）
-   * @param version - 版本号（默认 v1）
-   */
-  async loadTactic(category: string, tactic: string, version: string = 'v1'): Promise<string> {
-    const cacheKey = `tactic:${category}:${tactic}:${version}`;
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get(cacheKey)!;
-    }
-
-    const filePath = path.join(this.skillsDir, version, 'tactics', category, `${tactic}.md`);
+  private async loadCatalog(): Promise<void> {
+    this.catalog = [];
 
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      this.cache.set(cacheKey, content);
-      return content;
+      // 扫描所有分类目录
+      const categories = await fs.readdir(this.skillsDir, { withFileTypes: true });
+
+      for (const category of categories) {
+        if (!category.isDirectory()) continue;
+
+        const categoryPath = path.join(this.skillsDir, category.name);
+        await this.scanCategory(categoryPath, category.name);
+      }
     } catch {
+      //
+    }
+  }
+
+  /**
+   * 扫描一个分类目录
+   */
+  private async scanCategory(categoryPath: string, categoryName: string): Promise<void> {
+    try {
+      const skills = await fs.readdir(categoryPath, { withFileTypes: true });
+
+      for (const skill of skills) {
+        if (!skill.isDirectory()) continue;
+
+        const skillId = `${categoryName}/${skill.name}`;
+        const metadata = await this.loadMetadata(skillId);
+
+        if (metadata) {
+          this.catalog.push(metadata);
+        }
+      }
+    } catch {
+      //
+    }
+  }
+
+  /**
+   * 加载单个 Skill 的元数据（L1）
+   *
+   * 读取 SKILL.md 的 frontmatter
+   */
+  private async loadMetadata(skillId: string): Promise<SkillMetadata | null> {
+    try {
+      const skillPath = path.join(this.skillsDir, skillId, 'SKILL.md');
+      const content = await fs.readFile(skillPath, 'utf-8');
+      const { data } = matter(content);
+
+      return {
+        id: skillId,
+        name: data.name || skillId,
+        description: data.description || '',
+        tags: data.tags || [],
+        conditions: data.conditions,
+      };
+    } catch {
+      // SKILL.md 不存在，尝试向后兼容的格式
+      return this.loadLegacyMetadata(skillId);
+    }
+  }
+
+  /**
+   * 向后兼容：加载旧格式的元数据
+   */
+  private async loadLegacyMetadata(skillId: string): Promise<SkillMetadata | null> {
+    try {
+      // 尝试读取 {skillName}.md 文件
+      const [category, skillName] = skillId.split('/');
+      const legacyPath = path.join(this.skillsDir, category, `${skillName}.md`);
+
+      await fs.access(legacyPath);
+
+      // 文件存在，返回基础元数据
+      return {
+        id: skillId,
+        name: skillName,
+        description: `${skillName} 技能`,
+        tags: [category],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 获取 L1 目录（带条件过滤）
+   *
+   * @param context 上下文对象，用于条件过滤
+   * @returns 过滤后的 Skill 元数据列表
+   */
+  getCatalog(context?: Record<string, any>): SkillMetadata[] {
+    if (!context) {
+      return this.catalog;
+    }
+
+    // 根据 context 过滤
+    return this.catalog.filter((skill) => this.checkConditions(skill.conditions, context));
+  }
+
+  /**
+   * 获取 L1 目录的 Markdown 格式
+   *
+   * @param context 上下文对象，用于条件过滤
+   * @returns Markdown 格式的目录
+   */
+  getCatalogMarkdown(context?: Record<string, any>): string {
+    const catalog = this.getCatalog(context);
+
+    if (catalog.length === 0) {
       return '';
     }
+
+    const lines: string[] = [
+      '## 可用技能库',
+      '',
+      '你可以通过 `load_skill` 工具加载以下技能的详细内容：',
+      '',
+    ];
+
+    // 按分类分组
+    const byCategory = new Map<string, SkillMetadata[]>();
+    for (const skill of catalog) {
+      const category = skill.id.split('/')[0];
+      if (!byCategory.has(category)) {
+        byCategory.set(category, []);
+      }
+      byCategory.get(category)!.push(skill);
+    }
+
+    // 格式化输出
+    for (const [category, skills] of byCategory) {
+      lines.push(`### ${this.getCategoryName(category)}`, '');
+      for (const skill of skills) {
+        const tags = skill.tags && skill.tags.length > 0 ? ` [${skill.tags.join(', ')}]` : '';
+        lines.push(`- \`${skill.id}\` - ${skill.name}${tags}`);
+        if (skill.description) {
+          lines.push(`  ${skill.description}`);
+        }
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
   }
 
   /**
-   * 批量加载战术（按分类）
+   * 加载完整 Skill（L1 + L2）
    *
-   * @param category - 战术分类（wolf/good/counter）
-   * @param version - 版本号（默认 v1）
+   * @param skillId Skill ID（例如 "roles/werewolf"）
+   * @param version 技能版本（默认 'v1'）
+   * @returns 完整的 Skill 对象，包含内容
    */
-  async loadTacticsByCategory(category: string, version: string = 'v1'): Promise<string> {
-    const cacheKey = `tactics:${category}:${version}`;
+  async loadSkill(skillId: string, version: string = 'v1'): Promise<Skill | null> {
+    const cacheKey = `${version}:${skillId}`;
+
+    // 检查缓存
     if (this.cache.has(cacheKey)) {
       return this.cache.get(cacheKey)!;
     }
 
-    const dirPath = path.join(this.skillsDir, version, 'tactics', category);
-
     try {
-      const files = await fs.readdir(dirPath);
-      const mdFiles = files.filter((f) => f.endsWith('.md'));
+      // 构建版本化的路径
+      const skillsBaseDir =
+        this.configService.get('SKILLS_DIR') || path.join(__dirname, '../skills');
+      const versionedPath = path.join(skillsBaseDir, version, skillId, 'SKILL.md');
 
-      const contents = await Promise.all(
-        mdFiles.map(async (file) => {
-          const filePath = path.join(dirPath, file);
-          return await fs.readFile(filePath, 'utf-8');
-        }),
-      );
+      const content = await fs.readFile(versionedPath, 'utf-8');
+      const { data, content: markdown } = matter(content);
 
-      const combined = contents.join('\n\n---\n\n');
-      this.cache.set(cacheKey, combined);
-      return combined;
+      const skill: Skill = {
+        id: skillId,
+        name: data.name || skillId,
+        description: data.description || '',
+        tags: data.tags || [],
+        conditions: data.conditions,
+        content: markdown.trim(),
+      };
+
+      // 缓存
+      this.cache.set(cacheKey, skill);
+      return skill;
     } catch {
-      return '';
+      // SKILL.md 不存在，尝试向后兼容
+      return this.loadLegacySkill(skillId);
     }
   }
 
   /**
-   * 更新角色 Skill（用于 AI 自我优化）
-   *
-   * @param role - 角色名称
-   * @param content - 新的 Skill 内容
-   * @param version - 版本号（默认 v1）
+   * 向后兼容：加载旧格式的 Skill
    */
-  async updateRoleSkill(role: string, content: string, version: string = 'v1'): Promise<void> {
-    const filePath = path.join(this.skillsDir, version, 'roles', `${role}.md`);
-    await fs.writeFile(filePath, content, 'utf-8');
+  private async loadLegacySkill(skillId: string): Promise<Skill | null> {
+    try {
+      const [category, skillName] = skillId.split('/');
+      const legacyPath = path.join(this.skillsDir, category, `${skillName}.md`);
 
-    // 清除缓存
-    const cacheKey = `role:${role}:${version}`;
-    this.cache.delete(cacheKey);
+      const content = await fs.readFile(legacyPath, 'utf-8');
+
+      const skill: Skill = {
+        id: skillId,
+        name: skillName,
+        description: `${skillName} 技能`,
+        tags: [category],
+        content: content.trim(),
+      };
+
+      // 缓存
+      this.cache.set(skillId, skill);
+      return skill;
+    } catch {
+      return null;
+    }
   }
 
   /**
-   * 创建新版本的 Skill（从现有版本复制）
+   * 根据标签查找 Skill
    *
-   * @param fromVersion - 源版本
-   * @param toVersion - 目标版本
+   * @param tags 标签列表
+   * @returns 匹配的 Skill 元数据列表
    */
-  async createVersion(fromVersion: string, toVersion: string): Promise<void> {
-    const fromDir = path.join(this.skillsDir, fromVersion);
-    const toDir = path.join(this.skillsDir, toVersion);
+  findSkillsByTags(tags: string[]): SkillMetadata[] {
+    return this.catalog.filter(
+      (skill) => skill.tags && tags.some((tag) => skill.tags!.includes(tag)),
+    );
+  }
 
-    // 检查目标版本是否已存在
-    try {
-      await fs.access(toDir);
-      throw new Error(`版本 ${toVersion} 已存在`);
-    } catch {
-      // 目标版本不存在，继续
+  /**
+   * 检查条件
+   */
+  private checkConditions(
+    conditions: Record<string, any> | undefined,
+    context: Record<string, any>,
+  ): boolean {
+    if (!conditions) return true;
+
+    for (const [key, value] of Object.entries(conditions)) {
+      const contextValue = context[key];
+
+      if (Array.isArray(value)) {
+        // 条件是数组：检查上下文值是否在数组中
+        if (!value.includes(contextValue)) return false;
+      } else if (typeof value === 'object' && value !== null) {
+        // 条件是对象：支持复杂条件
+        if (value.$in && !value.$in.includes(contextValue)) return false;
+        if (value.$exists !== undefined) {
+          const exists = contextValue !== undefined;
+          if (exists !== value.$exists) return false;
+        }
+      } else {
+        // 条件是简单值：直接比较
+        if (contextValue !== value) return false;
+      }
     }
 
-    // 复制整个目录
-    await fs.cp(fromDir, toDir, { recursive: true });
+    return true;
+  }
+
+  /**
+   * 获取分类名称
+   */
+  private getCategoryName(category: string): string {
+    const names: Record<string, string> = {
+      core: '核心框架',
+      roles: '角色技能',
+      rulesets: '板子规则',
+      tactics: '战术技能',
+      advanced: '高级套路',
+    };
+    return names[category] || category;
   }
 
   /**
@@ -190,5 +358,50 @@ export class SkillLoaderService implements OnModuleInit {
    */
   clearCache(): void {
     this.cache.clear();
+  }
+
+  // ==================== 向后兼容的方法 ====================
+
+  /**
+   * @deprecated 使用 loadSkill() 代替
+   * @param role 角色名称
+   * @param version 技能版本（默认 'v1'）
+   */
+  async loadRoleSkill(role: string, version: string = 'v1'): Promise<string> {
+    const skillId = `roles/${role}`;
+    const skill = await this.loadSkill(skillId, version);
+    return skill?.content || '';
+  }
+
+  /**
+   * @deprecated 使用 loadSkill() 代替
+   * @param ruleName 规则名称
+   * @param version 技能版本（默认 'v1'）
+   */
+  async loadRuleSkill(ruleName: string, version: string = 'v1'): Promise<string> {
+    const skillId = `core/${ruleName}`;
+    const skill = await this.loadSkill(skillId, version);
+    return skill?.content || '';
+  }
+
+  /**
+   * @deprecated 使用 loadSkill() 代替
+   * @param skillType 技能类型
+   * @param name 技能名称
+   * @param version 技能版本（默认 'v1'）
+   */
+  async loadSkillContent(
+    skillType: 'rule' | 'role',
+    name: string,
+    version: string = 'v1',
+  ): Promise<SkillContent> {
+    const skillId = skillType === 'role' ? `roles/${name}` : `core/${name}`;
+    const skill = await this.loadSkill(skillId, version);
+
+    return {
+      type: skillType,
+      role: skillType === 'role' ? name : undefined,
+      content: skill?.content || '',
+    };
   }
 }

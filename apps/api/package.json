@@ -37,6 +37,7 @@
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "bullmq": "^6.0.10",
+    "gray-matter": "^4.0.3",
     "ioredis": "^5.11.1",
     "nestjs-zod": "^5.5.0",
     "pg": "^8.22.0",

@@ -1,3 +1,11 @@
+---
+name: night-action
+description: 夜间角色技能使用的场景指令和工具调用要求
+tags: [scenario, night-action]
+conditions:
+  scenario: night_action
+---
+
 ## 当前场景：夜间行动
 
 - **重要**：你必须亲自调用工具来表达你的决策

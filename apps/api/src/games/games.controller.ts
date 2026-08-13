@@ -36,10 +36,10 @@ export class GamesController {
   @Post(':id/start')
   @ApiOperation({ summary: '开始对局（投递到队列异步执行）' })
   async start(@Param('id', new ParseUUIDPipe()) id: string) {
-    // 先投递任务（失败后无副作用），再更新状态
-    // 避免状态已更新但任务未投递的情况
-    await this.gameQueue.addGameJob(id);
+    // 先更新状态为 running，再投递任务
+    // 避免 worker 在状态更新前处理任务导致跳过执行
     const game = await this.gamesService.startGame(id);
+    await this.gameQueue.addGameJob(id);
 
     return game;
   }

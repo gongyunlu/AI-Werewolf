@@ -6,7 +6,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
-import { PromptLoaderService } from '../prompts/prompt-loader.service';
+import { createLoadSkillTool } from '../skills/tools/load-skill.tool';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { Env } from '../config/env.validation';
 import type { StructuredToolInterface } from '@langchain/core/tools';
@@ -81,7 +81,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
-    private readonly promptLoader: PromptLoaderService,
   ) {}
 
   /**
@@ -138,10 +137,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         additionalContext: [actionSummary, input.additionalContext].filter(Boolean).join('\n\n'),
       });
 
+      // 1.5. 注入 load_skill 工具（渐进式披露）
+      const skillVersion = context.player.game.skillVersion || 'v1';
+      const loadedSkills = new Set<string>();
+      const loadSkillTool = createLoadSkillTool(this.skillLoader, loadedSkills, skillVersion);
+      const allTools = [...input.availableTools, loadSkillTool];
+
       // 2-3. Reason & Execute Tool（推理 + 执行工具）
       const result = await this.reasonLoop(
         context,
-        input.availableTools,
+        allTools,
         maxIterations,
         threadId,
         input.signal,
@@ -384,9 +389,34 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }): Promise<string> {
     const { scenario, player, memories, context, additionalContext } = options;
 
-    // ===== 从 Prompts 加载（行为约束 + 场景指令）=====
-    const constraints = this.promptLoader.loadConstraints();
-    const scenarioPrompt = this.promptLoader.loadScenarioPrompt(scenario);
+    // 获取游戏的技能版本
+    const skillVersion = player.game.skillVersion || 'v1';
+
+    // ===== Layer 0: 永远加载的核心内容 =====
+
+    // 行为约束
+    const constraintsSkill = await this.skillLoader.loadSkill('core/constraints', skillVersion);
+    const constraints = constraintsSkill?.content || '';
+
+    // 核心决策框架
+    const frameworkSkill = await this.skillLoader.loadSkill('core/framework', skillVersion);
+    const coreFramework = frameworkSkill?.content || '';
+
+    // 基础规则
+    const rulesSkill = await this.skillLoader.loadSkill('core/basic-rules', skillVersion);
+    const basicRules = rulesSkill?.content || '';
+
+    // 场景指令（根据当前 scenario 加载）
+    const scenarioMap: Record<AgentScenario, string> = {
+      [AGENT_SCENARIOS.NIGHT_ACTION]: 'scenarios/night-action',
+      [AGENT_SCENARIOS.DAY_SPEECH]: 'scenarios/day-speech',
+      [AGENT_SCENARIOS.VOTE]: 'scenarios/vote',
+      [AGENT_SCENARIOS.LAST_WORDS]: 'scenarios/last-words',
+      [AGENT_SCENARIOS.SHERIFF_DECIDE_ORDER]: 'scenarios/sheriff-decide-order',
+    };
+    const scenarioSkillId = scenarioMap[scenario];
+    const scenarioSkill = await this.skillLoader.loadSkill(scenarioSkillId, skillVersion);
+    const scenarioPrompt = scenarioSkill?.content || '';
 
     // 基础角色信息（只告诉玩家自己的身份）
     const roleView = `
@@ -415,36 +445,18 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // ===== 从 Skills 加载（决策框架 + 规则 + 角色 + 战术）=====
+    // ===== Layer 1+: 构建可按需加载的技能目录 =====
 
-    // Skills Layer 0: 核心决策框架（永远加载）
-    const coreFramework = await this.skillLoader.loadCoreFramework();
+    // 构建 LoadContext 用于过滤技能目录
+    const loadContext = {
+      role: player.role,
+      faction: player.faction,
+      ruleset: player.game.rulesetId,
+      scenario,
+    };
 
-    // Skills Layer 1: 从文件加载规则 Skill（使用 game.skillVersion）
-    const skillVersion = player.game.skillVersion || 'v1';
-    const ruleSkill = await this.skillLoader.loadRuleSkill(skillVersion);
-
-    // Skills Layer 2: 从文件加载角色 Skill
-    if (!player.role) {
-      throw new Error(`Player ${player.id} 没有分配角色`);
-    }
-    const roleSkill = await this.skillLoader.loadRoleSkill(player.role, skillVersion);
-
-    // Skills Layer 3: 根据场景按需加载战术
-    let tactics = '';
-    if (scenario === AGENT_SCENARIOS.NIGHT_ACTION && player.role === ROLES.WEREWOLF) {
-      // 狼人夜间行动：加载狼人战术（悍跳、倒钩）
-      tactics = await this.skillLoader.loadTacticsByCategory('wolf', skillVersion);
-    } else if (scenario === AGENT_SCENARIOS.DAY_SPEECH) {
-      // 白天发言：根据阵营加载不同战术
-      if (player.faction === FACTIONS.WEREWOLF) {
-        // 狼人：加载狼人战术（悍跳、倒钩、自刀）
-        tactics = await this.skillLoader.loadTacticsByCategory('wolf', skillVersion);
-      } else {
-        // 好人：加载反制战术（识别悍跳、识别倒钩）
-        tactics = await this.skillLoader.loadTacticsByCategory('counter', skillVersion);
-      }
-    }
+    // 生成可按需加载的技能目录（Layer 1+）
+    const skillCatalog = this.skillLoader.getCatalogMarkdown(loadContext);
 
     // 提取人设和策略记忆
     const personaMemory = memories.find((m) => m.type === 'persona');
@@ -482,43 +494,37 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     // 组合完整 System Prompt（渐进式披露）
     const fullPrompt = `
-${constraints}
+      ${constraints}
+      ${roleView}
+      ${teammateInfo}
+      ${scenarioPrompt}
+      ${additionalContext ? `\n${additionalContext}\n` : ''}
 
-${roleView}
+      ## 核心决策框架
+      ${coreFramework}
 
-${teammateInfo}
+      ## 狼人杀基础规则
+      ${basicRules}
 
-${scenarioPrompt}
+      ## 可加载的技能目录
+      以下是你可以按需加载的技能列表。当你需要某个技能的详细内容时，使用 load_skill 工具加载：
+      ${skillCatalog}
 
-${additionalContext ? `\n${additionalContext}\n` : ''}
+      ## 你的人设
+      ${personaMemory?.content || '暂无'}
 
-## 核心决策框架
-${coreFramework}
+      ## 你的策略
+      ${strategyMemory?.content || '暂无'}
+      ${roleSpecificInfo}
 
-## 狼人杀规则
-${ruleSkill}
+      ## 关键信息
+      ${context.critical}
 
-## 你的角色技能
-${roleSkill}
+      ## 最近一轮详细
+      ${context.recent}
 
-${tactics ? `## 战术库\n${tactics}\n` : ''}
-
-## 你的人设
-${personaMemory?.content || '暂无'}
-
-## 你的策略
-${strategyMemory?.content || '暂无'}
-
-${roleSpecificInfo}
-
-## 关键信息
-${context.critical}
-
-## 最近一轮详细
-${context.recent}
-
-## 历史摘要
-${context.history}
+      ## 历史摘要
+      ${context.history}
     `.trim();
 
     return fullPrompt;

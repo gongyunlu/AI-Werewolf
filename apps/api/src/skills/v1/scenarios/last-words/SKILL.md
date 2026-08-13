@@ -1,3 +1,11 @@
+---
+name: last-words
+description: 死亡玩家发表遗言的场景指令
+tags: [scenario, last-words]
+conditions:
+  scenario: last_words
+---
+
 ## 当前场景：遗言
 
 你昨晚死亡，现在是你发表遗言的时刻。

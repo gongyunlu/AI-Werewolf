@@ -1,3 +1,11 @@
+---
+name: vote
+description: 投票阶段的场景指令和决策要求
+tags: [scenario, vote]
+conditions:
+  scenario: vote
+---
+
 ## 当前场景：投票阶段
 
 - 根据当前信息，决定投票给谁
