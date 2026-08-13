@@ -2,9 +2,8 @@ import { AGENT_SCENARIOS, FACTIONS } from '@ai-werewolf/shared';
 import type { GameGraphState, PlayerState } from '../../core/types';
 import type { NodeContext } from '../node.types';
 import { createWolfChatTool, type WolfChatOutput } from '@/agent-runtime/tools/werewolf.tool';
-import { createSkipDiscussionTool } from '@/agent-runtime/tools/skip-discussion.tool';
 import { createProposeKillTool, type ProposeKillOutput } from '@/agent-runtime/tools/werewolf.tool';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { getWolfTeamThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 
 /**
@@ -85,7 +84,7 @@ export async function singleWolfDecision(
       playerId: wolf.id,
       scenario: AGENT_SCENARIOS.NIGHT_ACTION,
       availableTools: tools,
-      maxIterations: 3,
+      maxIterations: 8, // 增加迭代次数，单狼决策需要充分思考
     });
 
     if (result.success && result.result) {
@@ -245,10 +244,8 @@ export async function wolfDiscussion(
       }
 
       // 构建工具
-      const tools = [
-        createWolfChatTool({ gameId: state.gameId, currentPlayerId: wolf.id }),
-        createSkipDiscussionTool({ gameId: state.gameId, currentPlayerId: wolf.id }),
-      ];
+      // 狼人讨论不允许跳过，必须发言协调
+      const tools = [createWolfChatTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
 
       // 构建之前的讨论记录（人类可读格式）
       const previousDiscussion =
@@ -259,8 +256,8 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
 `.trim()
           : '';
 
-      // 每个狼人使用独立的 threadId（整局游戏共享）
-      const wolfThreadId = getPlayerThreadId(state.gameId, wolf.id);
+      // 狼人讨论使用团队共享的 threadId，与个人白天发言隔离
+      const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
       try {
         const result = await context.agentRuntime.run({
@@ -268,7 +265,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           playerId: wolf.id,
           scenario: AGENT_SCENARIOS.NIGHT_ACTION,
           availableTools: tools,
-          maxIterations: 2,
+          maxIterations: 8, // 增加迭代次数，狼人讨论需要充分思考和协调
           threadId: wolfThreadId,
           additionalContext: previousDiscussion, // 注入之前的讨论记录
         });
@@ -349,8 +346,8 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
     // 只给 propose_kill 工具
     const tools = [createProposeKillTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
 
-    // 每个狼人使用独立的 threadId（整局游戏共享）
-    const wolfThreadId = `${state.gameId}-player${wolf.id}`;
+    // 狼人投票使用团队共享的 threadId，与个人白天发言隔离
+    const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
     try {
       const result = await context.agentRuntime.run({
@@ -358,7 +355,7 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
         playerId: wolf.id,
         scenario: AGENT_SCENARIOS.NIGHT_ACTION,
         availableTools: tools,
-        maxIterations: 3,
+        maxIterations: 8, // 增加迭代次数，狼人投票需要充分思考
         threadId: wolfThreadId,
         additionalContext: discussionSummary, // 只注入讨论记录，不包含其他人的投票
       });

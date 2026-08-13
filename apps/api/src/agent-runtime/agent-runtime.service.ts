@@ -586,7 +586,9 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const messages: BaseMessage[] = [
       new SystemMessage(context.systemPrompt),
       ...history,
-      new HumanMessage('请基于当前信息做出决策。'),
+      new HumanMessage(
+        '请基于当前信息做出决策。\n\n**重要**：你必须调用可用的工具来执行你的决策。不要只输出文字说明，必须实际调用工具（如 make_speech、cast_vote、check_identity 等）。',
+      ),
     ];
 
     let finalResult: unknown = null;
@@ -625,7 +627,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
             }),
           );
 
-          finalResult = toolResult;
+          // 只有带 action 字段的工具结果才算有效决策
+          // load_skill 等辅助工具不算最终决策
+          if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
+            finalResult = toolResult;
+          }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
           messages.push(

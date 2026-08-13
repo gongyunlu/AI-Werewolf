@@ -5,7 +5,6 @@ import {
   createMakeSpeechTool,
   type MakeSpeechOutput,
 } from '@/agent-runtime/tools/make-speech.tool';
-import { createSkipActionTool } from '@/agent-runtime/tools/skip-action.tool';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 
@@ -39,10 +38,8 @@ export const createSpeechNode: NodeFactory = (context) => {
     // 按顺序派发 Agent
     for (const player of orderedPlayers) {
       try {
-        const tools = [
-          createMakeSpeechTool({ gameId: state.gameId, currentPlayerId: player.id }),
-          createSkipActionTool({ gameId: state.gameId, currentPlayerId: player.id }),
-        ];
+        // 白天发言是关键环节，不允许跳过
+        const tools = [createMakeSpeechTool({ gameId: state.gameId, currentPlayerId: player.id })];
 
         const result = await context.agentRuntime.run({
           gameId: state.gameId,
