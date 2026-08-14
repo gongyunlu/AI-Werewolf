@@ -6,6 +6,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
+import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { createLoadSkillTool } from '../skills/tools/load-skill.tool';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { Env } from '../config/env.validation';
@@ -26,6 +27,7 @@ type PlayerWithGame = Prisma.PlayerGetPayload<{
 }>;
 
 type EventRecord = Prisma.EventGetPayload<Record<string, never>>;
+type Event = EventRecord;
 
 /**
  * Agent 输入
@@ -65,7 +67,6 @@ interface LayeredContext {
 /**
  * Agent Runtime Service - 完整重构版本
  *
- * 实现 Phase 8 的完整设计：
  * 1. prepareContext - 准备上下文
  * 2. buildLayeredContext - 分层记忆
  * 3. assembleSystemPrompt - 组装 System Prompt（包含 Skill）
@@ -81,6 +82,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
+    private readonly speechSummarizer: SpeechSummarizerService,
   ) {}
 
   /**
@@ -181,12 +183,14 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    *
    * 根据玩家角色返回该玩家有权看到的 Event visibility 类型
    *
-   * @param role 玩家角色
+   * @param player 玩家对象
+   * @param events 事件列表（用于判断女巫是否使用过药物）
    * @returns 可见的 visibility 列表
    */
-  private getVisibleVisibilities(role: string | null): string[] {
+  private async getVisibleVisibilities(player: PlayerWithGame, events: Event[]): Promise<string[]> {
     const visibilities: string[] = [VISIBILITY_TYPES.PUBLIC]; // 所有人都能看到 public
 
+    const role = player.role;
     if (!role) {
       return visibilities;
     }
@@ -197,7 +201,17 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         break;
       case ROLES.WITCH:
         visibilities.push(VISIBILITY_TYPES.WITCH); // 女巫能看到女巫频道
-        visibilities.push(VISIBILITY_TYPES.WOLF); // ⭐ 女巫需要看到狼人刀人信息（刀口）
+
+        // 女巫能看到狼人刀口信息（WOLF 频道），但需要满足条件
+        // 条件：1. 女巫存活  2. 女巫未使用解药
+        const isAlive = !player.deathDay; // deathDay 为 null 表示存活
+        const hasUsedAntidote = events.some(
+          (e) => e.actionType === 'witch_save' && e.actorId === player.id,
+        );
+
+        if (isAlive && !hasUsedAntidote) {
+          visibilities.push(VISIBILITY_TYPES.WOLF); // 能看到狼人刀口
+        }
         break;
       case ROLES.WEREWOLF:
         visibilities.push(VISIBILITY_TYPES.WOLF); // 狼人能看到狼人频道
@@ -237,14 +251,32 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     }
 
     // 2. 查询 Event 历史（按权限过滤）
-    const visibleVisibilities = this.getVisibleVisibilities(player.role);
-    const events = await this.prisma.event.findMany({
-      where: {
-        gameId,
-        visibility: { in: visibleVisibilities }, // ⭐ 按 visibility 过滤
-      },
-      orderBy: { sequence: 'asc' },
-    });
+    // 女巫需要先查询所有事件来判断是否使用过解药
+    let events: Event[];
+
+    if (player.role === ROLES.WITCH) {
+      // 女巫：先查询所有事件，判断是否使用过解药
+      const allEvents = await this.prisma.event.findMany({
+        where: { gameId },
+        orderBy: { sequence: 'asc' },
+      });
+
+      // 获取可见的 visibility 列表（包含状态判断）
+      const visibleVisibilities = await this.getVisibleVisibilities(player, allEvents);
+
+      // 按 visibility 过滤事件
+      events = allEvents.filter((e) => visibleVisibilities.includes(e.visibility));
+    } else {
+      // 其他角色：直接按 visibility 过滤
+      const visibleVisibilities = await this.getVisibleVisibilities(player, []);
+      events = await this.prisma.event.findMany({
+        where: {
+          gameId,
+          visibility: { in: visibleVisibilities },
+        },
+        orderBy: { sequence: 'asc' },
+      });
+    }
 
     // 3. 查询 Memory
     const memories = await this.memoryService.retrieveActiveMemories(
@@ -259,13 +291,42 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       scenario,
     });
 
-    // 5. 组装 System Prompt
+    // 5. 生成个性化发言摘要（仅在白天发言/投票场景）
+    let speechSummary = '';
+    if (scenario === AGENT_SCENARIOS.DAY_SPEECH || scenario === AGENT_SCENARIOS.VOTE) {
+      const currentDay = await this.getCurrentRound(gameId, events);
+      const alivePlayers = await this.prisma.player.findMany({
+        where: {
+          gameId,
+          deathDay: null,
+          id: { not: playerId }, // 排除自己
+        },
+        select: { seatNo: true },
+      });
+      const visiblePlayerSeats = alivePlayers
+        .map((p) => p.seatNo)
+        .filter((seatNo): seatNo is number => seatNo !== null);
+
+      // 使用个性化摘要
+      const personalSummary = await this.speechSummarizer.summarizeForAgent(
+        gameId,
+        currentDay,
+        player.agentId,
+        player.role!,
+        await this.getPrivateInfo(player, events),
+        visiblePlayerSeats,
+      );
+
+      speechSummary = this.formatPersonalSummary(personalSummary);
+    }
+
+    // 6. 组装 System Prompt
     const systemPrompt = await this.assembleSystemPrompt({
       scenario,
       player,
       memories,
       context: layeredContext,
-      additionalContext, // 传递额外的上下文
+      additionalContext: [speechSummary, additionalContext].filter(Boolean).join('\n\n'),
     });
 
     return {
@@ -288,7 +349,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     events: EventRecord[];
     scenario: AgentScenario;
   }): Promise<LayeredContext> {
-    const { player, events } = options;
+    const { player, events, scenario } = options;
     const currentDay = await this.getCurrentRound(player.gameId, events);
 
     // 1. 关键信息：当前状态
@@ -302,12 +363,17 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     });
 
     const critical = `
-当前是第 ${currentDay} 天
-存活玩家：${alivePlayers.map((p) => `${p.seatNo}号位(${p.displayName})`).join('、')}
+      当前是第 ${currentDay} 天\n
+      存活玩家：${alivePlayers.map((p) => `${p.seatNo}号位(${p.displayName})`).join('、')}
     `.trim();
 
     // 2. 最近一轮详细：当天的所有事件
     const recentEvents = events.filter((e) => e.day === currentDay);
+
+    // 在白天发言/投票场景，跳过 player_speech（由摘要替代）
+    const shouldSkipSpeech =
+      scenario === AGENT_SCENARIOS.DAY_SPEECH || scenario === AGENT_SCENARIOS.VOTE;
+
     const recent =
       recentEvents.length > 0
         ? recentEvents
@@ -324,6 +390,10 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
                   if (content.usePoison) return `- 女巫使用了毒药毒 ${content.poisonTarget}号位`;
                   return `- 女巫未使用药`;
                 case 'player_speech':
+                  // 在白天发言/投票场景，跳过原始发言（由摘要替代）
+                  if (shouldSkipSpeech) {
+                    return null;
+                  }
                   return `- ${content.seatNo}号位发言：${content.speech || '(无)'}`;
                 case 'player_vote':
                   return `- ${content.voterSeatNo}号位投票给 ${content.targetSeatNo}号位`;
@@ -333,6 +403,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
                   return `- ${e.actionType}`;
               }
             })
+            .filter(Boolean)
             .join('\n')
         : '暂无';
 
@@ -470,25 +541,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       const history = await this.getSeerCheckHistory(player.gameId, player.id);
       if (history) {
         roleSpecificInfo = `\n## 你的查验历史\n${history}\n`;
-      }
-    }
-
-    // 女巫：刀口信息
-    if (player.role === ROLES.WITCH && scenario === AGENT_SCENARIOS.NIGHT_ACTION) {
-      const currentDay = await this.getCurrentRound(player.gameId, []);
-      const wolfKillEvent = await this.prisma.event.findFirst({
-        where: {
-          gameId: player.gameId,
-          actionType: 'wolf_kill',
-          day: currentDay,
-        },
-        orderBy: { sequence: 'desc' },
-      });
-
-      if (wolfKillEvent) {
-        const content = wolfKillEvent.content as any;
-        const targetSeatNo = content.targetSeatNo;
-        roleSpecificInfo += `\n## 今晚狼刀目标\n${targetSeatNo}号位被狼人刀中。\n`;
       }
     }
 
@@ -788,5 +840,97 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       default:
         return null;
     }
+  }
+
+  /**
+   * 获取 Agent 的私有信息
+   */
+  private async getPrivateInfo(
+    player: PlayerWithGame,
+    events: Event[],
+  ): Promise<{
+    seatNo: number;
+    role: string;
+    teammates?: number[];
+    checkedResults?: Array<{ target: number; result: string }>;
+  }> {
+    const privateInfo: any = {
+      seatNo: player.seatNo!,
+      role: player.role!,
+    };
+
+    // 狼人：获取队友座位号
+    if (player.role === ROLES.WEREWOLF) {
+      const teammates = await this.prisma.player.findMany({
+        where: {
+          gameId: player.gameId,
+          role: ROLES.WEREWOLF,
+          id: { not: player.id },
+        },
+        select: { seatNo: true },
+      });
+
+      privateInfo.teammates = teammates.map((t) => t.seatNo).filter(Boolean);
+    }
+
+    // 预言家：获取查验结果
+    if (player.role === ROLES.SEER) {
+      const checks = events
+        .filter(
+          (e) =>
+            e.actionType === 'seer_check' &&
+            e.actorId === player.id &&
+            e.content &&
+            typeof e.content === 'object',
+        )
+        .map((e) => {
+          const content = e.content as any;
+          return {
+            target: content.targetSeatNo,
+            result: content.result === 'werewolf' ? '狼人' : '好人',
+          };
+        });
+
+      privateInfo.checkedResults = checks;
+    }
+
+    return privateInfo;
+  }
+
+  /**
+   * 格式化个性化摘要
+   */
+  private formatPersonalSummary(summary: {
+    neutralSummary: string;
+    judgments: Array<{
+      speaker: number;
+      trustScore: number;
+      suspicious: boolean;
+      notes: string;
+    }>;
+    actionPlan: string;
+  }): string {
+    const parts: string[] = [];
+
+    // 客观摘要
+    if (summary.neutralSummary) {
+      parts.push(`## 本轮其他玩家发言摘要\n\n[客观事实]\n${summary.neutralSummary}`);
+    }
+
+    // 主观判断
+    if (summary.judgments.length > 0) {
+      const judgmentLines = summary.judgments.map(
+        (j) =>
+          `- ${j.speaker}号位：信任度${j.trustScore}%${j.suspicious ? '（可疑）' : ''} - ${j.notes}`,
+      );
+      parts.push(`\n[我的分析]\n${judgmentLines.join('\n')}`);
+    }
+
+    // 行动计划
+    if (summary.actionPlan) {
+      parts.push(`\n[行动计划]\n${summary.actionPlan}`);
+    }
+
+    return parts.join('\n');
   }
 }

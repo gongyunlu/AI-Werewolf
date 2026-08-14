@@ -4,7 +4,7 @@
   "sourceRoot": "src",
   "compilerOptions": {
     "deleteOutDir": true,
-    "assets": ["skills/**/*.md"],
+    "assets": ["skills/**/*.md", "role-contexts/**/*.md"],
     "watchAssets": true
   }
 }

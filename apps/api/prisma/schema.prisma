@@ -46,6 +46,7 @@ model Game {
   memories          Memory[]
   agentPerformances AgentPerformance[]
   gameSummary       GameSummary?
+  agentJudgments    AgentJudgment[]
 
   @@map("games")
 }
@@ -63,8 +64,9 @@ model Agent {
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  memories Memory[]
-  players  Player[]
+  memories  Memory[]
+  players   Player[]
+  judgments AgentJudgment[]
 
   @@map("agents")
 }
@@ -123,10 +125,11 @@ model Event {
   content    Json     @db.JsonB // 事件负载，结构随 actionType 变化（发言文本、投票详情、夜间行动结果等）
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz // 记录写入时间，不可修改
 
-  game       Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  actor      Player?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  game       Game            @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  actor      Player?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
   modelCalls ModelCall[]
   memories   Memory[]
+  judgments  AgentJudgment[]
 
   @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
   @@map("events")
@@ -272,4 +275,28 @@ model GameSummary {
   game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
   @@map("game_summaries")
+}
+
+// Agent 对发言的主观判断（个性化发言摘要）
+model AgentJudgment {
+  id            String   @id @default(uuid()) @db.Uuid
+  agentId       String   @map("agent_id") @db.Uuid
+  gameId        String   @map("game_id") @db.Uuid
+  speechEventId String   @map("speech_event_id") @db.Uuid
+  day           Int      @db.SmallInt
+  speakerSeatNo Int      @map("speaker_seat_no") @db.SmallInt
+  trustScore    Int      @map("trust_score") @db.SmallInt // 0-100
+  suspicious    Boolean  @default(false)
+  notes         String?  @db.Text
+  relationship  String?  @db.VarChar(20) // 关系标识：'teammate'（队友）、'checked_good'（查验好人）、'checked_wolf'（查验狼人）、'silver'（银水）
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  agent       Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  game        Game  @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  speechEvent Event @relation(fields: [speechEventId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, speechEventId])
+  @@index([agentId, gameId], map: "agent_judgments_agent_game_idx")
+  @@index([gameId, day], map: "agent_judgments_day_idx")
+  @@map("agent_judgments")
 }

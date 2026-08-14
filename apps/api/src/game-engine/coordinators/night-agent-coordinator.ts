@@ -225,10 +225,6 @@ export class NightAgentCoordinator {
       tools = tools.filter((t) => t.name !== 'use_poison');
     }
 
-    // TODO: 将 wolfTarget 信息注入到 System Prompt 中
-    // 让女巫知道今晚被刀的目标是谁
-    // 当前先不传入，后续优化
-
     const result = await this.agentRuntime.run({
       gameId,
       playerId: witchId,

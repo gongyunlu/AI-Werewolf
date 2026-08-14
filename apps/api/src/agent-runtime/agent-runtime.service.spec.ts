@@ -3,6 +3,7 @@ import { AgentRuntimeService } from './agent-runtime.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
+import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { ConfigService } from '@nestjs/config';
 import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
 
@@ -45,9 +46,21 @@ describe('AgentRuntimeService', () => {
         {
           provide: SkillLoaderService,
           useValue: {
+            loadSkill: jest.fn().mockResolvedValue({ content: '测试技能内容' }),
+            getCatalogMarkdown: jest.fn().mockReturnValue('技能目录'),
             loadCoreFramework: jest.fn().mockResolvedValue('核心决策框架'),
             loadRuleSkill: jest.fn().mockResolvedValue('狼人杀规则'),
             loadRoleSkill: jest.fn().mockResolvedValue('角色技能'),
+          },
+        },
+        {
+          provide: SpeechSummarizerService,
+          useValue: {
+            summarizeForAgent: jest.fn().mockResolvedValue({
+              neutralSummary: '',
+              judgments: [],
+              actionPlan: '',
+            }),
           },
         },
         {
@@ -215,7 +228,7 @@ describe('AgentRuntimeService', () => {
       const context = await (service as any).buildLayeredContext({
         player: mockPlayer,
         events: mockEvents,
-        scenario: AGENT_SCENARIOS.VOTE,
+        scenario: AGENT_SCENARIOS.NIGHT_ACTION,
       });
 
       expect(context.critical).toContain('第 3 天');

@@ -103,7 +103,7 @@ export async function singleWolfDecision(
           `[单狼决策] ${wolf.seatNo}号位决定刀 ${toolResult.targetSeatNo}号位${toolResult.reason ? `: ${toolResult.reason}` : ''}`,
         );
 
-        // TODO Phase 8.5+: 保存 Thinking 到数据库或 Event 表
+        // TODO：保存 Thinking 到数据库或 Event 表
         // const thinking: AgentThinking = {
         //   playerId: wolf.id,
         //   playerSeatNo: wolf.seatNo,
