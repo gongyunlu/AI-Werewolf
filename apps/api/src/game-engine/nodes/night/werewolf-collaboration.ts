@@ -321,7 +321,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
  * @param werewolves 存活的狼人列表
  * @param state 游戏状态
  * @param context 节点上下文
- * @param _discussion 讨论历史（预留参数，Phase 8.5+ 用于上下文注入）
+ * @param _discussion 讨论历史
  * @returns 投票记录
  */
 export async function wolfVoting(

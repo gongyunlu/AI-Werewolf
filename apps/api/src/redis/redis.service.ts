@@ -8,7 +8,8 @@ export class RedisService extends Redis implements OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
 
   constructor(config: ConfigService<Env, true>) {
-    super(config.get('REDIS_URL', { infer: true }));
+    const redisUrl = config.get('REDIS_URL', { infer: true });
+    super(redisUrl);
     this.on('error', (err) => this.logger.error('Redis 连接错误', err));
   }
 

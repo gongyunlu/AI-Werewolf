@@ -288,37 +288,34 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const layeredContext = await this.buildLayeredContext({
       player,
       events,
-      scenario,
     });
 
-    // 5. 生成个性化发言摘要（仅在白天发言/投票场景）
+    // 5. 生成个性化发言摘要（所有场景）
     let speechSummary = '';
-    if (scenario === AGENT_SCENARIOS.DAY_SPEECH || scenario === AGENT_SCENARIOS.VOTE) {
-      const currentDay = await this.getCurrentRound(gameId, events);
-      const alivePlayers = await this.prisma.player.findMany({
-        where: {
-          gameId,
-          deathDay: null,
-          id: { not: playerId }, // 排除自己
-        },
-        select: { seatNo: true },
-      });
-      const visiblePlayerSeats = alivePlayers
-        .map((p) => p.seatNo)
-        .filter((seatNo): seatNo is number => seatNo !== null);
-
-      // 使用个性化摘要
-      const personalSummary = await this.speechSummarizer.summarizeForAgent(
+    const currentDay = await this.getCurrentRound(gameId, events);
+    const alivePlayers = await this.prisma.player.findMany({
+      where: {
         gameId,
-        currentDay,
-        player.agentId,
-        player.role!,
-        await this.getPrivateInfo(player, events),
-        visiblePlayerSeats,
-      );
+        deathDay: null,
+        id: { not: playerId }, // 排除自己
+      },
+      select: { seatNo: true },
+    });
+    const visiblePlayerSeats = alivePlayers
+      .map((p) => p.seatNo)
+      .filter((seatNo): seatNo is number => seatNo !== null);
 
-      speechSummary = this.formatPersonalSummary(personalSummary);
-    }
+    // 使用个性化摘要
+    const personalSummary = await this.speechSummarizer.summarizeForAgent(
+      gameId,
+      currentDay,
+      player.agentId,
+      player.role!,
+      await this.getPrivateInfo(player, events),
+      visiblePlayerSeats,
+    );
+
+    speechSummary = this.formatPersonalSummary(personalSummary);
 
     // 6. 组装 System Prompt
     const systemPrompt = await this.assembleSystemPrompt({
@@ -347,9 +344,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   private async buildLayeredContext(options: {
     player: PlayerWithGame;
     events: EventRecord[];
-    scenario: AgentScenario;
   }): Promise<LayeredContext> {
-    const { player, events, scenario } = options;
+    const { player, events } = options;
     const currentDay = await this.getCurrentRound(player.gameId, events);
 
     // 1. 关键信息：当前状态
@@ -370,10 +366,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     // 2. 最近一轮详细：当天的所有事件
     const recentEvents = events.filter((e) => e.day === currentDay);
 
-    // 在白天发言/投票场景，跳过 player_speech（由摘要替代）
-    const shouldSkipSpeech =
-      scenario === AGENT_SCENARIOS.DAY_SPEECH || scenario === AGENT_SCENARIOS.VOTE;
-
+    // player_speech 统一由 SpeechSummarizerService 处理，不在此重复
     const recent =
       recentEvents.length > 0
         ? recentEvents
@@ -390,11 +383,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
                   if (content.usePoison) return `- 女巫使用了毒药毒 ${content.poisonTarget}号位`;
                   return `- 女巫未使用药`;
                 case 'player_speech':
-                  // 在白天发言/投票场景，跳过原始发言（由摘要替代）
-                  if (shouldSkipSpeech) {
-                    return null;
-                  }
-                  return `- ${content.seatNo}号位发言：${content.speech || '(无)'}`;
+                  // 发言统一由 SpeechSummarizerService 处理
+                  return null;
                 case 'player_vote':
                   return `- ${content.voterSeatNo}号位投票给 ${content.targetSeatNo}号位`;
                 case 'death_announcement':
@@ -901,34 +891,74 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 格式化个性化摘要
    */
   private formatPersonalSummary(summary: {
-    neutralSummary: string;
-    judgments: Array<{
+    recentSpeeches: Array<{ day: number; seatNo: number; speech: string }>;
+    olderSpeechesSummary: Array<{ day: number; seatNo: number; summary: string }>;
+    recentJudgments: Array<{
       speaker: number;
       trustScore: number;
       suspicious: boolean;
+      notes: string;
+    }>;
+    olderJudgmentsSummary: Array<{
+      seatNo: number;
+      latestTrustScore: number;
       notes: string;
     }>;
     actionPlan: string;
   }): string {
     const parts: string[] = [];
 
-    // 客观摘要
-    if (summary.neutralSummary) {
-      parts.push(`## 本轮其他玩家发言摘要\n\n[客观事实]\n${summary.neutralSummary}`);
+    // 近2天完整发言
+    if (summary.recentSpeeches.length > 0) {
+      parts.push(`## 近2天发言记录`);
+
+      // 按天分组
+      const byDay = new Map<number, Array<{ seatNo: number; speech: string }>>();
+      for (const s of summary.recentSpeeches) {
+        if (!byDay.has(s.day)) {
+          byDay.set(s.day, []);
+        }
+        byDay.get(s.day)!.push({ seatNo: s.seatNo, speech: s.speech });
+      }
+
+      // 按天输出
+      for (const [day, speeches] of Array.from(byDay.entries()).toSorted((a, b) => a[0] - b[0])) {
+        parts.push(`\n### Day ${day}`);
+        for (const s of speeches) {
+          parts.push(`- ${s.seatNo}号位：${s.speech}`);
+        }
+      }
     }
 
-    // 主观判断
-    if (summary.judgments.length > 0) {
-      const judgmentLines = summary.judgments.map(
-        (j) =>
+    // 2天以前的发言摘要
+    if (summary.olderSpeechesSummary.length > 0) {
+      parts.push(`\n## 历史发言摘要（2天前）`);
+      for (const s of summary.olderSpeechesSummary) {
+        parts.push(`- Day ${s.day} ${s.seatNo}号位：${s.summary}`);
+      }
+    }
+
+    // 我的分析（近2天）
+    if (summary.recentJudgments.length > 0) {
+      parts.push(`\n## 我的分析（近2天）`);
+      for (const j of summary.recentJudgments) {
+        parts.push(
           `- ${j.speaker}号位：信任度${j.trustScore}%${j.suspicious ? '（可疑）' : ''} - ${j.notes}`,
-      );
-      parts.push(`\n[我的分析]\n${judgmentLines.join('\n')}`);
+        );
+      }
+    }
+
+    // 我的历史分析（2天以前摘要）
+    if (summary.olderJudgmentsSummary.length > 0) {
+      parts.push(`\n## 我的历史分析（摘要）`);
+      for (const j of summary.olderJudgmentsSummary) {
+        parts.push(`- ${j.seatNo}号位：最新信任度${j.latestTrustScore}% - ${j.notes}`);
+      }
     }
 
     // 行动计划
     if (summary.actionPlan) {
-      parts.push(`\n[行动计划]\n${summary.actionPlan}`);
+      parts.push(`\n## 行动计划\n${summary.actionPlan}`);
     }
 
     return parts.join('\n');

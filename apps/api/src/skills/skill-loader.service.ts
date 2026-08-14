@@ -66,7 +66,7 @@ export class SkillLoaderService implements OnModuleInit {
   private catalog: SkillMetadata[] = [];
 
   constructor(private readonly configService: ConfigService<Env, true>) {
-    const envSkillsDir = this.configService.get('SKILLS_DIR');
+    const envSkillsDir = this.configService.get('SKILLS_DIR', { infer: true });
     // 当前只支持 v1，未来可以根据配置或参数动态选择版本
     this.skillsDir = envSkillsDir || path.join(__dirname, 'v1');
   }

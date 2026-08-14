@@ -11,6 +11,7 @@ export interface AgentJudgment {
   suspicious: boolean;
   notes: string;
   relationship?: string | null; // 关系标识（teammate/checked_good/checked_wolf/silver）
+  day: number; // 天数，用于时间窗口分层
 }
 
 /**
@@ -89,6 +90,7 @@ export class AgentJudgmentService {
       suspicious: r.suspicious,
       notes: r.notes || '',
       relationship: r.relationship || null,
+      day: r.day,
     }));
   }
 
@@ -115,5 +117,29 @@ export class AgentJudgmentService {
     });
 
     return judgment?.trustScore ?? null;
+  }
+
+  /**
+   * 查询 Agent 在特定天的所有判断（用于增量摘要）
+   *
+   * @param agentId Agent ID
+   * @param gameId 对局 ID
+   * @param day 天数
+   */
+  async getJudgmentsByDay(agentId: string, gameId: string, day: number): Promise<AgentJudgment[]> {
+    const records = await this.prisma.agentJudgment.findMany({
+      where: { agentId, gameId, day },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return records.map((r) => ({
+      speechId: r.speechEventId,
+      speaker: r.speakerSeatNo,
+      trustScore: r.trustScore,
+      suspicious: r.suspicious,
+      notes: r.notes || '',
+      relationship: r.relationship || null,
+      day: r.day,
+    }));
   }
 }
