@@ -10,6 +10,7 @@ import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EventWriterService } from '../events/event-writer.service';
+import { BroadcasterService } from '@/broadcaster/broadcaster.service';
 import { GamePausedException, GameAbortedException } from './game-engine.exception';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { gameLogger } from '../utils/game-logger';
@@ -40,12 +41,14 @@ export class GameEngine {
    * @param toolsFactory 工具工厂
    * @param prisma 数据库服务
    * @param eventWriter Event 写入服务
+   * @param broadcaster SSE 广播服务（可选，测试时可省略）
    */
   constructor(
     private readonly agentRuntime: AgentRuntimeService,
     private readonly toolsFactory: AgentToolsFactory,
     private readonly prisma: PrismaService,
     private readonly eventWriter: EventWriterService,
+    private readonly broadcaster?: BroadcasterService,
   ) {
     // 仅构建节点上下文，延迟其他初始化
     this.nodeContext = {
@@ -53,6 +56,7 @@ export class GameEngine {
       toolsFactory,
       prisma,
       eventWriter,
+      broadcaster,
     };
   }
 

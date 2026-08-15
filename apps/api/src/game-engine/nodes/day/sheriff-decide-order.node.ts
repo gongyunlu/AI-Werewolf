@@ -66,6 +66,9 @@ export const createSheriffDecideOrderNode: NodeFactory = (context) => {
         availableTools: tools,
         maxIterations: 3,
         threadId: getPlayerThreadId(state.gameId, sheriff.id),
+        onStreamToken: (token, contentType) => {
+          context.broadcaster?.broadcastLLMToken(state.gameId, sheriff.id, token, contentType);
+        },
       });
 
       if (result.success && result.result) {

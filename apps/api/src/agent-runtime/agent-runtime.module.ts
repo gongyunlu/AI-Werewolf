@@ -4,6 +4,7 @@ import { AgentRuntimeService } from './agent-runtime.service';
 import { AgentRuntimeController } from './agent-runtime.controller';
 import { AgentToolsFactory } from './tools/agent-tools.factory';
 import { RoleToolsInitializer } from './tools/role-tools-initializer.provider';
+import { AbortControllerManager } from './abort-controller.manager';
 import { MemoryModule } from '../memory/memory.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SkillLoaderModule } from '../skills/skill-loader.module';
@@ -12,7 +13,7 @@ import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.m
 @Module({
   imports: [ConfigModule, PrismaModule, MemoryModule, SkillLoaderModule, SpeechSummarizerModule],
   controllers: [AgentRuntimeController],
-  providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer],
-  exports: [AgentRuntimeService, AgentToolsFactory],
+  providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer, AbortControllerManager],
+  exports: [AgentRuntimeService, AgentToolsFactory, AbortControllerManager],
 })
 export class AgentRuntimeModule {}

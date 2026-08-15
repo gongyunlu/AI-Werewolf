@@ -1,17 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { ACTION_TYPES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
+import { EventBusService } from '@/event-bus/event-bus.service';
 
 /**
  * Event 写入服务
  *
- * 负责将游戏事件写入 Event 表
+ * 负责将游戏事件写入 Event 表并通过 EventBus 广播
  */
 @Injectable()
 export class EventWriterService {
   private readonly logger = new Logger(EventWriterService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly eventBus: EventBusService,
+  ) {}
 
   /**
    * 写入预言家查验事件
@@ -28,7 +32,7 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
@@ -46,6 +50,8 @@ export class EventWriterService {
       },
     });
 
+    await this.eventBus.publish(event);
+
     this.logger.debug(`[Event] 写入预言家查验: Day ${day}, ${targetSeatNo}号位 -> ${result}`);
   }
 
@@ -62,7 +68,7 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
@@ -78,6 +84,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(
       `[Event] 写入狼人刀人: Day ${day}, ${targetSeatNo ? `${targetSeatNo}号位` : '空刀'}`,
@@ -99,7 +107,7 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
@@ -116,6 +124,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(
       `[Event] 写入女巫解药: Day ${day}, ${targetSeatNo === 0 ? '未使用' : `救了 ${targetSeatNo}号位`}`,
@@ -137,7 +147,7 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
@@ -156,6 +166,8 @@ export class EventWriterService {
       },
     });
 
+    await this.eventBus.publish(event);
+
     this.logger.debug(
       `[Event] 写入女巫毒药: Day ${day}, ${targetSeatNo === 0 ? '未使用' : `毒了 ${targetSeatNo}号位`}`,
     );
@@ -173,14 +185,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'day_announce',
         actionType: 'death_announcement',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId: null,
         targetIds: deaths.map((d) => d.playerId),
         content: {
@@ -191,6 +203,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(`[Event] 写入死亡公告: Day ${day}, ${deaths.length} 人死亡`);
   }
@@ -203,14 +217,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'day_announce',
         actionType: 'peaceful_night',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId: null,
         targetIds: [],
         content: {
@@ -219,11 +233,13 @@ export class EventWriterService {
       },
     });
 
+    await this.eventBus.publish(event);
+
     this.logger.debug(`[Event] 写入平安夜: Day ${day}`);
   }
 
   /**
-   * 写入玩家发言事件
+   * 写入玩家发言事件（白天公开发言）
    */
   async writePlayerSpeechEvent(options: {
     gameId: string;
@@ -232,30 +248,76 @@ export class EventWriterService {
     seatNo: number;
     content: string;
     thinking?: string; // AI 的推理过程
-  }): Promise<void> {
+  }): Promise<number> {
     const { gameId, day, actorId, seatNo, content, thinking } = options;
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'speech',
         actionType: 'player_speech',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId,
         targetIds: [],
         content: {
           seatNo,
           speech: content,
-          thinking, // 保存推理过程
+          thinking,
         },
       },
     });
 
+    await this.eventBus.publish(event);
+
     this.logger.debug(`[Event] 写入玩家发言: Day ${day}, ${seatNo}号位`);
+
+    return sequence;
+  }
+
+  /**
+   * 写入狼人夜间讨论事件（仅狼队可见）
+   */
+  async writeWolfDiscussionEvent(options: {
+    gameId: string;
+    day: number;
+    actorId: string;
+    seatNo: number;
+    content: string;
+    round: number; // 讨论轮次
+    thinking?: string;
+  }): Promise<number> {
+    const { gameId, day, actorId, seatNo, content, round, thinking } = options;
+
+    const sequence = await this.getNextSequence(gameId);
+
+    const event = await this.prisma.event.create({
+      data: {
+        gameId,
+        sequence,
+        day,
+        phase: 'night',
+        actionType: ACTION_TYPES.SPEECH,
+        visibility: VISIBILITY_TYPES.WOLF,
+        actorId,
+        targetIds: [],
+        content: {
+          seatNo,
+          speech: content,
+          round,
+          thinking,
+        },
+      },
+    });
+
+    await this.eventBus.publish(event);
+
+    this.logger.debug(`[Event] 写入狼人讨论: Day ${day}, 第${round}轮, ${seatNo}号位`);
+
+    return sequence;
   }
 
   /**
@@ -272,14 +334,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'vote',
         actionType: 'player_vote',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId,
         targetIds: [],
         content: {
@@ -288,6 +350,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(
       `[Event] 写入玩家投票: Day ${day}, ${voterSeatNo}号位 -> ${targetSeatNo}号位`,
@@ -308,14 +372,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'execute',
         actionType: 'player_exiled',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId: null,
         targetIds: [targetId],
         content: {
@@ -325,6 +389,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(`[Event] 写入放逐执行: Day ${day}, ${targetSeatNo}号位`);
   }
@@ -342,14 +408,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'execute',
         actionType: 'idiot_reveal',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId: playerId,
         targetIds: [],
         content: {
@@ -358,6 +424,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(`[Event] 写入白痴翻牌: Day ${day}, ${seatNo}号位`);
   }
@@ -376,7 +444,7 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
@@ -393,6 +461,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(
       `[Event] 写入警长决定发言顺序: Day ${day}, ${direction === 'left' ? '左手（逆时针）' : '右手（顺时针）'}`,
@@ -414,14 +484,14 @@ export class EventWriterService {
 
     const sequence = await this.getNextSequence(gameId);
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         gameId,
         sequence,
         day,
         phase: 'speech',
         actionType: 'speech_order_determined',
-        visibility: VISIBILITY_TYPES.PUBLIC, // 所有人可见
+        visibility: VISIBILITY_TYPES.PUBLIC,
         actorId: null,
         targetIds: [],
         content: {
@@ -433,6 +503,8 @@ export class EventWriterService {
         },
       },
     });
+
+    await this.eventBus.publish(event);
 
     this.logger.debug(`[Event] 写入发言顺序: Day ${day}, ${speechOrder.join(' → ')} (${reason})`);
   }

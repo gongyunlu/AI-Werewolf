@@ -32,6 +32,15 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
       return {};
     }
 
+    // 法官播报：女巫请睁眼
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'night',
+      state.currentDay,
+      '女巫请睁眼，今晚有人被狼人刀中，你是否使用解药？',
+      'witchAntidote',
+    );
+
     // 构建狼刀目标信息
     const targetPlayer = state.players.find((p) => p.id === state.wolfTarget);
     if (!targetPlayer) {
@@ -59,6 +68,9 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
         maxIterations: 5,
         threadId: getPlayerThreadId(state.gameId, witch.id),
         additionalContext: wolfTargetInfo,
+        onStreamToken: (token, contentType) => {
+          context.broadcaster?.broadcastLLMToken(state.gameId, witch.id, token, contentType);
+        },
       });
 
       if (result.success && result.result) {
@@ -101,7 +113,9 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
       }
 
       // Agent 调用失败，触发降级策略
-      gameLogger.warn('[女巫解药] Agent 执行失败，降级为自动使用');
+      gameLogger.warn(
+        `[女巫解药] Agent 执行失败，降级为自动使用${result.error ? `: ${result.error}` : ''}`,
+      );
     } catch (error) {
       gameLogger.error(
         `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,

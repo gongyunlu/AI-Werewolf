@@ -33,6 +33,15 @@ export const createWerewolfKillNode: NodeFactory = (context) => {
       return {};
     }
 
+    // 法官播报：狼人请睁眼
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'night',
+      state.currentDay,
+      '天黑了，狼人请睁眼，请选择你们要击杀的目标。',
+      'wolfKill',
+    );
+
     // 使用多 Agent 协作流程
     let targetPlayerId: string | null = null;
     try {

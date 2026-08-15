@@ -17,6 +17,15 @@ export const createSeerCheckNode: NodeFactory = (context) => {
       return {};
     }
 
+    // 法官播报：预言家请睁眼
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'night',
+      state.currentDay,
+      '预言家请睁眼，请选择要查验的玩家。',
+      'seerCheck',
+    );
+
     // 尝试使用 Agent 决策
     try {
       const tools = context.toolsFactory.buildNightActionTools(
@@ -31,6 +40,9 @@ export const createSeerCheckNode: NodeFactory = (context) => {
         availableTools: tools,
         maxIterations: 5,
         threadId: getPlayerThreadId(state.gameId, seer.id),
+        onStreamToken: (token, contentType) => {
+          context.broadcaster?.broadcastLLMToken(state.gameId, seer.id, token, contentType);
+        },
       });
 
       if (result.success && result.result) {
@@ -66,7 +78,9 @@ export const createSeerCheckNode: NodeFactory = (context) => {
           gameLogger.warn('[预言家查验] Agent 未调用 check_identity，降级为随机查验');
         }
       } else {
-        gameLogger.warn('[预言家查验] Agent 执行失败，降级为随机查验');
+        gameLogger.warn(
+          `[预言家查验] Agent 执行失败，降级为随机查验${result.error ? `: ${result.error}` : ''}`,
+        );
       }
     } catch (error) {
       gameLogger.error(

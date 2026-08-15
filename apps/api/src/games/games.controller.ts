@@ -5,12 +5,17 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
+  Res,
   BadRequestException,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { CreateGameDto } from './dto/create-game.dto';
 import { GamesService } from './games.service';
 import { GameQueueService } from '../game-queue/game-queue.service';
+import { BroadcasterService } from '../broadcaster/broadcaster.service';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 
 @ApiTags('games')
@@ -19,6 +24,7 @@ export class GamesController {
   constructor(
     private readonly gamesService: GamesService,
     private readonly gameQueue: GameQueueService,
+    private readonly broadcaster: BroadcasterService,
   ) {}
 
   @Post()
@@ -54,6 +60,36 @@ export class GamesController {
   @ApiOperation({ summary: '查询对局的队列状态' })
   getQueueStatus(@Param('id', new ParseUUIDPipe()) id: string) {
     return this.gameQueue.getJobStatus(id);
+  }
+
+  @Get(':id/stream')
+  @ApiOperation({ summary: 'SSE 实时事件流（支持断点续传）' })
+  async stream(
+    @Param('id', new ParseUUIDPipe()) gameId: string,
+    @Res() response: Response,
+    @Query('lastEventId') lastEventId?: string,
+  ) {
+    // 验证游戏是否存在
+    const game = await this.gamesService.getGameById(gameId);
+    if (!game) {
+      response.status(404).json({ message: '游戏不存在' });
+      return;
+    }
+
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.setHeader('X-Accel-Buffering', 'no'); // 禁用 Nginx 缓冲
+    response.flushHeaders();
+
+    const clientId = randomUUID();
+
+    // 先订阅再查库，避免查库期间写入的事件丢失（重叠部分前端按 sequence 去重）
+    this.broadcaster.addClient(clientId, gameId, response);
+
+    const startSeq = lastEventId ? Number.parseInt(lastEventId, 10) : 0;
+    await this.broadcaster.sendConnectionReady(gameId, response);
+    await this.broadcaster.replayHistory(gameId, startSeq, response);
   }
 
   @Post(':id/cancel')

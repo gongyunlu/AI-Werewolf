@@ -561,7 +561,7 @@ export class SpeechSummarizerService {
           : '';
 
       lines.push(
-        `- ${speaker}号位：信任度${latest.trustScore}%${trend}${latest.suspicious ? '（可疑）' : ''} - ${latest.notes}`,
+        `- ${speaker}号位（事件ID: ${latest.speechId}）：信任度${latest.trustScore}%${trend}${latest.suspicious ? '（可疑）' : ''} - ${latest.notes}`,
       );
     }
 
@@ -590,7 +590,7 @@ export class SpeechSummarizerService {
     const lines: string[] = [];
     for (const [speaker, judgment] of byPlayer.entries()) {
       lines.push(
-        `- ${speaker}号位：信任度${judgment.trustScore}%${judgment.suspicious ? '（可疑）' : ''}`,
+        `- ${speaker}号位（事件ID: ${judgment.speechId}）：信任度${judgment.trustScore}%${judgment.suspicious ? '（可疑）' : ''}`,
       );
     }
 

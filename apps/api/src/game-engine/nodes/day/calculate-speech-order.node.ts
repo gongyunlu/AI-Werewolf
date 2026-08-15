@@ -47,6 +47,15 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
       currentTime: new Date(),
     });
 
+    // 广播发言顺序计算结果
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'speech',
+      state.currentDay,
+      `今天的发言顺序已确定：${orderResult.speechOrder.join(' → ')} (${orderResult.reason})`,
+      'calculate_speech_order',
+    );
+
     // 写入 Event（记录发言顺序）
     await context.eventWriter.writeSpeechOrderDeterminedEvent({
       gameId: state.gameId,

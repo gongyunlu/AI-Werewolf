@@ -70,6 +70,9 @@ async function lastWordsNode(
         availableTools: tools,
         maxIterations: 3,
         threadId: getPlayerThreadId(state.gameId, player.id),
+        onStreamToken: (token, contentType) => {
+          context.broadcaster?.broadcastLLMToken(state.gameId, player.id, token, contentType);
+        },
       });
 
       if (result.success && result.result) {

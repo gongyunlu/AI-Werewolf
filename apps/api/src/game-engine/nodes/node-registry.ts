@@ -11,8 +11,8 @@ import { checkWinNode } from './shared/check-win.node';
 import { createSpeechNode } from './day/speech.node';
 import { createVoteNode } from './day/vote.node';
 import { createExecuteNode } from './day/execute.node';
-import { initNode } from './init/init.node';
-import { gameEndNode } from './shared/game-end.node';
+import { createInitNode } from './init/init.node';
+import { createGameEndNode } from './shared/game-end.node';
 import { processDeathSkillsNode } from './day/process-death-skills.node';
 import { createProcessExileSkillsNode } from './day/process-exile-skills.node';
 import { createSheriffDecideOrderNode } from './day/sheriff-decide-order.node';
@@ -73,12 +73,12 @@ export class NodeRegistry {
     this.factories.set('calculateSpeechOrder', createCalculateSpeechOrderNode);
     this.factories.set('pkSpeech', createPkSpeechNode);
     this.factories.set('pkVote', createPkVoteNode);
+    this.factories.set('init', createInitNode);
+    this.factories.set('gameEnd', createGameEndNode);
 
     // 无需依赖注入的节点（静态节点）
-    this.staticNodes.set('init', initNode);
     this.staticNodes.set('checkWin', checkWinNode);
     this.staticNodes.set('processDeathSkills', processDeathSkillsNode);
-    this.staticNodes.set('gameEnd', gameEndNode);
   }
 
   /**

@@ -1,12 +1,20 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
-import { SystemMessage, HumanMessage, ToolMessage, AIMessage } from '@langchain/core/messages';
+import {
+  SystemMessage,
+  HumanMessage,
+  ToolMessage,
+  AIMessage,
+  AIMessageChunk,
+} from '@langchain/core/messages';
+import { concat } from '@langchain/core/utils/stream';
 import type { BaseMessage } from '@langchain/core/messages';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
+import { AbortControllerManager } from './abort-controller.manager';
 import { createLoadSkillTool } from '../skills/tools/load-skill.tool';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { Env } from '../config/env.validation';
@@ -41,6 +49,8 @@ export interface AgentInput {
   threadId?: string; // 会话 ID，默认使用 gameId-playerId
   additionalContext?: string; // 额外的上下文信息（例如狼人投票时的讨论摘要）
   signal?: AbortSignal; // 用于中断 LLM 调用
+  onStreamToken?: (token: string, contentType: 'thinking' | 'content') => void; // 流式输出回调
+  onStreamComplete?: (fullContent: string, contentType: 'thinking' | 'content') => void; // 流式完成回调
 }
 
 /**
@@ -83,6 +93,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
+    private readonly abortManager: AbortControllerManager,
   ) {}
 
   /**
@@ -129,6 +140,15 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const maxIterations = input.maxIterations ?? 5;
     const threadId = input.threadId ?? getPlayerThreadId(input.gameId, input.playerId);
 
+    // 自动创建并注册 AbortController（如果未提供 signal）
+    let autoController: AbortController | null = null;
+    let signal = input.signal;
+
+    if (!signal) {
+      autoController = this.abortManager.register(input.gameId);
+      signal = autoController.signal;
+    }
+
     try {
       // 0. Middleware: 自动构建行动摘要
       const actionSummary = await this.buildActionSummary(threadId);
@@ -151,7 +171,9 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         allTools,
         maxIterations,
         threadId,
-        input.signal,
+        signal,
+        input.onStreamToken,
+        input.onStreamComplete,
       );
 
       return {
@@ -175,6 +197,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         error: error instanceof Error ? error.message : String(error),
         iterations: 0,
       };
+    } finally {
+      // 清理自动创建的 AbortController
+      if (autoController) {
+        this.abortManager.unregister(input.gameId, autoController);
+      }
     }
   }
 
@@ -602,7 +629,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   /**
    * 步骤 2-3: Reason Loop（推理循环 + 工具执行）
    *
-   * ReAct 循环 + 会话历史管理
+   * ReAct 循环 + 会话历史管理 + 流式输出
    */
   private async reasonLoop(
     context: {
@@ -614,11 +641,14 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     maxIterations: number,
     threadId: string,
     signal?: AbortSignal,
+    onStreamToken?: (token: string, contentType: 'thinking' | 'content') => void,
+    onStreamComplete?: (fullContent: string, contentType: 'thinking' | 'content') => void,
   ): Promise<{ finalResult: unknown; iterations: number; thinking?: string }> {
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
       model: this.configService.get('ARK_DEFAULT_MODEL'),
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      streaming: !!onStreamToken, // 仅在有回调时启用流式
     }).bindTools(tools);
 
     // 加载会话历史
@@ -637,58 +667,145 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     let thinking: string | undefined;
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
-      const response = await model.invoke(messages, { signal });
-      messages.push(response);
+      let fullContent = '';
 
-      // 捕获推理内容
-      if (typeof response.content === 'string' && response.content.trim()) {
-        thinking = response.content;
-      }
+      if (onStreamToken) {
+        // 流式模式：累积所有 chunk 以获取完整的 tool_calls
+        const stream = await model.stream(messages, { signal });
+        let gatheredMessage: AIMessageChunk | undefined;
 
-      const toolCalls = response.tool_calls ?? [];
-      if (toolCalls.length === 0) {
-        if (iteration === maxIterations - 1) {
-          throw new Error('超出迭代上限，未产出决策');
-        }
-        continue;
-      }
-
-      // 执行工具
-      for (const toolCall of toolCalls) {
-        const tool = tools.find((t) => t.name === toolCall.name);
-        if (!tool) {
-          throw new Error(`工具 ${toolCall.name} 未注册`);
-        }
-
-        try {
-          const toolResult = await tool.invoke(toolCall.args ?? {});
-          messages.push(
-            new ToolMessage({
-              content: JSON.stringify(toolResult),
-              tool_call_id: toolCall.id!,
-            }),
-          );
-
-          // 只有带 action 字段的工具结果才算有效决策
-          // load_skill 等辅助工具不算最终决策
-          if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
-            finalResult = toolResult;
+        for await (const chunk of stream) {
+          // 检测：如果 signal 被取消，抛出 AbortError
+          if (signal?.aborted) {
+            throw new Error('LLM generation aborted: no active SSE connections');
           }
-        } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          messages.push(
-            new ToolMessage({
-              content: JSON.stringify({ error: errorMsg }),
-              tool_call_id: toolCall.id!,
-            }),
-          );
-        }
-      }
 
-      // 所有工具执行完毕后，如果有成功的结果，保存历史并返回
-      if (finalResult !== null) {
-        await this.saveHistory(threadId, messages.slice(1));
-        return { finalResult, iterations: iteration + 1, thinking };
+          // 累积完整消息（tool_call_chunks 需跨 chunk 拼接才能得到完整 tool_calls）
+          gatheredMessage = gatheredMessage === undefined ? chunk : concat(gatheredMessage, chunk);
+
+          // 处理文本内容（实时推送）
+          if (typeof chunk.content === 'string' && chunk.content) {
+            fullContent += chunk.content;
+            onStreamToken(chunk.content, 'thinking');
+          }
+        }
+
+        // 流式完成回调
+        if (onStreamComplete && fullContent) {
+          onStreamComplete(fullContent, 'thinking');
+        }
+
+        thinking = fullContent;
+
+        // 检查累积后的消息是否包含 tool_calls
+        const toolCalls = gatheredMessage?.tool_calls ?? [];
+        if (toolCalls.length === 0) {
+          // 没有工具调用，继续下一轮迭代
+          if (fullContent) {
+            messages.push(new AIMessage(fullContent));
+          }
+          if (iteration === maxIterations - 1) {
+            throw new Error('超出迭代上限，未产出有效决策');
+          }
+          continue;
+        }
+
+        // 有工具调用，将完整消息加入历史
+        if (gatheredMessage) {
+          messages.push(gatheredMessage);
+        }
+
+        // 执行工具
+        for (const toolCall of toolCalls) {
+          const tool = tools.find((t) => t.name === toolCall.name);
+          if (!tool) {
+            throw new Error(`工具 ${toolCall.name} 未注册`);
+          }
+
+          try {
+            const toolResult = await tool.invoke(toolCall.args ?? {});
+            messages.push(
+              new ToolMessage({
+                content: JSON.stringify(toolResult),
+                tool_call_id: toolCall.id!,
+              }),
+            );
+
+            // 只有带 action 字段的工具结果才算有效决策
+            if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
+              finalResult = toolResult;
+            }
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            messages.push(
+              new ToolMessage({
+                content: JSON.stringify({ error: errorMsg }),
+                tool_call_id: toolCall.id!,
+              }),
+            );
+          }
+        }
+
+        // 所有工具执行完毕后，如果有成功的结果，保存历史并返回
+        if (finalResult !== null) {
+          await this.saveHistory(threadId, messages.slice(1));
+          return { finalResult, iterations: iteration + 1, thinking };
+        }
+      } else {
+        // 非流式模式（原有逻辑）
+        const response = await model.invoke(messages, { signal });
+        messages.push(response);
+
+        // 捕获推理内容
+        if (typeof response.content === 'string' && response.content.trim()) {
+          thinking = response.content;
+        }
+
+        const toolCalls = response.tool_calls ?? [];
+        if (toolCalls.length === 0) {
+          if (iteration === maxIterations - 1) {
+            throw new Error('超出迭代上限，未产出决策');
+          }
+          continue;
+        }
+
+        // 执行工具
+        for (const toolCall of toolCalls) {
+          const tool = tools.find((t) => t.name === toolCall.name);
+          if (!tool) {
+            throw new Error(`工具 ${toolCall.name} 未注册`);
+          }
+
+          try {
+            const toolResult = await tool.invoke(toolCall.args ?? {});
+            messages.push(
+              new ToolMessage({
+                content: JSON.stringify(toolResult),
+                tool_call_id: toolCall.id!,
+              }),
+            );
+
+            // 只有带 action 字段的工具结果才算有效决策
+            // load_skill 等辅助工具不算最终决策
+            if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
+              finalResult = toolResult;
+            }
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            messages.push(
+              new ToolMessage({
+                content: JSON.stringify({ error: errorMsg }),
+                tool_call_id: toolCall.id!,
+              }),
+            );
+          }
+        }
+
+        // 所有工具执行完毕后，如果有成功的结果，保存历史并返回
+        if (finalResult !== null) {
+          await this.saveHistory(threadId, messages.slice(1));
+          return { finalResult, iterations: iteration + 1, thinking };
+        }
       }
     }
 

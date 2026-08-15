@@ -22,6 +22,10 @@ export const processDeathSkillsNode: GameNode = async (state: GameGraphState) =>
 
   gameLogger.debug(`[死亡技能] 处理 ${deadPlayers.length} 名死亡玩家的技能`);
 
+  // 广播死亡技能检查（需要通过 context 传入 broadcaster）
+  // TODO: 当前 processDeathSkillsNode 未使用 NodeFactory 模式，无法访问 context
+  // 需要重构为 createProcessDeathSkillsNode(context) 后才能添加广播
+
   // TODO: 检查猎人
   const hunter = deadPlayers.find((p) => p.role === ROLES.HUNTER);
   if (hunter) {

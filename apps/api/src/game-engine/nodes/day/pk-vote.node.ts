@@ -62,6 +62,9 @@ export const createPkVoteNode: NodeFactory = (context) => {
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
           additionalContext: `这是PK投票，你只能投给以下候选人之一: ${state.pkCandidates!.join(', ')}号位。不能弃票。`,
+          onStreamToken: (token, contentType) => {
+            context.broadcaster?.broadcastLLMToken(state.gameId, player.id, token, contentType);
+          },
         });
 
         if (result.success && result.result) {

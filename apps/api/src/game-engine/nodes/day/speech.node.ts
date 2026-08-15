@@ -21,6 +21,14 @@ export const createSpeechNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
     gameLogger.debug(`[发言阶段] Day ${state.currentDay} 开始发言`);
 
+    // 法官播报：请按顺序发言
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'speech',
+      state.currentDay,
+      '请存活玩家按顺序发言。',
+    );
+
     const alivePlayers = state.players.filter((p) => p.isAlive);
 
     // 使用预计算的发言顺序
@@ -38,6 +46,14 @@ export const createSpeechNode: NodeFactory = (context) => {
     // 按顺序派发 Agent
     for (const player of orderedPlayers) {
       try {
+        // 检查是否有活跃 SSE 连接，如果没有则跳过该玩家
+        if (!context.broadcaster?.hasActiveConnections(state.gameId)) {
+          gameLogger.debug(
+            `[发言阶段] 无活跃 SSE 连接，跳过 ${player.seatNo}号位（游戏将在下次恢复时重新执行）`,
+          );
+          throw new Error('No active SSE connections');
+        }
+
         // 白天发言是关键环节，不允许跳过
         const tools = [createMakeSpeechTool({ gameId: state.gameId, currentPlayerId: player.id })];
 
@@ -48,6 +64,9 @@ export const createSpeechNode: NodeFactory = (context) => {
           availableTools: tools,
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
+          onStreamToken: (token, contentType) => {
+            context.broadcaster?.broadcastLLMToken(state.gameId, player.id, token, contentType);
+          },
         });
 
         if (result.success && result.result) {
@@ -63,7 +82,7 @@ export const createSpeechNode: NodeFactory = (context) => {
               actorId: player.id,
               seatNo: player.seatNo,
               content: toolResult.content,
-              thinking: result.thinking, // 传递推理过程
+              thinking: result.thinking,
             });
           } else {
             gameLogger.debug(`[发言阶段] ${player.seatNo}号位跳过发言`);

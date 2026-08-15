@@ -14,6 +14,7 @@ import { GameEngineModule } from './game-engine/core/game-engine.module';
 import { RulesetsModule } from './rulesets/rulesets.module';
 import { GameQueueModule } from './game-queue/game-queue.module';
 import { GameExecutorModule } from './game-executor/game-executor.module';
+import { BroadcasterModule } from './broadcaster/broadcaster.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { GameExecutorModule } from './game-executor/game-executor.module';
     GameEngineModule,
     GameExecutorModule,
     GameQueueModule,
+    BroadcasterModule,
   ],
   controllers: [AppController],
   providers: [AppService],

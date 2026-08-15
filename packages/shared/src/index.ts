@@ -9,3 +9,4 @@ export * from './constants/purposes.js';
 export * from './constants/memory-types.js';
 export * from './constants/global-memory-types.js';
 export * from './constants/agent-scenarios.js';
+export * from './sse-events.js';

@@ -7,9 +7,29 @@ import { gameLogger } from '../../utils/game-logger';
  */
 export const createAnnounceDayNode: NodeFactory = (context) => {
   return async (state: GameGraphState) => {
+    // 法官播报：天亮了
+    context.broadcaster?.broadcastAnnouncement(
+      state.gameId,
+      'day_announce',
+      state.currentDay,
+      `天亮了，第 ${state.currentDay} 天开始。`,
+    );
+
     if (state.nightDeaths?.length) {
       const deadPlayerIds = state.nightDeaths.map((d) => d.playerId).join(', ');
       gameLogger.log(`[死亡公告] 昨晚死亡的玩家: ${deadPlayerIds}`);
+
+      // 法官播报死讯
+      const seatNos = state.nightDeaths
+        .map((d) => state.players.find((p) => p.id === d.playerId)?.seatNo)
+        .filter(Boolean)
+        .join('号、');
+      context.broadcaster?.broadcastAnnouncement(
+        state.gameId,
+        'day_announce',
+        state.currentDay,
+        `昨晚，${seatNos}号玩家死亡。`,
+      );
 
       // 写入死亡公告 Event
       const deaths = state.nightDeaths.map((d) => {
@@ -31,6 +51,14 @@ export const createAnnounceDayNode: NodeFactory = (context) => {
       });
     } else {
       gameLogger.log(`[死亡公告] 昨晚平安夜`);
+
+      // 法官播报：平安夜
+      context.broadcaster?.broadcastAnnouncement(
+        state.gameId,
+        'day_announce',
+        state.currentDay,
+        '昨晚是平安夜，无人死亡。',
+      );
 
       // 写入平安夜 Event
       await context.eventWriter.writePeacefulNightEvent({

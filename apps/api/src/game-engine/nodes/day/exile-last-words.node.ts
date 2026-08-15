@@ -54,6 +54,7 @@ async function exileLastWordsNode(
       }),
     ];
 
+    // 缓存玩家快照
     const result = await context.agentRuntime.run({
       gameId: state.gameId,
       playerId: exiledPlayer.id,
@@ -61,6 +62,9 @@ async function exileLastWordsNode(
       availableTools: tools,
       maxIterations: 3,
       threadId: getPlayerThreadId(state.gameId, exiledPlayer.id),
+      onStreamToken: (token, contentType) => {
+        context.broadcaster?.broadcastLLMToken(state.gameId, exiledPlayer.id, token, contentType);
+      },
     });
 
     if (result.success && result.result) {
