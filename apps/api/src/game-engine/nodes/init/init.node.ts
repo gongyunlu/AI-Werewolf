@@ -5,7 +5,7 @@ import { gameLogger } from '../../utils/game-logger';
 /**
  * 初始化节点工厂
  */
-export const createInitNode: NodeFactory = (context) => {
+export const createInitNode: NodeFactory = (_context) => {
   return async (state: GameGraphState) => {
     gameLogger.log('[初始化] 游戏开始');
 
@@ -15,15 +15,6 @@ export const createInitNode: NodeFactory = (context) => {
     }
 
     gameLogger.debug(`[初始化] 玩家数量: ${state.players.length}`);
-
-    // 广播游戏开始
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'night',
-      1,
-      `游戏开始！共 ${state.players.length} 名玩家，第一夜即将开始...`,
-      'game_start',
-    );
 
     // 设置初始状态
     return {

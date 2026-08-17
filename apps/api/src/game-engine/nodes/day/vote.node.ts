@@ -20,12 +20,6 @@ export const createVoteNode: NodeFactory = (context) => {
     gameLogger.debug(`[投票阶段] Day ${state.currentDay} 开始投票`);
 
     // 法官播报：请投票
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'vote',
-      state.currentDay,
-      '请存活玩家投票。',
-    );
 
     const alivePlayers = state.players.filter((p) => p.isAlive);
 
@@ -49,9 +43,6 @@ export const createVoteNode: NodeFactory = (context) => {
           availableTools: tools,
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
-          onStreamToken: (token, contentType) => {
-            context.broadcaster?.broadcastLLMToken(state.gameId, player.id, token, contentType);
-          },
         });
 
         if (result.success && result.result) {

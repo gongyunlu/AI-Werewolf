@@ -18,13 +18,6 @@ export const createSeerCheckNode: NodeFactory = (context) => {
     }
 
     // 法官播报：预言家请睁眼
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'night',
-      state.currentDay,
-      '预言家请睁眼，请选择要查验的玩家。',
-      'seerCheck',
-    );
 
     // 尝试使用 Agent 决策
     try {
@@ -40,9 +33,6 @@ export const createSeerCheckNode: NodeFactory = (context) => {
         availableTools: tools,
         maxIterations: 5,
         threadId: getPlayerThreadId(state.gameId, seer.id),
-        onStreamToken: (token, contentType) => {
-          context.broadcaster?.broadcastLLMToken(state.gameId, seer.id, token, contentType);
-        },
       });
 
       if (result.success && result.result) {

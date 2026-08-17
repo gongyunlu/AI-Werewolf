@@ -48,13 +48,6 @@ async function processExileSkillsNode(
   }
 
   // 广播检查放逐技能
-  context.broadcaster?.broadcastAnnouncement(
-    state.gameId,
-    'execute',
-    state.currentDay,
-    `检查 ${exiledPlayer.seatNo}号位 的技能触发...`,
-    'process_exile_skills',
-  );
 
   gameLogger.debug(`[放逐技能] 检查 ${exiledPlayer.seatNo}号位 (${exiledPlayer.role}) 的技能触发`);
 
@@ -72,13 +65,6 @@ async function processExileSkillsNode(
     gameLogger.debug(`[放逐技能] 白痴 ${exiledPlayer.seatNo}号位翻牌，免疫死亡`);
 
     // 广播白痴翻牌
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'execute',
-      state.currentDay,
-      `${exiledPlayer.seatNo}号位 翻出白痴身份，免疫死亡！`,
-      'idiot_revealed',
-    );
 
     // 白痴存活，撤销死亡状态
     updatedPlayers = updatedPlayers.map((p) => {

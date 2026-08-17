@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateGameDto } from './dto/create-game.dto';
+import type { QueryGamesDto } from './dto/query-games.dto';
 import { RulesetDefinitionSchema } from './ruleset-definition';
 import { assignRolesAndSeats } from '../game-engine/rules/role-assignment';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
@@ -15,6 +16,53 @@ export class GamesService {
     private readonly prisma: PrismaService,
     private readonly gameExecutor: GameExecutorService,
   ) {}
+
+  /**
+   * 查询游戏对局列表
+   */
+  async queryGames(dto: QueryGamesDto) {
+    const { page, pageSize, status, rulesetId, sortBy, sortOrder } = dto;
+    const skip = (page - 1) * pageSize;
+
+    const where: any = {};
+    if (status && status.length > 0) {
+      where.status = { in: status };
+    }
+    if (rulesetId) {
+      where.rulesetId = rulesetId;
+    }
+
+    const [items, total] = await Promise.all([
+      this.prisma.game.findMany({
+        where,
+        skip,
+        take: pageSize,
+        orderBy: { [sortBy]: sortOrder },
+        include: {
+          ruleset: { select: { id: true, name: true } },
+          players: {
+            select: {
+              id: true,
+              seatNo: true,
+              role: true,
+              faction: true,
+              deathDay: true,
+            },
+            orderBy: { seatNo: 'asc' },
+          },
+        },
+      }),
+      this.prisma.game.count({ where }),
+    ]);
+
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
+  }
 
   /**
    * 创建游戏对局（对局大厅）

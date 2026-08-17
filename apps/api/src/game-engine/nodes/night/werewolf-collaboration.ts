@@ -85,9 +85,6 @@ export async function singleWolfDecision(
       scenario: AGENT_SCENARIOS.NIGHT_ACTION,
       availableTools: tools,
       maxIterations: 8, // 增加迭代次数,单狼决策需要充分思考
-      onStreamToken: (token, contentType) => {
-        context.broadcaster?.broadcastLLMToken(state.gameId, wolf.id, token, contentType);
-      },
     });
 
     if (result.success && result.result) {
@@ -271,9 +268,6 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           maxIterations: 8, // 增加迭代次数,狼人讨论需要充分思考和协调
           threadId: wolfThreadId,
           additionalContext: previousDiscussion, // 注入之前的讨论记录
-          onStreamToken: (token, contentType) => {
-            context.broadcaster?.broadcastLLMToken(state.gameId, wolf.id, token, contentType);
-          },
         });
 
         if (result.success && result.result) {
@@ -291,7 +285,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
             gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位: ${msg.message}`);
 
             // 写入狼人讨论事件
-            const sequence = await context.eventWriter.writeWolfDiscussionEvent({
+            await context.eventWriter.writeWolfDiscussionEvent({
               gameId: state.gameId,
               day: state.currentDay,
               actorId: wolf.id,
@@ -300,15 +294,6 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
               round: round + 1,
               thinking: result.thinking,
             });
-
-            // 广播 LLM 完成事件
-            await context.broadcaster?.broadcastLLMComplete(
-              state.gameId,
-              wolf.id,
-              sequence,
-              msg.message,
-              result.thinking,
-            );
           } else {
             gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位跳过发言`);
           }
@@ -384,9 +369,6 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
         maxIterations: 8, // 增加迭代次数,狼人投票需要充分思考
         threadId: wolfThreadId,
         additionalContext: discussionSummary, // 只注入讨论记录，不包含其他人的投票
-        onStreamToken: (token, contentType) => {
-          context.broadcaster?.broadcastLLMToken(state.gameId, wolf.id, token, contentType);
-        },
       });
 
       if (result.success && result.result) {

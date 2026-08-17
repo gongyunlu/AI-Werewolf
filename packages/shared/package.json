@@ -2,20 +2,21 @@
   "name": "@ai-werewolf/shared",
   "version": "0.0.1",
   "private": true,
-  "type": "commonjs",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@ai-werewolf/tsconfig": "workspace:*",
+    "tsup": "^8.5.1",
     "typescript": "catalog:"
   }
 }

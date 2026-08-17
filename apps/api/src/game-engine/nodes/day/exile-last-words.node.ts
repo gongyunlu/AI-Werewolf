@@ -62,9 +62,6 @@ async function exileLastWordsNode(
       availableTools: tools,
       maxIterations: 3,
       threadId: getPlayerThreadId(state.gameId, exiledPlayer.id),
-      onStreamToken: (token, contentType) => {
-        context.broadcaster?.broadcastLLMToken(state.gameId, exiledPlayer.id, token, contentType);
-      },
     });
 
     if (result.success && result.result) {

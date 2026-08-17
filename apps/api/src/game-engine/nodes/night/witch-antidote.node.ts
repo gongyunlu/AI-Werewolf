@@ -33,13 +33,6 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
     }
 
     // 法官播报：女巫请睁眼
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'night',
-      state.currentDay,
-      '女巫请睁眼，今晚有人被狼人刀中，你是否使用解药？',
-      'witchAntidote',
-    );
 
     // 构建狼刀目标信息
     const targetPlayer = state.players.find((p) => p.id === state.wolfTarget);
@@ -68,9 +61,6 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
         maxIterations: 5,
         threadId: getPlayerThreadId(state.gameId, witch.id),
         additionalContext: wolfTargetInfo,
-        onStreamToken: (token, contentType) => {
-          context.broadcaster?.broadcastLLMToken(state.gameId, witch.id, token, contentType);
-        },
       });
 
       if (result.success && result.result) {

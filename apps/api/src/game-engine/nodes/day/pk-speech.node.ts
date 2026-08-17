@@ -51,9 +51,6 @@ export const createPkSpeechNode: NodeFactory = (context) => {
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
           additionalContext: `你正在进行PK发言。这是第${state.pkRound}轮PK，你需要为自己辩护，说服其他玩家不要投你。`,
-          onStreamToken: (token, contentType) => {
-            context.broadcaster?.broadcastLLMToken(state.gameId, player.id, token, contentType);
-          },
         });
 
         if (result.success && result.result) {

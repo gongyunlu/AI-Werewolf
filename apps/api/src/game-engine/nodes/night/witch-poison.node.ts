@@ -34,13 +34,6 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
     }
 
     // 法官播报：女巫使用毒药
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'night',
-      state.currentDay,
-      '女巫，你是否使用毒药？',
-      'witchPoison',
-    );
 
     // 尝试使用 Agent 决策
     try {
@@ -56,9 +49,6 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
         availableTools: tools,
         maxIterations: 5,
         threadId: getPlayerThreadId(state.gameId, witch.id),
-        onStreamToken: (token, contentType) => {
-          context.broadcaster?.broadcastLLMToken(state.gameId, witch.id, token, contentType);
-        },
       });
 
       if (result.success && result.result) {

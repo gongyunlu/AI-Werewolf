@@ -30,12 +30,6 @@ export const createExecuteNode: NodeFactory = (context) => {
     gameLogger.log(`[放逐执行] 放逐 ${target.seatNo}号位 (${target.role})`);
 
     // 法官播报：执行放逐
-    context.broadcaster?.broadcastAnnouncement(
-      state.gameId,
-      'execute',
-      state.currentDay,
-      `${target.seatNo}号玩家被放逐出局。`,
-    );
 
     // 更新玩家状态
     const updatedPlayers = state.players.map((p) => {

@@ -3,7 +3,6 @@ import type { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service'
 import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
-import type { BroadcasterService } from '@/broadcaster/broadcaster.service';
 import type { GamePreset } from '../presets/game-presets';
 
 /**
@@ -19,7 +18,6 @@ export interface NodeContext {
   toolsFactory: AgentToolsFactory;
   prisma: PrismaService;
   eventWriter: EventWriterService;
-  broadcaster?: BroadcasterService; // SSE 广播（法官播报）
   signal?: AbortSignal; // 用于中断游戏执行
   preset?: GamePreset; // 板子配置（用于 NIGHT/DAY 节点访问 pipeline）
 }

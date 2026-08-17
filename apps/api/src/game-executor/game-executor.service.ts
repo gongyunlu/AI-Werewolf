@@ -3,7 +3,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '../agent-runtime/tools/agent-tools.factory';
 import { EventWriterService } from '../game-engine/events/event-writer.service';
-import { BroadcasterService } from '../broadcaster/broadcaster.service';
 import { GameEngine } from '../game-engine/core/game-engine';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import type { GameGraphState, PlayerState } from '../game-engine/core/types';
@@ -35,7 +34,6 @@ export class GameExecutorService {
     private readonly agentRuntime: AgentRuntimeService,
     private readonly toolsFactory: AgentToolsFactory,
     private readonly eventWriter: EventWriterService,
-    private readonly broadcaster: BroadcasterService,
     private readonly configService: ConfigService<Env, true>,
   ) {}
 
@@ -99,7 +97,6 @@ export class GameExecutorService {
       this.toolsFactory,
       this.prisma,
       this.eventWriter,
-      this.broadcaster,
     );
 
     // 4. 创建 AbortController（用于中断游戏）
