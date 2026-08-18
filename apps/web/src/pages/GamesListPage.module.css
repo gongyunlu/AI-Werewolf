@@ -1,0 +1,183 @@
+:root {
+  --gl-bg-950: #020617;
+  --gl-bg-900: #0f172a;
+  --gl-bg-700: #334155;
+  --gl-bg-600: #475569;
+  --gl-border: #1e293b;
+  --gl-text-200: #e2e8f0;
+  --gl-text-300: #cbd5e1;
+  --gl-text-400: #94a3b8;
+  --gl-text-500: #64748b;
+  --gl-amber-400: #fbbf24;
+  --gl-cyan-400: #22d3ee;
+  --gl-orange-400: #fb923c;
+  --gl-purple-400: #c084fc;
+  --gl-red-400: #f87171;
+  --gl-green-400: #4ade80;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: var(--gl-bg-950);
+}
+
+.body {
+  flex: 1;
+  padding: 1.5rem;
+}
+
+.container {
+  margin: 0 auto;
+  max-width: 80rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.heroText {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.title {
+  font-size: 1.875rem;
+  line-height: 2.25rem;
+  font-weight: 700;
+  color: var(--gl-text-200);
+}
+
+.subtitle {
+  color: var(--gl-text-400);
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 0;
+}
+
+.loadingText {
+  color: var(--gl-text-400);
+}
+
+.empty {
+  border: 1px solid var(--gl-border);
+  border-radius: 0.5rem;
+  background-color: var(--gl-bg-900);
+  padding: 3rem;
+  text-align: center;
+}
+
+.emptyText {
+  color: var(--gl-text-400);
+}
+
+.list {
+  display: grid;
+  gap: 1rem;
+}
+
+.card {
+  border: 1px solid var(--gl-border);
+  border-radius: 0.5rem;
+  background-color: var(--gl-bg-900);
+  padding: 1.5rem;
+}
+
+.cardBody {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.gameId {
+  font-family: monospace;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--gl-text-500);
+}
+
+.badge {
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+}
+
+.badgeSolid {
+  background-color: var(--gl-bg-700);
+  color: var(--gl-text-300);
+}
+
+.badgeSolidDim {
+  background-color: var(--gl-bg-600);
+  color: var(--gl-text-400);
+}
+
+.badgeSoft {
+  background-color: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.badgeAmber {
+  color: var(--gl-amber-400);
+}
+
+.badgeCyan {
+  color: var(--gl-cyan-400);
+}
+
+.badgeOrange {
+  color: var(--gl-orange-400);
+}
+
+.badgePurple {
+  color: var(--gl-purple-400);
+}
+
+.badgeRed {
+  color: var(--gl-red-400);
+}
+
+.badgeGreen {
+  color: var(--gl-green-400);
+}
+
+.metaDetails {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--gl-text-400);
+}
+
+.aliveCount {
+  color: var(--gl-cyan-400);
+}
+
+.watchButton {
+  white-space: nowrap;
+}

@@ -4,6 +4,7 @@ import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factor
 import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
 import type { GamePreset } from '../presets/game-presets';
+import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
 
 /**
  * 游戏节点函数类型
@@ -20,6 +21,7 @@ export interface NodeContext {
   eventWriter: EventWriterService;
   signal?: AbortSignal; // 用于中断游戏执行
   preset?: GamePreset; // 板子配置（用于 NIGHT/DAY 节点访问 pipeline）
+  broadcaster?: SseBroadcasterService;
 }
 
 /**

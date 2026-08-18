@@ -43,6 +43,16 @@ export const createPkSpeechNode: NodeFactory = (context) => {
           createSkipActionTool({ gameId: state.gameId, currentPlayerId: player.id }),
         ];
 
+        const sceneId = `pk-speech-${state.gameId}-${state.currentDay}-${player.id}`;
+        const startedAt = Date.now();
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.open',
+          sceneId,
+          sceneType: 'speech',
+          visibility: 'public',
+          actorId: player.id,
+        });
+
         const result = await context.agentRuntime.run({
           gameId: state.gameId,
           playerId: player.id,
@@ -51,6 +61,40 @@ export const createPkSpeechNode: NodeFactory = (context) => {
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
           additionalContext: `你正在进行PK发言。这是第${state.pkRound}轮PK，你需要为自己辩护，说服其他玩家不要投你。`,
+          onStreamToken: (token, contentType) => {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token,
+              contentType,
+            });
+          },
+        });
+
+        const pkSpeechContent =
+          result.success && result.result
+            ? ((result.result as MakeSpeechOutput).content ?? '')
+            : '';
+
+        // 将工具结果的 content 也流式推送
+        if (pkSpeechContent) {
+          for (const char of pkSpeechContent) {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token: char,
+              contentType: 'content',
+            });
+          }
+        }
+
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.close',
+          sceneId,
+          fullContent: result.thinking
+            ? `[思考]\n${result.thinking}\n\n${pkSpeechContent}`
+            : pkSpeechContent,
+          durationMs: Date.now() - startedAt,
         });
 
         if (result.success && result.result) {

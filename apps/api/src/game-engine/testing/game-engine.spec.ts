@@ -16,6 +16,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       // 需要先运行一次来触发初始化
@@ -47,6 +48,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       // 平安夜会无限循环，所以限制递归次数并捕获错误
@@ -78,6 +80,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState);
@@ -106,6 +109,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState);
@@ -130,6 +134,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState);
@@ -155,6 +160,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
       const result = await engine.run(initialState, 10);
 
@@ -179,6 +185,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
       const result = await engine.run(initialState, 10);
 
@@ -202,6 +209,7 @@ describe('GameEngine - 主图集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       // 运行游戏

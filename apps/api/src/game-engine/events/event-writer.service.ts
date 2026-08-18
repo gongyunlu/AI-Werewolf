@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
+import { type Prisma } from '@/generated/prisma/client';
 import { ACTION_TYPES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
 import { EventBusService } from '@/event-bus/event-bus.service';
 
@@ -507,6 +508,92 @@ export class EventWriterService {
     await this.eventBus.publish(event);
 
     this.logger.debug(`[Event] 写入发言顺序: Day ${day}, ${speechOrder.join(' → ')} (${reason})`);
+  }
+
+  /** 游戏开始系统事件 */
+  async writeGameStartEvent(params: { gameId: string; playerCount: number }): Promise<void> {
+    const sequence = await this.getNextSequence(params.gameId);
+    const event = await this.prisma.event.create({
+      data: {
+        gameId: params.gameId,
+        sequence,
+        day: 0,
+        phase: 'system',
+        actionType: 'GAME_START',
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { playerCount: params.playerCount },
+      },
+    });
+    await this.eventBus.publish(event);
+  }
+
+  /** 游戏结束系统事件 */
+  async writeGameEndEvent(params: { gameId: string; winner: string }): Promise<void> {
+    const sequence = await this.getNextSequence(params.gameId);
+    const event = await this.prisma.event.create({
+      data: {
+        gameId: params.gameId,
+        sequence,
+        day: 0,
+        phase: 'system',
+        actionType: 'GAME_END',
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { winner: params.winner },
+      },
+    });
+    await this.eventBus.publish(event);
+  }
+
+  /** 法官播报事件（公开） */
+  async writeJudgeEvent(params: {
+    gameId: string;
+    day: number;
+    content: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const sequence = await this.getNextSequence(params.gameId);
+    const event = await this.prisma.event.create({
+      data: {
+        gameId: params.gameId,
+        sequence,
+        day: params.day,
+        phase: 'judge',
+        actionType: 'JUDGE_ANNOUNCE',
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { content: params.content, ...params.metadata } as Prisma.InputJsonValue,
+      },
+    });
+    await this.eventBus.publish(event);
+  }
+
+  /** 夜间法官引导事件 */
+  async writeNightPromptEvent(params: {
+    gameId: string;
+    day: number;
+    content: string;
+    targetRole: string;
+  }): Promise<void> {
+    const sequence = await this.getNextSequence(params.gameId);
+    const event = await this.prisma.event.create({
+      data: {
+        gameId: params.gameId,
+        sequence,
+        day: params.day,
+        phase: 'night',
+        actionType: 'NIGHT_PROMPT',
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { content: params.content, targetRole: params.targetRole },
+      },
+    });
+    await this.eventBus.publish(event);
   }
 
   /**

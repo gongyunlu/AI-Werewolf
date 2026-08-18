@@ -260,6 +260,16 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
       const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
       try {
+        const sceneId = `wolf-discussion-${state.gameId}-${state.currentDay}-${round}-${wolf.id}`;
+        const startedAt = Date.now();
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.open',
+          sceneId,
+          sceneType: 'night_action',
+          visibility: 'wolf',
+          actorId: wolf.id,
+        });
+
         const result = await context.agentRuntime.run({
           gameId: state.gameId,
           playerId: wolf.id,
@@ -268,6 +278,38 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           maxIterations: 8, // 增加迭代次数,狼人讨论需要充分思考和协调
           threadId: wolfThreadId,
           additionalContext: previousDiscussion, // 注入之前的讨论记录
+          onStreamToken: (token, contentType) => {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token,
+              contentType,
+            });
+          },
+        });
+
+        const wolfMsg =
+          result.success && result.result
+            ? ((result.result as { message?: string }).message ?? '')
+            : '';
+
+        // 将工具结果的 message 也流式推送
+        if (wolfMsg) {
+          for (const char of wolfMsg) {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token: char,
+              contentType: 'content',
+            });
+          }
+        }
+
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.close',
+          sceneId,
+          fullContent: result.thinking ? `[思考]\n${result.thinking}\n\n${wolfMsg}` : wolfMsg,
+          durationMs: Date.now() - startedAt,
         });
 
         if (result.success && result.result) {

@@ -19,9 +19,13 @@ export const createVoteNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
     gameLogger.debug(`[投票阶段] Day ${state.currentDay} 开始投票`);
 
-    // 法官播报：请投票
-
     const alivePlayers = state.players.filter((p) => p.isAlive);
+
+    await context.eventWriter.writeJudgeEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: '发言结束，请所有人开始投票。',
+    });
 
     // 并行投票
     const votePromises = alivePlayers.map(async (player) => {

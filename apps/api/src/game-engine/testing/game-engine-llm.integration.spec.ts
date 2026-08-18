@@ -87,6 +87,7 @@ describe('GameEngine - 真实 LLM 集成测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const players = [

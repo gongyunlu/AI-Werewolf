@@ -7,6 +7,7 @@ import { assignRolesAndSeats } from '../game-engine/rules/role-assignment';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GameExecutorService } from '../game-executor/game-executor.service';
+import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 
 const SKILL_VERSION = 'v1';
 
@@ -15,6 +16,7 @@ export class GamesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly gameExecutor: GameExecutorService,
+    private readonly broadcaster: SseBroadcasterService,
   ) {}
 
   /**
@@ -47,6 +49,9 @@ export class GamesService {
               role: true,
               faction: true,
               deathDay: true,
+              displayName: true,
+              modelName: true,
+              isSheriff: true,
             },
             orderBy: { seatNo: 'asc' },
           },
@@ -237,7 +242,8 @@ export class GamesService {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
       include: {
-        players: { orderBy: { seatNo: 'asc' } },
+        players: { include: { agent: true } },
+        ruleset: true,
       },
     });
 
@@ -245,13 +251,43 @@ export class GamesService {
       throw new NotFoundException(`Game ${gameId} 不存在`);
     }
 
-    if (game.status !== GAME_STATUSES.INITIALIZED) {
-      throw new BadRequestException(
-        `Game ${gameId} 状态为 ${game.status}，只有 '${GAME_STATUSES.INITIALIZED}' 状态的对局可以开始`,
+    // 2. 如果是 created 状态，先自动初始化（分配座次和角色）
+    if (game.status === GAME_STATUSES.CREATED) {
+      const parsed = RulesetDefinitionSchema.safeParse(game.ruleset.definition);
+      if (!parsed.success) {
+        throw new BadRequestException(`Ruleset ${game.ruleset.id} 的 definition 结构非法`);
+      }
+      const agentIds = game.players.map((p) => p.agent.id);
+      const assignments = assignRolesAndSeats(parsed.data.roles, agentIds);
+      await Promise.all(
+        assignments.map((assignment) => {
+          const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
+          return this.prisma.player.update({
+            where: { id: player.id },
+            data: {
+              seatNo: assignment.seatNo,
+              role: assignment.role,
+              faction: assignment.faction,
+            },
+          });
+        }),
       );
+      await this.prisma.game.update({
+        where: { id: gameId },
+        data: { status: GAME_STATUSES.INITIALIZED },
+      });
     }
 
-    // 2. 更新状态为 running
+    // 3. 校验状态（经过初始化后应为 initialized）
+    const refreshed = await this.prisma.game.findUnique({ where: { id: gameId } });
+    if (refreshed?.status !== GAME_STATUSES.INITIALIZED) {
+      throw new BadRequestException(`Game ${gameId} 状态为 ${refreshed?.status}，无法开始对局`);
+    }
+
+    // 4. 初始化 SSE 广播流
+    this.broadcaster.getOrCreate(gameId);
+
+    // 5. 更新状态为 running
     return this.prisma.game.update({
       where: { id: gameId },
       data: { status: GAME_STATUSES.RUNNING },

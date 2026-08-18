@@ -16,6 +16,7 @@
     "preview": "pnpm run start:prod",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
+    "check": "pnpm lint && pnpm typecheck",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",

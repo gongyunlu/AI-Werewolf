@@ -23,6 +23,7 @@
     "docker:logs": "docker compose logs -f",
     "lint": "pnpm -r run lint",
     "lint:fix": "pnpm -r run lint:fix",
+    "check": "pnpm lint && pnpm typecheck",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,mjs,cjs,yml,yaml}\"",
@@ -37,18 +38,5 @@
     "lint-staged": "^17.1.1",
     "prettier": "^3.9.6",
     "typescript": "catalog:"
-  },
-  "lint-staged": {
-    "apps/web/**/*.{ts,tsx,js,jsx,mjs,cjs}": [
-      "prettier --write",
-      "pnpm --filter @ai-werewolf/web lint:fix"
-    ],
-    "apps/api/**/*.{ts,js,mjs,cjs}": [
-      "prettier --write",
-      "pnpm --filter @ai-werewolf/api lint:fix"
-    ],
-    "*.{json,md,yml,yaml}": [
-      "prettier --write"
-    ]
   }
 }

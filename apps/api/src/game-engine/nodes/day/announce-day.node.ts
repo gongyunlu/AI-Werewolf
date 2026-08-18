@@ -7,7 +7,11 @@ import { gameLogger } from '../../utils/game-logger';
  */
 export const createAnnounceDayNode: NodeFactory = (context) => {
   return async (state: GameGraphState) => {
-    // 法官播报：天亮了
+    await context.eventWriter.writeJudgeEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: `天亮了，第 ${state.currentDay} 天开始。`,
+    });
 
     if (state.nightDeaths?.length) {
       const deadPlayerIds = state.nightDeaths.map((d) => d.playerId).join(', ');

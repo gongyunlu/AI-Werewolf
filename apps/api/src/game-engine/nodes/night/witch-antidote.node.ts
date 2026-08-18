@@ -32,7 +32,12 @@ export const createWitchAntidoteNode: NodeFactory = (context) => {
       return {};
     }
 
-    // 法官播报：女巫请睁眼
+    await context.eventWriter.writeNightPromptEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: '女巫，请睁眼。',
+      targetRole: 'WITCH',
+    });
 
     // 构建狼刀目标信息
     const targetPlayer = state.players.find((p) => p.id === state.wolfTarget);

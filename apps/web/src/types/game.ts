@@ -24,6 +24,8 @@ export interface Player {
   isProtected?: boolean;
   isPoisoned?: boolean;
   isSilenced?: boolean;
+  modelName?: string;
+  isSheriff?: boolean;
 }
 
 // 发言记录
@@ -70,11 +72,13 @@ export interface GameListItem {
   };
   players: Array<{
     id: string;
-    seatNo: number;
-    role: string;
-    faction: string;
+    seatNo: number | null;
+    role: string | null;
+    faction: string | null;
     deathDay: number | null;
     displayName: string;
+    modelName: string;
+    isSheriff: boolean;
   }>;
 }
 

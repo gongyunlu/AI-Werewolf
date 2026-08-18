@@ -1,4 +1,4 @@
-import type { Game, GamesListResponse } from '@/types/game';
+import type { GameListItem, GamesListResponse } from '@/types/game';
 
 export interface Ruleset {
   id: string;
@@ -48,36 +48,16 @@ class ApiClient {
 
   /**
    * 获取单个对局详情
+   *
+   * 后端返回原始 Prisma 结构（players 含 seatNo/displayName/role/faction/modelName/isSheriff 等），
+   * 直接透传给观战页使用，不做字段重命名。
    */
-  async getGame(gameId: string): Promise<Game> {
+  async getGame(gameId: string): Promise<GameListItem> {
     const response = await fetch(`${this.baseURL}/games/${gameId}`);
     if (!response.ok) {
       throw new Error(`Failed to fetch game: ${response.statusText}`);
     }
-    const data = await response.json();
-
-    // 字段映射：后端 -> 前端
-    return {
-      id: data.id,
-      status: data.status,
-      phase: data.phase || 'night',
-      currentRound: data.currentRound || 1,
-      currentSpeaker: data.currentSpeaker || null,
-      players: (data.players || []).map((p: any) => ({
-        seatNumber: p.seatNo,
-        name: p.displayName,
-        role: p.role,
-        camp: p.faction,
-        status: p.deathDay === null ? 'alive' : 'dead',
-        votedFor: p.votedFor || null,
-        isProtected: p.isProtected || false,
-        isPoisoned: p.isPoisoned || false,
-        isSilenced: p.isSilenced || false,
-      })),
-      createdAt: data.createdAt || new Date().toISOString(),
-      startedAt: data.startedAt,
-      finishedAt: data.endedAt,
-    };
+    return response.json();
   }
 
   /**
@@ -117,19 +97,21 @@ class ApiClient {
   /**
    * 初始化对局（分配角色）
    */
-  async initializeGame(gameId: string): Promise<void> {
+  async initializeGame(gameId: string): Promise<GameListItem> {
     const response = await fetch(`${this.baseURL}/games/${gameId}/initialize`, {
       method: 'POST',
     });
     if (!response.ok) throw new Error(`Failed to initialize game: ${response.statusText}`);
+    return response.json();
   }
 
   /**
    * 开始对局
    */
-  async startGame(gameId: string): Promise<void> {
+  async startGame(gameId: string): Promise<GameListItem> {
     const response = await fetch(`${this.baseURL}/games/${gameId}/start`, { method: 'POST' });
     if (!response.ok) throw new Error(`Failed to start game: ${response.statusText}`);
+    return response.json();
   }
 
   /**
@@ -145,8 +127,15 @@ class ApiClient {
   /**
    * 创建 SSE 连接
    */
-  createSSEConnection(gameId: string): EventSource {
-    return new EventSource(`${this.baseURL}/games/${gameId}/stream`);
+  createSSEConnection(
+    gameId: string,
+    opts: { lastSequence?: number; perspective?: string } = {},
+  ): EventSource {
+    const params = new URLSearchParams();
+    if (opts.lastSequence !== undefined) params.set('lastSequence', String(opts.lastSequence));
+    if (opts.perspective) params.set('perspective', opts.perspective);
+    const query = params.toString();
+    return new EventSource(`${this.baseURL}/games/${gameId}/stream${query ? `?${query}` : ''}`);
   }
 }
 

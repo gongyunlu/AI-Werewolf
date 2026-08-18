@@ -6,6 +6,7 @@ import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { GameEngine } from '../core/game-engine';
 import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { EventWriterService } from '../events/event-writer.service';
+import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
 import { Standard6pPreset } from '../presets/game-presets';
 import { createGameState, createPlayer } from './test-utils';
 import { ConfigModule } from '@nestjs/config';
@@ -31,6 +32,14 @@ describe('完整游戏流程集成测试（真实 API）', () => {
   let toolsFactory: AgentToolsFactory;
   let eventWriter: EventWriterService;
   let gameEngine: GameEngine;
+
+  const mockBroadcaster = {
+    emit: jest.fn(),
+    getOrCreate: jest.fn(),
+    getStream: jest.fn(),
+    complete: jest.fn(),
+    exists: jest.fn(),
+  } as unknown as SseBroadcasterService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -146,7 +155,7 @@ describe('完整游戏流程集成测试（真实 API）', () => {
       }
 
       // 4. 创建游戏引擎
-      gameEngine = new GameEngine(agentRuntime, toolsFactory, prisma, eventWriter);
+      gameEngine = new GameEngine(agentRuntime, toolsFactory, prisma, eventWriter, mockBroadcaster);
 
       // 5. 准备初始状态
       const playerStates = players.map((p) =>

@@ -563,6 +563,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     // 组合完整 System Prompt（渐进式披露）
     const fullPrompt = `
+      请使用中文进行思考和推理。所有输出（包括推理过程）必须使用中文。
+
       ${constraints}
       ${roleView}
       ${teammateInfo}
@@ -649,6 +651,10 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       model: this.configService.get('ARK_DEFAULT_MODEL'),
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       streaming: !!onStreamToken, // 仅在有回调时启用流式
+      modelKwargs: {
+        thinking: { type: 'enabled' }, // 开启推理模式，模型会输出 reasoning_content
+        reasoning_effort: 'medium', // 中等推理强度
+      },
     }).bindTools(tools);
 
     // 加载会话历史
@@ -687,6 +693,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
           if (typeof chunk.content === 'string' && chunk.content) {
             fullContent += chunk.content;
             onStreamToken(chunk.content, 'thinking');
+          }
+
+          // 处理 ARK/豆包 的 reasoning_content（推理内容）
+          const reasoningContent = (chunk.additional_kwargs as any)?.reasoning_content;
+          if (typeof reasoningContent === 'string' && reasoningContent) {
+            fullContent += reasoningContent;
+            onStreamToken(reasoningContent, 'thinking');
           }
         }
 
@@ -756,8 +769,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         const response = await model.invoke(messages, { signal });
         messages.push(response);
 
-        // 捕获推理内容
-        if (typeof response.content === 'string' && response.content.trim()) {
+        // 捕获推理内容（优先 ARK reasoning_content，降级 response.content）
+        const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
+        if (typeof responseReasoning === 'string' && responseReasoning.trim()) {
+          thinking = responseReasoning;
+        } else if (typeof response.content === 'string' && response.content.trim()) {
           thinking = response.content;
         }
 

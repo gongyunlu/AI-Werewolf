@@ -44,6 +44,7 @@ describe('GameEngine - Full Game E2E (模拟决策)', () => {
       mocks.mockToolsFactory,
       mocks.mockPrisma,
       mocks.mockEventWriter,
+      mocks.mockBroadcaster,
     );
 
     // 运行游戏（限制最多 100 步）
@@ -96,6 +97,7 @@ describe('GameEngine - Full Game E2E (模拟决策)', () => {
       mocks.mockToolsFactory,
       mocks.mockPrisma,
       mocks.mockEventWriter,
+      mocks.mockBroadcaster,
     );
 
     // 3 人局应该很快结束
@@ -125,6 +127,7 @@ describe('GameEngine - Full Game E2E (模拟决策)', () => {
       mocks.mockToolsFactory,
       mocks.mockPrisma,
       mocks.mockEventWriter,
+      mocks.mockBroadcaster,
     );
 
     const finalState = await engine.run(initialState, 10, new MemorySaver(), Standard6pPreset);
@@ -158,6 +161,7 @@ describe('GameEngine - Full Game E2E (模拟决策)', () => {
       mocks.mockToolsFactory,
       mocks.mockPrisma,
       mocks.mockEventWriter,
+      mocks.mockBroadcaster,
     );
 
     const finalState = await engine.run(initialState, 10, new MemorySaver(), Standard6pPreset);

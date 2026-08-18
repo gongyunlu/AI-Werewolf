@@ -41,6 +41,16 @@ export const createSpeechNode: NodeFactory = (context) => {
         // 白天发言是关键环节，不允许跳过
         const tools = [createMakeSpeechTool({ gameId: state.gameId, currentPlayerId: player.id })];
 
+        const sceneId = `speech-${state.gameId}-${state.currentDay}-${player.id}`;
+        const startedAt = Date.now();
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.open',
+          sceneId,
+          sceneType: 'speech',
+          visibility: 'public',
+          actorId: player.id,
+        });
+
         const result = await context.agentRuntime.run({
           gameId: state.gameId,
           playerId: player.id,
@@ -48,6 +58,41 @@ export const createSpeechNode: NodeFactory = (context) => {
           availableTools: tools,
           maxIterations: 3,
           threadId: getPlayerThreadId(state.gameId, player.id),
+          onStreamToken: (token, contentType) => {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token,
+              contentType,
+            });
+          },
+        });
+
+        const speechContent =
+          result.success && result.result
+            ? ((result.result as MakeSpeechOutput).content ?? '')
+            : '';
+
+        // 将工具结果的 content 也流式推送（模拟打字机效果）
+        if (speechContent) {
+          // 按字符逐个推送
+          for (const char of speechContent) {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token: char,
+              contentType: 'content',
+            });
+          }
+        }
+
+        context.broadcaster?.emit(state.gameId, {
+          type: 'scene.close',
+          sceneId,
+          fullContent: result.thinking
+            ? `[思考]\n${result.thinking}\n\n${speechContent}`
+            : speechContent,
+          durationMs: Date.now() - startedAt,
         });
 
         if (result.success && result.result) {

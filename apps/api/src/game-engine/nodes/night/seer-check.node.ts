@@ -17,7 +17,12 @@ export const createSeerCheckNode: NodeFactory = (context) => {
       return {};
     }
 
-    // 法官播报：预言家请睁眼
+    await context.eventWriter.writeNightPromptEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: '预言家，请睁眼。',
+      targetRole: 'SEER',
+    });
 
     // 尝试使用 Agent 决策
     try {

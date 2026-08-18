@@ -2,6 +2,7 @@ import type { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service'
 import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
+import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
 
 /**
  * 测试辅助函数：创建 Mock 依赖
@@ -59,10 +60,19 @@ export function createMockDependencies() {
     writeSpeechOrderDeterminedEvent: jest.fn().mockResolvedValue(undefined),
   } as unknown as EventWriterService;
 
+  const mockBroadcaster = {
+    emit: jest.fn(),
+    getOrCreate: jest.fn(),
+    getStream: jest.fn(),
+    complete: jest.fn(),
+    exists: jest.fn(),
+  } as unknown as SseBroadcasterService;
+
   return {
     mockAgentRuntime,
     mockToolsFactory,
     mockPrisma,
     mockEventWriter,
+    mockBroadcaster,
   };
 }

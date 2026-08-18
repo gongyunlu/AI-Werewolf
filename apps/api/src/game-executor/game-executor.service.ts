@@ -14,6 +14,7 @@ import {
   GamePausedException,
   GameAbortedException,
 } from '../game-engine/core/game-engine.exception';
+import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 
 /**
  * 游戏执行服务
@@ -35,6 +36,7 @@ export class GameExecutorService {
     private readonly toolsFactory: AgentToolsFactory,
     private readonly eventWriter: EventWriterService,
     private readonly configService: ConfigService<Env, true>,
+    private readonly broadcaster: SseBroadcasterService,
   ) {}
 
   /**
@@ -97,6 +99,7 @@ export class GameExecutorService {
       this.toolsFactory,
       this.prisma,
       this.eventWriter,
+      this.broadcaster,
     );
 
     // 4. 创建 AbortController（用于中断游戏）

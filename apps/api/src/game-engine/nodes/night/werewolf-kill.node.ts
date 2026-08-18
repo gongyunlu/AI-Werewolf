@@ -33,7 +33,12 @@ export const createWerewolfKillNode: NodeFactory = (context) => {
       return {};
     }
 
-    // 法官播报：狼人请睁眼
+    await context.eventWriter.writeNightPromptEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: '狼人，请睁眼。',
+      targetRole: 'WEREWOLF',
+    });
 
     // 使用多 Agent 协作流程
     let targetPlayerId: string | null = null;

@@ -33,7 +33,12 @@ export const createWitchPoisonNode: NodeFactory = (context) => {
       return {};
     }
 
-    // 法官播报：女巫使用毒药
+    await context.eventWriter.writeNightPromptEvent({
+      gameId: state.gameId,
+      day: state.currentDay,
+      content: '女巫，你要使用毒药吗？',
+      targetRole: 'WITCH',
+    });
 
     // 尝试使用 Agent 决策
     try {

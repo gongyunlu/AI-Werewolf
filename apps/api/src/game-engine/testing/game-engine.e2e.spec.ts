@@ -26,6 +26,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState, 30);
@@ -58,6 +59,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState, 30);
@@ -83,6 +85,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState, 30);
@@ -107,6 +110,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState, 10);
@@ -128,6 +132,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       // 限制循环，只跑一轮
@@ -154,6 +159,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState, 10);
@@ -180,6 +186,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState);
@@ -199,6 +206,7 @@ describe('GameEngine - 端到端测试', () => {
         mocks.mockToolsFactory,
         mocks.mockPrisma,
         mocks.mockEventWriter,
+        mocks.mockBroadcaster,
       );
 
       const result = await engine.run(initialState);
