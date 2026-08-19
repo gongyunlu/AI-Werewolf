@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import styles from './GameWatchPage.module.css';
 import { Badge } from '@/components/ui/badge';
@@ -8,6 +8,7 @@ import { SceneCard } from '@/components/game-watch/SceneCard';
 import { ActiveSceneCard } from '@/components/game-watch/ActiveSceneCard';
 import { useGameStream } from '@/hooks/useGameStream';
 import { useSceneEngine } from '@/hooks/useSceneEngine';
+import { useNightActionState } from '@/hooks/useNightActionState';
 import { apiClient } from '@/lib/api-client';
 import type { GameListItem } from '@/types/game';
 import type { SseMessage } from '@/types/sse';
@@ -21,12 +22,21 @@ const PERSPECTIVE_LABELS: Record<string, string> = {
 
 export default function GameWatchPage() {
   const { id: gameId } = useParams<{ id: string }>();
-  const perspective = gameId ? (sessionStorage.getItem(`perspective-${gameId}`) ?? 'god') : 'god';
+  // 视角只读一次；sessionStorage 在隐私模式/配额满时会抛异常，需 try-catch 兜底
+  const perspective = useMemo(() => {
+    if (!gameId) return 'god';
+    try {
+      return sessionStorage.getItem(`perspective-${gameId}`) ?? 'god';
+    } catch {
+      return 'god';
+    }
+  }, [gameId]);
   const [game, setGame] = useState<GameListItem | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const { state, handleMessage } = useSceneEngine();
+  const { state, handleMessage } = useSceneEngine(perspective);
+  const nightActionState = useNightActionState(state.closedScenes);
 
   const onMessage = useCallback((msg: SseMessage) => handleMessage(msg), [handleMessage]);
 
@@ -50,8 +60,8 @@ export default function GameWatchPage() {
     if (!gameId) return;
     setIsStarting(true);
     try {
-      await apiClient.startGame(gameId);
-      const updated = await apiClient.getGame(gameId);
+      // startGame 已返回更新后的对局（含 running 状态），无需再 getGame
+      const updated = await apiClient.startGame(gameId);
       setGame(updated);
     } catch (error) {
       console.error('启动对局失败:', error);
@@ -73,9 +83,7 @@ export default function GameWatchPage() {
   // 获取当前活动场景的演员信息
   const activeScene = state.activeScene;
   const activeActorId = activeScene?.actorId;
-  const activeActor = activeActorId
-    ? players.find((p) => p.seatNo === parseInt(activeActorId))
-    : null;
+  const activeActor = activeActorId ? players.find((p) => p.id === activeActorId) : null;
 
   return (
     <div className={`dark ${styles.page}`}>
@@ -108,7 +116,16 @@ export default function GameWatchPage() {
           <div className={styles.sidebarGrid}>
             {leftPlayers.map((player, index) => (
               <div key={player.id} className={styles.sidebarCell}>
-                <PlayerCard player={player} index={index} isLeft />
+                <PlayerCard
+                  player={player}
+                  index={index}
+                  isLeft
+                  hasWolfMark={
+                    player.seatNo !== null &&
+                    nightActionState.wolfTarget === player.seatNo &&
+                    nightActionState.witchSaved !== player.seatNo
+                  }
+                />
               </div>
             ))}
           </div>
@@ -135,21 +152,32 @@ export default function GameWatchPage() {
 
           {/* 场景流 */}
           <div className={styles.sceneFlow}>
-            {state.closedScenes.map((scene) => (
-              <SceneCard
-                key={scene.sceneId}
-                sceneId={scene.sceneId}
-                sceneType={scene.sceneType}
-                actorId={scene.actorId}
-                fullContent={scene.fullContent}
-                durationMs={scene.durationMs}
-              />
-            ))}
+            {state.closedScenes.map((scene) => {
+              const actor = scene.actorId ? players.find((p) => p.id === scene.actorId) : null;
+              return (
+                <SceneCard
+                  key={scene.sceneId}
+                  sceneId={scene.sceneId}
+                  sceneType={scene.sceneType}
+                  actorId={scene.actorId}
+                  actorName={actor?.displayName}
+                  actorSeatNo={actor?.seatNo ?? undefined}
+                  thinking={scene.thinking}
+                  content={scene.content}
+                  thinkingDurationMs={scene.thinkingDurationMs}
+                  contentDurationMs={scene.contentDurationMs}
+                  metadata={scene.metadata}
+                />
+              );
+            })}
             {state.activeScene && (
               <ActiveSceneCard
                 sceneType={state.activeScene.sceneType}
                 actorId={state.activeScene.actorId}
-                displayText={state.displayText}
+                actorName={activeActor?.displayName}
+                actorSeatNo={activeActor?.seatNo ?? undefined}
+                thinking={state.activeScene.thinking}
+                content={state.activeScene.content}
                 isTyping
               />
             )}
@@ -162,7 +190,16 @@ export default function GameWatchPage() {
           <div className={styles.sidebarGrid}>
             {rightPlayers.map((player, index) => (
               <div key={player.id} className={styles.sidebarCell}>
-                <PlayerCard player={player} index={leftPlayers.length + index} isLeft={false} />
+                <PlayerCard
+                  player={player}
+                  index={leftPlayers.length + index}
+                  isLeft={false}
+                  hasWolfMark={
+                    player.seatNo !== null &&
+                    nightActionState.wolfTarget === player.seatNo &&
+                    nightActionState.witchSaved !== player.seatNo
+                  }
+                />
               </div>
             ))}
           </div>

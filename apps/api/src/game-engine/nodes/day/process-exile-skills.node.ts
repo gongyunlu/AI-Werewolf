@@ -35,21 +35,16 @@ async function processExileSkillsNode(
   state: GameGraphState,
   context: NodeContext,
 ): Promise<GameGraphUpdate> {
-  gameLogger.debug(`[放逐技能] Day ${state.currentDay} 开始处理`);
-
   // 查询刚被放逐的玩家
   const exiledPlayer = state.players.find(
     (p) => !p.isAlive && p.deathDay === state.currentDay && p.deathCause === DEATH_CAUSES.EXECUTION,
   );
 
   if (!exiledPlayer) {
-    gameLogger.debug(`[放逐技能] 本轮无人被放逐，跳过`);
     return {};
   }
 
   // 广播检查放逐技能
-
-  gameLogger.debug(`[放逐技能] 检查 ${exiledPlayer.seatNo}号位 (${exiledPlayer.role}) 的技能触发`);
 
   // 使用 special-role-trigger 逻辑判断技能触发
   const triggerResult = resolveSpecialRoleTriggers({
@@ -62,8 +57,6 @@ async function processExileSkillsNode(
 
   // 处理白痴翻牌
   if (triggerResult.idiotRevealed) {
-    gameLogger.debug(`[放逐技能] 白痴 ${exiledPlayer.seatNo}号位翻牌，免疫死亡`);
-
     // 广播白痴翻牌
 
     // 白痴存活，撤销死亡状态
@@ -80,18 +73,17 @@ async function processExileSkillsNode(
     });
 
     // 写入白痴翻牌事件
-    await context.eventWriter.writeIdiotRevealEvent({
+    const event = await context.eventWriter.writeIdiotRevealEvent({
       gameId: state.gameId,
       day: state.currentDay,
       playerId: exiledPlayer.id,
       seatNo: exiledPlayer.seatNo,
     });
+    await context.eventBus?.publish(event);
   }
 
   // 处理猎人开枪
   if (triggerResult.hunterCanShoot) {
-    gameLogger.debug(`[放逐技能] 猎人 ${exiledPlayer.seatNo}号位可以开枪`);
-
     // TODO: 派发猎人 Agent 选择开枪目标
     // TODO: 执行开枪，更新 updatedPlayers
     gameLogger.warn(`[放逐技能] 猎人开枪逻辑待实现`);
@@ -99,8 +91,6 @@ async function processExileSkillsNode(
 
   // 处理狼王开枪
   if (triggerResult.wolfKingCanShoot) {
-    gameLogger.debug(`[放逐技能] 狼王 ${exiledPlayer.seatNo}号位可以开枪`);
-
     // TODO: 派发狼王 Agent 选择开枪目标
     // TODO: 执行开枪，更新 updatedPlayers
     gameLogger.warn(`[放逐技能] 狼王开枪逻辑待实现`);
@@ -108,14 +98,10 @@ async function processExileSkillsNode(
 
   // 处理白狼王自爆带人
   if (triggerResult.whiteWolfCanKill) {
-    gameLogger.debug(`[放逐技能] 白狼王 ${exiledPlayer.seatNo}号位自爆可以带走一人`);
-
     // TODO: 派发白狼王 Agent 选择带走目标
     // TODO: 执行带走，更新 updatedPlayers
     gameLogger.warn(`[放逐技能] 白狼王自爆带人逻辑待实现`);
   }
-
-  gameLogger.debug(`[放逐技能] 处理完成`);
 
   return {
     players: updatedPlayers,

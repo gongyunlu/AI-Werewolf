@@ -14,6 +14,13 @@
   color: var(--muted-foreground, #94a3b8);
 }
 
+.voteInfo {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  color: var(--primary, #3b82f6);
+  font-weight: 600;
+}
+
 .duration {
   margin-left: auto;
   font-size: 0.75rem;

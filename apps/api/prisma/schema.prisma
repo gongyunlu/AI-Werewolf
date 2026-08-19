@@ -32,7 +32,7 @@ model Game {
   rulesetId     String    @map("ruleset_id") @db.VarChar(64)
   skillVersion  String    @map("skill_version") @db.VarChar(32)
   status        String    @default("created") @db.VarChar(32) // 对局状态，取值口径见 packages/shared 的 GAME_STATUSES
-  winnerFaction String?   @map("winner_faction") @db.VarChar(16) // 胜利者阵营，目前只有好人、狼人阵营，丘比特等第三方阵营后续加入时再说，目前不考虑使用 enum 定义
+  winnerFaction String?   @map("winner_faction") @db.VarChar(16) // 胜利者阵营（好人/狼人），使用字符串存储而非 enum
   totalDays     Int?      @map("total_days") // 游戏总天数
   totalCost     Decimal?  @map("total_cost") @db.Decimal(14, 8) // 游戏总花费，精度与 ModelCall.cost/GameSummary.totalCost 统一为 (14,8)：scale=8 保证累加不丢精度，整数位 6 位避免单局费用破百的天花板
   totalTokens   Int?      @map("total_tokens") // 总计消费 token
@@ -47,6 +47,7 @@ model Game {
   agentPerformances AgentPerformance[]
   gameSummary       GameSummary?
   agentJudgments    AgentJudgment[]
+  speechSummaries   SpeechSummary[]
 
   @@map("games")
 }
@@ -185,7 +186,7 @@ model Memory {
   metadata        Json?                        @db.JsonB // 扩展元数据（如自定义标签、外部引用等）
   // 语义检索用嵌入向量，维度对齐火山方舟 doubao-embedding-text-240715 (2560)。
   // 不建 HNSW/IVFFlat 索引：pgvector 单精度索引维度上限 2000，2560 只能顺序扫描。
-  // TODO: 接入 embedding 生成服务后填充；如果以后需要索引，评估切 halfvec(2560) 或降维。
+  // TODO: 接入 embedding 生成服务后填充
   embedding       Unsupported("vector(2560)")?
   createdAt       DateTime                     @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
@@ -299,4 +300,21 @@ model AgentJudgment {
   @@index([agentId, gameId], map: "agent_judgments_agent_game_idx")
   @@index([gameId, day], map: "agent_judgments_day_idx")
   @@map("agent_judgments")
+}
+
+// 全局发言摘要（2天前发言的 LLM 概括，压缩上下文防止爆炸）
+// 与 AgentJudgment 区别：判断是玩家主观（agentId 维度），摘要与玩家无关（全局共享）
+model SpeechSummary {
+  id        String   @id @default(uuid()) @db.Uuid
+  gameId    String   @map("game_id") @db.Uuid
+  day       Int      @map("day") @db.SmallInt
+  seatNo    Int      @map("seat_no") @db.SmallInt
+  summary   String   @map("summary") @db.Text
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, day, seatNo])
+  @@index([gameId, day])
+  @@map("speech_summaries")
 }

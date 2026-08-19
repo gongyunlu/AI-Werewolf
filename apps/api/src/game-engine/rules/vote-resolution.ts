@@ -2,7 +2,7 @@ import type { PlayerState } from '../core/types';
 
 export interface VoteResolutionResult {
   executedPlayerId: string | null; // 被放逐的玩家 ID，null 表示无人出局
-  isTie: boolean; // 是否平票
+  isTie: boolean;
   tiedPlayerIds: string[]; // 平票时并列最高票的玩家 ID 列表
 }
 
@@ -20,7 +20,7 @@ export interface VoteResolutionResult {
 export function resolveVotes(
   votes: Map<string, string[]>, // 被投票人 ID → 投票人 ID[]
   players: PlayerState[],
-  sheriffId?: string | null, // 警长 ID（可选）
+  sheriffId?: string | null,
 ): VoteResolutionResult {
   const alivePlayerIds = new Set(players.filter((p) => p.isAlive).map((p) => p.id));
 

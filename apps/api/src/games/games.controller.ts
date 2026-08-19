@@ -68,9 +68,6 @@ export class GamesController {
   @ApiOperation({ summary: '取消对局（从队列移除或中断执行）' })
   async cancel(@Param('id', new ParseUUIDPipe()) id: string) {
     const removedFromQueue = await this.gameQueue.cancelJob(id);
-    if (removedFromQueue) {
-      this.gamesService['logger'].log(`任务 ${id} 已从队列移除`);
-    }
     const success = await this.gamesService.cancelGame(id);
     return { success, message: '对局已取消', removedFromQueue };
   }
@@ -79,9 +76,6 @@ export class GamesController {
   @ApiOperation({ summary: '暂停对局' })
   async pause(@Param('id', new ParseUUIDPipe()) id: string) {
     const removedFromQueue = await this.gameQueue.cancelJob(id);
-    if (removedFromQueue) {
-      this.gamesService['logger'].log(`任务 ${id} 已从队列移除`);
-    }
     await this.gamesService.pauseGame(id);
     return { success: true, message: '对局已暂停', removedFromQueue };
   }
@@ -102,6 +96,8 @@ export class GamesController {
   }
 
   // ========== 管理端点 ==========
+  // TODO: 管理端点及 cancel/pause/resume 目前无鉴权，任何人可操作任意对局；
+  // 对外暴露前需加鉴权（如 API Key guard）保护。
 
   @Get('admin/pending-recovery')
   @ApiOperation({ summary: '查询所有需要恢复的对局' })

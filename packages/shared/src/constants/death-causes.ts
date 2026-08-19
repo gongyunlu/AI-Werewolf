@@ -4,9 +4,9 @@ import { z } from 'zod';
 export const DEATH_CAUSES = {
   NIGHT_KILL: 'night_kill', // 狼人夜刀
   EXECUTION: 'execution', // 白天投票放逐
-  HUNTER_SHOT: 'hunter_shot', // 猎人开枪(6 人板暂无猎人,预留)
+  HUNTER_SHOT: 'hunter_shot', // 猎人开枪
   WITCH_POISON: 'witch_poison', // 女巫毒杀
-  // —— 扩展死因(预留,视板子) ——
+  // —— 扩展死因 ——
   DOUBLE_SAVE: 'double_save', // 同守同救
   SELF_DESTRUCT: 'self_destruct', // 狼自爆
   LOVE_DEATH: 'love_death', // 殉情

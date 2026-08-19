@@ -10,6 +10,9 @@ export const PHASES = {
   CHECK_WIN: 'check_win', // 胜负判定
   SHERIFF_ELECTION: 'sheriff_election', // 警长竞选
   TIE_BREAK: 'tie_break', // 平票 PK 发言/投票
+  // —— 系统事件（非玩家阶段）——
+  SYSTEM: 'system', // 系统级事件（游戏开始/结束）
+  JUDGE: 'judge', // 法官播报
 } as const;
 
 export type Phase = typeof PHASES[keyof typeof PHASES];

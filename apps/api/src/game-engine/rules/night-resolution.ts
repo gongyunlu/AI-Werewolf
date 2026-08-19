@@ -4,10 +4,10 @@ import { ROLES } from '@ai-werewolf/shared';
 
 export interface NightActionInput {
   players: PlayerState[];
-  wolfTarget: string | null; // 狼人刀的目标
-  guardTarget: string | null; // 守卫守护的目标
-  witchAntidoteTarget: string | null; // 女巫解药目标
-  witchPoisonTarget: string | null; // 女巫毒药目标
+  wolfTarget: string | null;
+  guardTarget: string | null;
+  witchAntidoteTarget: string | null;
+  witchPoisonTarget: string | null;
   witchPlayerId?: string; // 女巫玩家 ID（用于查找女巫的用药历史）
   currentDay?: number; // 当前天数（用于判断女巫首夜自救）
   allowWitchSelfSaveFirstNight?: boolean; // 是否允许女巫首夜自救（房规配置，默认 true）
@@ -19,10 +19,10 @@ export interface NightDeathRecord {
 }
 
 export interface NightResolutionResult {
-  deaths: NightDeathRecord[]; // 本晚死亡列表
+  deaths: NightDeathRecord[];
   guardBlocked: boolean; // 守卫是否成功守护
   antidoteUsed: boolean; // 女巫解药是否生效（成功救人）
-  poisonUsed: boolean; // 女巫毒药是否生效
+  poisonUsed: boolean;
   isDoubleSave: boolean; // 是否同守同救
 }
 

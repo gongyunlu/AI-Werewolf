@@ -25,7 +25,7 @@ export interface RulesetDefinition {
   nightOrder?: string[];
 
   /**
-   * 其他规则配置（待补充）
+   * 其他规则配置
    */
   // TODO: 补充其他规则配置类型
 }

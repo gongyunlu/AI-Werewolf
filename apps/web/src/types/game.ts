@@ -76,6 +76,7 @@ export interface GameListItem {
     role: string | null;
     faction: string | null;
     deathDay: number | null;
+    deathCause: string | null;
     displayName: string;
     modelName: string;
     isSheriff: boolean;

@@ -27,6 +27,8 @@ export interface SceneOpenEvent {
   sceneType: SceneType;
   visibility: SceneVisibility;
   actorId?: string;
+  /** 非流式场景的完整正文（法官播报/系统通知等），内联展示，无需走 scene.append */
+  initialContent?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -42,8 +44,10 @@ export interface SceneCloseEvent {
   type: 'scene.close';
   sequence: number;
   sceneId: string;
-  fullContent: string;
-  durationMs: number;
+  /** 思考阶段耗时（ms），无思考阶段的场景为 0 */
+  thinkingDurationMs: number;
+  /** 正文阶段耗时（ms），非流式场景为 0 */
+  contentDurationMs: number;
 }
 
 export interface GameFinishedEvent {
@@ -54,6 +58,9 @@ export interface GameFinishedEvent {
 
 export type SseMessage =
   ConnectionReadyEvent | SceneOpenEvent | SceneAppendEvent | SceneCloseEvent | GameFinishedEvent;
+
+/** 实际广播出去的场景事件（emit 后带 sequence），不含连接握手事件 */
+export type SseSceneMessage = Exclude<SseMessage, ConnectionReadyEvent>;
 
 /** broadcaster.emit() 接受的参数类型（无 sequence，由 service 自动补充） */
 export type SseEmitPayload =

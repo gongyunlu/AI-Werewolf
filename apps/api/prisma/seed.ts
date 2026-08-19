@@ -125,11 +125,11 @@ const roleSkills = [
   },
 ];
 
-// 6 人预女双民板：本次学习期主要用它跑通接口和主图
+// 6 人预女双民板：2 狼 + 预言家 + 女巫 + 2 平民
 const std6p: { id: string; name: string; notes: string; definition: RulesetDefinition } = {
   id: 'standard6p',
   name: '标准 6 人预女双民板',
-  notes: 'Phase 2 验证用板：2 狼 + 预言家 + 女巫 + 2 平民',
+  notes: '2 狼 + 预言家 + 女巫 + 2 平民',
   definition: {
     roles: [
       { role: 'werewolf', faction: 'werewolf' },
@@ -142,7 +142,7 @@ const std6p: { id: string; name: string; notes: string; definition: RulesetDefin
   },
 };
 
-// 默认 Agent：跨对局持久身份，覆盖火山方舟的 6 个不同模型/厂商，方便 Phase 8 跨模型对抗
+// 默认 Agent：跨对局持久身份，覆盖火山方舟的 6 个不同模型/厂商
 const defaultAgents: Array<{
   name: string;
   defaultModelName: string;
@@ -182,10 +182,10 @@ const defaultAgents: Array<{
   { name: '阿八', defaultModelName: 'glm-5.2', memoryLabel: '孙八', notes: '智谱旗舰，长程任务强' },
 ];
 
-// 初始人设 Memory：分两层写入，Phase 4 组 prompt 时按 importance 降序取，人设自然排在战术前
+// 初始人设 Memory：分两层写入，按 importance 降序取，人设自然排在战术前
 // - persona 层（importance=1.0）：表达风格、思维习惯、情绪/社交特征等长期稳定的身份特质，跨身份跨局都不变
-// - strategy 层（importance=0.6）：战术倾向而非结论，具体动作仍要由 role + 场况在 Phase 3 决策链里推理产出
-// 换记忆等于换人设：这批挂在 memoryLabel="张三/李四/..." 下，后续换 label 实验不会误伤这批
+// - strategy 层（importance=0.6）：战术倾向而非结论，具体动作仍要由 role + 场况推理产出
+// 换记忆等于换人设：这批挂在 memoryLabel="张三/李四/..." 下
 type PersonaItem = { type: 'persona' | 'strategy'; title: string; content: string };
 const PERSONA_IMPORTANCE = 1.0;
 const STRATEGY_IMPORTANCE = 0.6;
@@ -476,7 +476,7 @@ async function main() {
     }
 
     // 2. 为每个角色创建专属技能 Skill
-    // 注意：这里我们为每个 Agent 创建所有角色的技能，这样 Agent 可以扮演任何角色
+    // 为每个 Agent 创建所有角色的技能，使其可扮演任意角色
     for (const agent of allAgents) {
       // 删除旧的角色技能 Skill
       await prisma.memory.deleteMany({
@@ -500,16 +500,16 @@ async function main() {
             confidence: 1.0,
             source: 'manual',
             isActive: true,
-            // 使用 gameId 字段存储角色信息（用于后续过滤）
+            // 使用 gameId 字段存储角色信息
             gameId: null, // null 表示通用技能
           },
         });
       }
     }
 
-    // ========== Phase 8.4 测试游戏数据 ==========
+    // ========== 测试游戏数据 ==========
 
-    // 使用固定的 UUID 作为测试游戏 ID（方便后续测试脚本引用）
+    // 使用固定的 UUID 作为测试游戏 ID
     const testGameId = '00000000-0000-0000-0000-000000000001';
 
     // 删除旧的测试游戏（如果存在）

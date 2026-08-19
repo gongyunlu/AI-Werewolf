@@ -1,3 +1,5 @@
+import { SEER_CHECK_RESULTS, type SeerCheckResult } from '@ai-werewolf/shared';
+
 /**
  * Event content 类型定义
  *
@@ -9,7 +11,7 @@
  */
 export interface SeerCheckEventContent {
   targetSeatNo: number;
-  result: 'good' | 'werewolf';
+  result: SeerCheckResult;
 }
 
 /**
@@ -73,8 +75,8 @@ export function isSeerCheckEventContent(content: unknown): content is SeerCheckE
     content !== null &&
     'targetSeatNo' in content &&
     'result' in content &&
-    ((content as Record<string, unknown>).result === 'good' ||
-      (content as Record<string, unknown>).result === 'werewolf')
+    ((content as Record<string, unknown>).result === SEER_CHECK_RESULTS.GOOD ||
+      (content as Record<string, unknown>).result === SEER_CHECK_RESULTS.WEREWOLF)
   );
 }
 

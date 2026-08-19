@@ -1,5 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
-import { Module, OnModuleInit, Logger } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GameQueueService } from './game-queue.service';
 import { GameWorkerService } from './game-worker.service';
@@ -47,8 +47,6 @@ import type { Env } from '../config/env.validation';
   exports: [GameQueueService],
 })
 export class GameQueueModule implements OnModuleInit {
-  private readonly logger = new Logger(GameQueueModule.name);
-
   constructor(
     private readonly gameQueue: GameQueueService,
     private readonly prisma: PrismaService,

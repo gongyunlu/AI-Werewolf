@@ -1,3 +1,4 @@
+import type { ConfigService } from '@nestjs/config';
 import type { GameGraphState } from '../core/types';
 import type { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
@@ -5,6 +6,8 @@ import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
 import type { GamePreset } from '../presets/game-presets';
 import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
+import type { EventBusService } from '@/event-bus/event-bus.service';
+import type { Env } from '@/config/env.validation';
 
 /**
  * 游戏节点函数类型
@@ -19,9 +22,12 @@ export interface NodeContext {
   toolsFactory: AgentToolsFactory;
   prisma: PrismaService;
   eventWriter: EventWriterService;
+  configService: ConfigService<Env, true>;
   signal?: AbortSignal; // 用于中断游戏执行
   preset?: GamePreset; // 板子配置（用于 NIGHT/DAY 节点访问 pipeline）
+  pauseCheckWrapper?: (node: GameNode) => GameNode; // 暂停检查包装器（由 GameEngine 注入到每局上下文）
   broadcaster?: SseBroadcasterService;
+  eventBus?: EventBusService;
 }
 
 /**

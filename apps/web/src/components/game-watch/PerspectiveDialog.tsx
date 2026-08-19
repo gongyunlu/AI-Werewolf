@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 
 const PERSPECTIVES = [
@@ -31,18 +31,11 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (perspective: string) => void;
-  onClose: () => void;
   initial?: string;
 }
 
 export function PerspectiveDialog({ open, onOpenChange, onSelect, initial }: Props) {
   const [selected, setSelected] = useState(initial || 'god');
-
-  useEffect(() => {
-    if (initial) {
-      setSelected(initial);
-    }
-  }, [initial]);
 
   const handleConfirm = () => {
     onSelect(selected);

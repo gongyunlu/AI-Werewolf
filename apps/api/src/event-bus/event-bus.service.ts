@@ -1,34 +1,34 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { Event } from '../generated/prisma/client';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
+import { ACTION_TYPES, SEER_CHECK_RESULTS, VISIBILITY_TYPES } from '@ai-werewolf/shared';
 import type { SceneType, SceneVisibility } from '../sse/sse-event.types';
 
 const ACTION_TO_SCENE_TYPE: Record<string, SceneType> = {
   // 夜间行动
-  wolf_kill: 'night_action',
-  seer_check: 'night_action',
-  witch_save: 'night_action',
-  witch_poison: 'night_action',
+  [ACTION_TYPES.WOLF_KILL]: 'night_action',
+  [ACTION_TYPES.SEER_CHECK]: 'night_action',
+  [ACTION_TYPES.WITCH_SAVE]: 'night_action',
+  [ACTION_TYPES.WITCH_POISON]: 'night_action',
   // 白天行动
-  speech: 'speech', // 包含狼队商议（wolf visibility）
-  vote: 'vote',
+  // speech 类事件由节点直接流式 emit，不在此广播，避免落库后再广播出现两张卡片
+  [ACTION_TYPES.VOTE]: 'vote',
   // 公告类
-  death_announcement: 'judge',
-  peaceful_night: 'judge',
-  player_executed: 'judge',
-  player_died: 'judge',
-  idiot_flip: 'judge',
-  sheriff_decide_order: 'judge',
-  speech_order_determined: 'judge',
+  [ACTION_TYPES.PEACEFUL_NIGHT]: 'judge',
+  [ACTION_TYPES.PLAYER_EXECUTED]: 'judge',
+  [ACTION_TYPES.PLAYER_DIED]: 'judge',
+  [ACTION_TYPES.IDIOT_FLIP]: 'judge',
+  [ACTION_TYPES.SHERIFF_DECIDE_ORDER]: 'judge',
+  [ACTION_TYPES.SPEECH_ORDER_DETERMINED]: 'judge',
   // 系统/法官事件
-  GAME_START: 'system',
-  GAME_END: 'system',
-  JUDGE_ANNOUNCE: 'judge',
-  NIGHT_PROMPT: 'night_prompt',
+  [ACTION_TYPES.GAME_STARTED]: 'system',
+  [ACTION_TYPES.GAME_ENDED]: 'system',
+  [ACTION_TYPES.JUDGE_ANNOUNCE]: 'judge',
+  [ACTION_TYPES.NIGHT_PROMPT]: 'night_prompt',
 };
 
-/** 将 event.content 转为人类可读文本（用于 scene.close 的 fullContent） */
+/** 将 event.content 转为人类可读文本（用于 scene.open 的 initialContent） */
 function formatContent(event: Event): string {
   const content = event.content as Record<string, unknown>;
 
@@ -38,12 +38,12 @@ function formatContent(event: Event): string {
 
   // 针对特定 actionType 生成人类可读文本
   switch (event.actionType) {
-    case 'seer_check': {
+    case ACTION_TYPES.SEER_CHECK: {
       const targetSeatNo = content.targetSeatNo;
-      const result = content.result === 'werewolf' ? '狼人' : '好人';
+      const result = content.result === SEER_CHECK_RESULTS.WEREWOLF ? '狼人' : '好人';
       return `查验了 ${targetSeatNo}号位，结果：${result}`;
     }
-    case 'witch_save': {
+    case ACTION_TYPES.WITCH_SAVE: {
       const targetSeatNo = content.targetSeatNo;
       const saved = content.saved;
       if (saved && targetSeatNo && targetSeatNo !== 0) {
@@ -51,7 +51,7 @@ function formatContent(event: Event): string {
       }
       return '女巫未使用解药';
     }
-    case 'witch_poison': {
+    case ACTION_TYPES.WITCH_POISON: {
       const targetSeatNo = content.targetSeatNo;
       const used = content.used;
       if (used && targetSeatNo && targetSeatNo !== 0) {
@@ -59,14 +59,22 @@ function formatContent(event: Event): string {
       }
       return '女巫未使用毒药';
     }
-    case 'wolf_kill': {
+    case ACTION_TYPES.WOLF_KILL: {
       const targetSeatNo = content.targetSeatNo;
       if (targetSeatNo) {
         return `狼人刀了 ${targetSeatNo}号位`;
       }
       return '狼人空刀';
     }
-    case 'death_announcement': {
+    case ACTION_TYPES.VOTE: {
+      const voterSeatNo = content.voterSeatNo;
+      const targetSeatNo = content.targetSeatNo;
+      if (targetSeatNo && targetSeatNo !== 0) {
+        return `${voterSeatNo}号位投票给 ${targetSeatNo}号位`;
+      }
+      return `${voterSeatNo}号位弃票`;
+    }
+    case ACTION_TYPES.PLAYER_DIED: {
       const deaths = content.deaths as Array<{ seatNo: number; cause: string }>;
       if (deaths && deaths.length > 0) {
         return deaths.map((d) => `${d.seatNo}号位（${d.cause}）`).join('、') + ' 出局';
@@ -81,6 +89,39 @@ function formatContent(event: Event): string {
   }
 }
 
+/** 提取事件的结构化元数据（用于前端渲染特殊效果） */
+function extractMetadata(event: Event): Record<string, unknown> | undefined {
+  const content = event.content as Record<string, unknown>;
+
+  switch (event.actionType) {
+    case ACTION_TYPES.VOTE:
+      return {
+        action: 'vote',
+        voterSeatNo: content.voterSeatNo,
+        targetSeatNo: content.targetSeatNo,
+      };
+    case ACTION_TYPES.WOLF_KILL:
+      return {
+        action: 'wolf_kill',
+        targetSeatNo: content.targetSeatNo,
+      };
+    case ACTION_TYPES.WITCH_SAVE:
+      return {
+        action: 'witch_save',
+        targetSeatNo: content.targetSeatNo,
+        saved: content.saved,
+      };
+    case ACTION_TYPES.WITCH_POISON:
+      return {
+        action: 'witch_poison',
+        targetSeatNo: content.targetSeatNo,
+        used: content.used,
+      };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * EventBus: 游戏事件的统一广播层
  *
@@ -89,8 +130,6 @@ function formatContent(event: Event): string {
  */
 @Injectable()
 export class EventBusService {
-  private readonly logger = new Logger(EventBusService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly sseBroadcaster: SseBroadcasterService,
@@ -102,17 +141,15 @@ export class EventBusService {
    * @param event 已持久化的事件记录
    */
   async publish(event: Event): Promise<void> {
-    this.logger.debug(
-      `Event published: ${event.actionType} (seq=${event.sequence}, game=${event.gameId})`,
-    );
-
     if (!this.sseBroadcaster) return;
 
     const sceneType = ACTION_TO_SCENE_TYPE[event.actionType];
     if (!sceneType) return;
 
-    const visibility: SceneVisibility = (event.visibility as SceneVisibility) ?? 'public';
+    const visibility: SceneVisibility =
+      (event.visibility as SceneVisibility) ?? VISIBILITY_TYPES.PUBLIC;
     const sceneId = event.id;
+    const metadata = extractMetadata(event);
 
     this.sseBroadcaster.emit(event.gameId, {
       type: 'scene.open',
@@ -120,13 +157,15 @@ export class EventBusService {
       sceneType: sceneType as SceneType,
       visibility,
       actorId: event.actorId ?? undefined,
+      initialContent: formatContent(event),
+      metadata,
     });
 
     this.sseBroadcaster.emit(event.gameId, {
       type: 'scene.close',
       sceneId,
-      fullContent: formatContent(event),
-      durationMs: 0,
+      thinkingDurationMs: 0,
+      contentDurationMs: 0,
     });
   }
 }

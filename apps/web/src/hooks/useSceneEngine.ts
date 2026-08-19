@@ -1,5 +1,4 @@
 import { useCallback, useReducer, useRef } from 'react';
-import { RenderScheduler, HOLD_UNTIL_MS } from '@/lib/RenderScheduler';
 import type { SceneType, SceneVisibility, SseMessage } from '@/types/sse';
 
 export interface ClosedScene {
@@ -7,8 +6,11 @@ export interface ClosedScene {
   sceneType: SceneType;
   visibility: SceneVisibility;
   actorId?: string;
-  fullContent: string;
-  durationMs: number;
+  thinking: string;
+  content: string;
+  thinkingDurationMs: number;
+  contentDurationMs: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ActiveScene {
@@ -16,33 +18,44 @@ export interface ActiveScene {
   sceneType: SceneType;
   visibility: SceneVisibility;
   actorId?: string;
+  thinking: string;
+  content: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface SceneState {
   closedScenes: ClosedScene[];
   activeScene: ActiveScene | null;
-  displayText: string;
   gameOver: boolean;
   winner?: string;
 }
 
 type Action =
   | { type: 'SCENE_OPEN'; scene: ActiveScene }
-  | { type: 'UPDATE_DISPLAY'; text: string }
+  | { type: 'APPEND'; sceneId: string; token: string; contentType: 'thinking' | 'content' }
   | { type: 'SCENE_CLOSE'; closed: ClosedScene }
   | { type: 'GAME_OVER'; winner: string };
 
 function reducer(state: SceneState, action: Action): SceneState {
   switch (action.type) {
     case 'SCENE_OPEN':
-      return { ...state, activeScene: action.scene, displayText: '' };
-    case 'UPDATE_DISPLAY':
-      return { ...state, displayText: action.text };
+      return { ...state, activeScene: action.scene };
+    case 'APPEND': {
+      const active = state.activeScene;
+      // 防御：append 只作用于当前活跃场景（断线重连等场景可能串号）
+      if (!active || active.sceneId !== action.sceneId) return state;
+      if (action.contentType === 'thinking') {
+        return {
+          ...state,
+          activeScene: { ...active, thinking: active.thinking + action.token },
+        };
+      }
+      return { ...state, activeScene: { ...active, content: active.content + action.token } };
+    }
     case 'SCENE_CLOSE':
       return {
         ...state,
         activeScene: null,
-        displayText: '',
         closedScenes: [...state.closedScenes, action.closed],
       };
     case 'GAME_OVER':
@@ -55,17 +68,25 @@ function reducer(state: SceneState, action: Action): SceneState {
 const INITIAL_STATE: SceneState = {
   closedScenes: [],
   activeScene: null,
-  displayText: '',
   gameOver: false,
 };
 
-export function useSceneEngine() {
+/** 非流式场景关闭后最小停留时间（ms） */
+const HOLD_UNTIL_MS: Record<string, number> = {
+  judge: 2000,
+  system: 1500,
+  night_prompt: 2500,
+  vote: 800,
+  night_action: 1500,
+  speech: 0,
+  last_words: 0,
+};
+
+export function useSceneEngine(perspective: string) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
-  const schedulerRef = useRef<RenderScheduler | null>(null);
   const activeSceneRef = useRef<ActiveScene | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCloseRef = useRef<ClosedScene | null>(null);
-  const schedulerContentTypeRef = useRef<'thinking' | 'content'>('content');
 
   const flushPendingClose = useCallback(() => {
     if (closeTimerRef.current !== null) {
@@ -73,8 +94,6 @@ export function useSceneEngine() {
       closeTimerRef.current = null;
     }
     if (pendingCloseRef.current) {
-      schedulerRef.current?.destroy();
-      schedulerRef.current = null;
       activeSceneRef.current = null;
       dispatch({ type: 'SCENE_CLOSE', closed: pendingCloseRef.current });
       pendingCloseRef.current = null;
@@ -87,39 +106,37 @@ export function useSceneEngine() {
         // 如果有上一个 scene 的延迟关闭尚未完成，立即收尾
         flushPendingClose();
 
+        // 闭眼视角只展示公开场景；过滤后的场景不登记 activeScene，
+        // 其后续 scene.append / scene.close 因 sceneId 不匹配或无 activeScene 而被忽略
+        if (perspective === 'villager' && msg.visibility !== 'public') {
+          return;
+        }
+
         const scene: ActiveScene = {
           sceneId: msg.sceneId,
           sceneType: msg.sceneType,
           visibility: msg.visibility,
           actorId: msg.actorId,
+          thinking: '',
+          content: msg.initialContent ?? '',
+          metadata: msg.metadata,
         };
         activeSceneRef.current = scene;
         dispatch({ type: 'SCENE_OPEN', scene });
-
-        schedulerRef.current = new RenderScheduler('content', (text) => {
-          dispatch({ type: 'UPDATE_DISPLAY', text });
-        });
-        schedulerContentTypeRef.current = 'content';
       } else if (msg.type === 'scene.append') {
-        const contentType = msg.contentType ?? 'content';
-        if (contentType === 'thinking') {
-          if (schedulerContentTypeRef.current !== 'thinking') {
-            schedulerRef.current?.destroy();
-            schedulerRef.current = new RenderScheduler('thinking', (text) => {
-              dispatch({ type: 'UPDATE_DISPLAY', text });
-            });
-            schedulerContentTypeRef.current = 'thinking';
-          }
-          schedulerRef.current?.push(msg.token);
-        } else {
-          if (schedulerContentTypeRef.current !== 'content') {
-            schedulerRef.current?.destroy();
-            schedulerRef.current = new RenderScheduler('content', (text) => {
-              dispatch({ type: 'UPDATE_DISPLAY', text });
-            });
-            schedulerContentTypeRef.current = 'content';
-          }
-          schedulerRef.current?.push(msg.token);
+        dispatch({
+          type: 'APPEND',
+          sceneId: msg.sceneId,
+          token: msg.token,
+          contentType: msg.contentType,
+        });
+        // 同步 ref，确保后续 scene.close 能拿到完整的思考/正文内容
+        const active = activeSceneRef.current;
+        if (active && active.sceneId === msg.sceneId) {
+          activeSceneRef.current =
+            msg.contentType === 'thinking'
+              ? { ...active, thinking: active.thinking + msg.token }
+              : { ...active, content: active.content + msg.token };
         }
       } else if (msg.type === 'scene.close') {
         const scene = activeSceneRef.current;
@@ -131,21 +148,25 @@ export function useSceneEngine() {
           sceneType: scene.sceneType,
           visibility: scene.visibility,
           actorId: scene.actorId,
-          fullContent: msg.fullContent,
-          durationMs: msg.durationMs,
+          thinking: scene.thinking,
+          content: scene.content,
+          thinkingDurationMs: msg.thinkingDurationMs,
+          contentDurationMs: msg.contentDurationMs,
+          metadata: scene.metadata,
         };
 
+        // 记录待关闭场景，供 flushPendingClose 在新场景打开时立即收尾
+        pendingCloseRef.current = closed;
         closeTimerRef.current = setTimeout(() => {
-          schedulerRef.current?.destroy();
-          schedulerRef.current = null;
           activeSceneRef.current = null;
           dispatch({ type: 'SCENE_CLOSE', closed });
+          pendingCloseRef.current = null;
         }, holdMs);
       } else if (msg.type === 'game.finished') {
         dispatch({ type: 'GAME_OVER', winner: msg.winner });
       }
     },
-    [flushPendingClose],
+    [flushPendingClose, perspective],
   );
 
   return { state, handleMessage };

@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Queue } from 'bullmq';
 
 /**
@@ -27,14 +27,10 @@ export interface QueueStatus {
  * 4. 控制任务生命周期（暂停/继续/取消）
  */
 @Injectable()
-export class GameQueueService implements OnModuleInit {
+export class GameQueueService {
   private readonly logger = new Logger(GameQueueService.name);
 
   constructor(@InjectQueue('game-queue') private readonly queue: Queue<GameJobData>) {}
-
-  async onModuleInit() {
-    this.logger.log('GameQueueService 初始化完成');
-  }
 
   /**
    * 添加游戏任务到队列

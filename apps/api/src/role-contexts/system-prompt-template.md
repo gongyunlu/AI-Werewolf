@@ -38,7 +38,6 @@
 
 - neutralSummary: 客观陈述事实（谁说了什么），不带主观评价
 - judgments: 对每个发言玩家的主观判断，包括信任度评分和理由
-- actionPlan: 基于当前信息，你接下来打算怎么做（不超过100字）
 
 【relationship 字段说明】
 
@@ -61,6 +60,5 @@
 "notes": "判断理由（简短，不超过50字）",
 "relationship": "teammate/checked_good/checked_wolf/silver（可选，仅一手信息时填写）"
 }
-],
-"actionPlan": "基于以上分析，你接下来打算怎么做（不超过100字）"
+]
 }

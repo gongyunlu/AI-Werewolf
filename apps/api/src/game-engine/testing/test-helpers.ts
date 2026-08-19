@@ -3,6 +3,26 @@ import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factor
 import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
 import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
+import type { EventBusService } from '@/event-bus/event-bus.service';
+import type { WerewolfKillNode } from '../nodes/night/werewolf-kill.node';
+import type { WitchAntidoteNode } from '../nodes/night/witch-antidote.node';
+import type { WitchPoisonNode } from '../nodes/night/witch-poison.node';
+import type { SeerCheckNode } from '../nodes/night/seer-check.node';
+import type { SpeechNode } from '../nodes/day/speech.node';
+import type { VoteNode } from '../nodes/day/vote.node';
+import type { LastWordsNode } from '../nodes/day/last-words.node';
+import type { ExileLastWordsNode } from '../nodes/day/exile-last-words.node';
+import type { SheriffDecideOrderNode } from '../nodes/day/sheriff-decide-order.node';
+import type { PkSpeechNode } from '../nodes/day/pk-speech.node';
+import type { PkVoteNode } from '../nodes/day/pk-vote.node';
+import type { NodeRegistrar } from '../nodes/node-registrar.service';
+
+/**
+ * 创建 Mock 节点工厂
+ */
+const createMockNode = () => ({
+  create: jest.fn().mockReturnValue(() => async () => ({})),
+});
 
 /**
  * 测试辅助函数：创建 Mock 依赖
@@ -53,11 +73,16 @@ export function createMockDependencies() {
     writeDeathAnnouncementEvent: jest.fn().mockResolvedValue(undefined),
     writePeacefulNightEvent: jest.fn().mockResolvedValue(undefined),
     writePlayerSpeechEvent: jest.fn().mockResolvedValue(undefined),
+    writeWolfDiscussionEvent: jest.fn().mockResolvedValue(undefined),
     writePlayerVoteEvent: jest.fn().mockResolvedValue(undefined),
     writePlayerExiledEvent: jest.fn().mockResolvedValue(undefined),
     writeIdiotRevealEvent: jest.fn().mockResolvedValue(undefined),
-    writeSpecialRoleTriggerEvent: jest.fn().mockResolvedValue(undefined),
+    writeSheriffDecideOrderEvent: jest.fn().mockResolvedValue(undefined),
     writeSpeechOrderDeterminedEvent: jest.fn().mockResolvedValue(undefined),
+    writeGameStartEvent: jest.fn().mockResolvedValue(undefined),
+    writeGameEndEvent: jest.fn().mockResolvedValue(undefined),
+    writeJudgeEvent: jest.fn().mockResolvedValue(undefined),
+    writeNightPromptEvent: jest.fn().mockResolvedValue(undefined),
   } as unknown as EventWriterService;
 
   const mockBroadcaster = {
@@ -68,11 +93,44 @@ export function createMockDependencies() {
     exists: jest.fn(),
   } as unknown as SseBroadcasterService;
 
+  const mockEventBus = {
+    publish: jest.fn(),
+  } as unknown as EventBusService;
+
+  const mockWerewolfKillNode = createMockNode() as unknown as WerewolfKillNode;
+  const mockWitchAntidoteNode = createMockNode() as unknown as WitchAntidoteNode;
+  const mockWitchPoisonNode = createMockNode() as unknown as WitchPoisonNode;
+  const mockSeerCheckNode = createMockNode() as unknown as SeerCheckNode;
+  const mockSpeechNode = createMockNode() as unknown as SpeechNode;
+  const mockVoteNode = createMockNode() as unknown as VoteNode;
+  const mockLastWordsNode = createMockNode() as unknown as LastWordsNode;
+  const mockExileLastWordsNode = createMockNode() as unknown as ExileLastWordsNode;
+  const mockSheriffDecideOrderNode = createMockNode() as unknown as SheriffDecideOrderNode;
+  const mockPkSpeechNode = createMockNode() as unknown as PkSpeechNode;
+  const mockPkVoteNode = createMockNode() as unknown as PkVoteNode;
+
+  const mockNodeRegistrar = {
+    registerAll: jest.fn(),
+  } as unknown as NodeRegistrar;
+
   return {
     mockAgentRuntime,
     mockToolsFactory,
     mockPrisma,
     mockEventWriter,
     mockBroadcaster,
+    mockEventBus,
+    mockWerewolfKillNode,
+    mockWitchAntidoteNode,
+    mockWitchPoisonNode,
+    mockSeerCheckNode,
+    mockSpeechNode,
+    mockVoteNode,
+    mockLastWordsNode,
+    mockExileLastWordsNode,
+    mockSheriffDecideOrderNode,
+    mockPkSpeechNode,
+    mockPkVoteNode,
+    mockNodeRegistrar,
   };
 }

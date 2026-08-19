@@ -1,51 +1,23 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { roleToolsRegistry } from './role-tools.registry';
-import { createCheckIdentityTool } from './check-identity.tool';
-import { createUseAntidoteTool, createUsePoisonTool } from './witch.tool';
-import { createWolfChatTool, createProposeKillTool } from './werewolf.tool';
 
 /**
  * 角色工具注册初始化器
  *
- * 在模块初始化时自动注册所有角色的工具构建器
+ * @deprecated 两阶段决策模式已移除工具调用，改用 Structured Output。
+ * 保留此类仅为保持架构完整性，初始化逻辑已清空。
  *
- * 新增角色时：
- * 1. 实现工具函数（如 create-hunter-shoot.tool.ts）
- * 2. 在此文件中导入并在 onModuleInit 中注册
- * 3. 无需修改 AgentToolsFactory
+ * 历史架构：
+ * - 在模块初始化时自动注册所有角色的工具构建器
+ * - 新增角色只需实现工具函数并在此注册
+ * - 支持预言家、女巫、狼人等角色的工具动态注册
+ *
+ * 当前架构：
+ * - 所有决策通过两阶段模式完成（streamReasoning + generateDecision）
+ * - Node 层使用 JSON Schema 定义结构化输出
  */
 @Injectable()
 export class RoleToolsInitializer implements OnModuleInit {
   onModuleInit() {
-    // 预言家工具
-    roleToolsRegistry.register('seer', (ctx) => [createCheckIdentityTool(ctx)]);
-
-    // 女巫工具（已拆分为两个阶段）
-    roleToolsRegistry.register('witch_antidote', (ctx) => [createUseAntidoteTool(ctx)]);
-
-    roleToolsRegistry.register('witch_poison', (ctx) => [createUsePoisonTool(ctx)]);
-
-    // 狼人工具
-    roleToolsRegistry.register('werewolf', (ctx) => [
-      createWolfChatTool(ctx),
-      createProposeKillTool(ctx),
-    ]);
-
-    // 平民工具（无特殊工具，只有默认的 skip_action）
-    roleToolsRegistry.register('villager', () => []);
-
-    /**
-     * 未来扩展示例：
-     *
-     * // 猎人工具
-     * roleToolsRegistry.register('hunter', (ctx) => [
-     *   createHunterShootTool(ctx),
-     * ]);
-     *
-     * // 守卫工具
-     * roleToolsRegistry.register('guard', (ctx) => [
-     *   createGuardProtectTool(ctx),
-     * ]);
-     */
+    // No-op: 工具注册已废弃
   }
 }

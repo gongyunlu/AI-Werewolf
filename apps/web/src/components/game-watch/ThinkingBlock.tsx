@@ -6,10 +6,11 @@ import { Streamdown } from 'streamdown';
 interface ThinkingBlockProps {
   thinking: string;
   duration?: number; // 推理用时（毫秒）
+  defaultOpen?: boolean; // 流式渲染中默认展开
 }
 
-export function ThinkingBlock({ thinking, duration }: ThinkingBlockProps) {
-  const [isOpen, setIsOpen] = useState(false);
+export function ThinkingBlock({ thinking, duration, defaultOpen = false }: ThinkingBlockProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
 
   const durationText = duration ? `用时 ${(duration / 1000).toFixed(1)} 秒` : '';
 

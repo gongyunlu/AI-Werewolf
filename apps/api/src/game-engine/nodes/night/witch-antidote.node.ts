@@ -1,132 +1,167 @@
-import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
+import { Injectable } from '@nestjs/common';
+import { ROLES } from '@ai-werewolf/shared';
+import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
+import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
 /**
- * 女巫解药节点
- *
- * 规则：
- * - 女巫必须存活
- * - 女巫必须还有解药
- * - 女巫可以选择不使用解药
+ * 构建女巫解药决策 Schema（值域收敛到刀口座位）
  */
-export const createWitchAntidoteNode: NodeFactory = (context) => {
-  return async (state: GameGraphState) => {
-    const witch = state.players.find((p) => p.isAlive && p.role === ROLES.WITCH);
+function buildWitchAntidoteSchema(legalSeatNos: number[]) {
+  return z.object({
+    action: z.enum(['antidote', 'skip']),
+    targetSeatNo: z
+      .number()
+      .int()
+      .optional()
+      .describe(`要救的座位号（只能选：${legalSeatNos.join('、')}号；action=antidote 时必填）`),
+  });
+}
 
-    if (!witch) {
-      gameLogger.debug('[女巫解药] 无存活女巫，跳过');
-      return {};
+type WitchAntidoteDecision =
+  | {
+      action: 'antidote';
+      targetSeatNo: number;
     }
+  | {
+      action: 'skip';
+    };
 
-    if (witch.hasAntidoteUsed) {
-      gameLogger.debug('[女巫解药] 解药已使用，跳过');
-      return {};
-    }
+/**
+ * 女巫解药节点（两阶段版本）
+ */
+@Injectable()
+export class WitchAntidoteNode {
+  constructor(private readonly agentRuntime: AgentRuntimeService) {}
 
-    // 空刀时无法使用解药，直接跳过
-    if (!state.wolfTarget) {
-      gameLogger.debug('[女巫解药] 今晚空刀，无法使用解药');
-      return {};
-    }
+  create(): NodeFactory {
+    return (context) => async (state: GameGraphState) => {
+      const witch = state.players.find((p) => p.isAlive && p.role === ROLES.WITCH);
 
-    await context.eventWriter.writeNightPromptEvent({
-      gameId: state.gameId,
-      day: state.currentDay,
-      content: '女巫，请睁眼。',
-      targetRole: 'WITCH',
-    });
+      if (!witch) {
+        return {};
+      }
 
-    // 构建狼刀目标信息
-    const targetPlayer = state.players.find((p) => p.id === state.wolfTarget);
-    if (!targetPlayer) {
-      throw new Error(`[女巫解药] 数据一致性错误：未找到狼刀目标 ${state.wolfTarget}`);
-    }
+      if (witch.hasAntidoteUsed) {
+        return {};
+      }
 
-    const wolfTargetInfo = `
-      ## 今晚狼刀信息\n
-      今晚 **${targetPlayer.seatNo}号位** 被狼人刀中。\n
-      你是否要使用解药救他/她？
-    `.trim();
+      if (!state.wolfTarget) {
+        return {};
+      }
 
-    // 尝试使用 Agent 决策
-    try {
-      const tools = context.toolsFactory.buildNightActionTools(
-        { gameId: state.gameId, currentPlayerId: witch.id },
-        'witch_antidote',
-      );
-
-      const result = await context.agentRuntime.run({
+      const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
         gameId: state.gameId,
-        playerId: witch.id,
-        scenario: AGENT_SCENARIOS.NIGHT_ACTION,
-        availableTools: tools,
-        maxIterations: 5,
-        threadId: getPlayerThreadId(state.gameId, witch.id),
-        additionalContext: wolfTargetInfo,
+        day: state.currentDay,
+        content: '女巫，请睁眼。',
+        targetRole: 'WITCH',
       });
+      await context.eventBus?.publish(nightPromptEvent);
 
-      if (result.success && result.result) {
-        const toolResult = result.result as any;
+      const targetPlayer = state.players.find((p) => p.id === state.wolfTarget);
+      if (!targetPlayer) {
+        throw new Error(`[女巫解药] 数据一致性错误：未找到狼刀目标 ${state.wolfTarget}`);
+      }
 
-        if (toolResult.action === 'antidote') {
-          const target = state.players.find((p) => p.seatNo === toolResult.targetSeatNo);
+      const wolfTargetInfo = `
+## 今晚狼刀信息
+
+今晚 **${targetPlayer.seatNo}号位** 被狼人刀中。
+你只能选择救 ${targetPlayer.seatNo}号位，或不用药。
+      `.trim();
+
+      try {
+        const contextData = await this.agentRuntime.prepareContextPublic(
+          state.gameId,
+          witch.id,
+          'night_action' as any,
+          wolfTargetInfo,
+        );
+
+        const threadId = getPlayerThreadId(state.gameId, witch.id);
+
+        // 阶段1：流式推理
+        const reasoning = await this.agentRuntime.streamReasoning(
+          contextData,
+          threadId,
+          undefined,
+          (_token) => {
+            // 可选：SSE 推送推理过程
+          },
+        );
+
+        // 阶段2：生成决策
+        const decision = await this.agentRuntime.generateDecision<WitchAntidoteDecision>(
+          contextData,
+          reasoning,
+          buildWitchAntidoteSchema([targetPlayer.seatNo]),
+          undefined,
+          threadId,
+        );
+
+        if (decision.action === 'antidote') {
+          const target = state.players.find((p) => p.seatNo === decision.targetSeatNo);
           if (!target) {
             throw new Error(
-              `[女巫解药] 数据一致性错误：未找到目标玩家 ${toolResult.targetSeatNo}号位`,
+              `[女巫解药] 数据一致性错误：未找到目标玩家 ${decision.targetSeatNo}号位`,
             );
           }
 
-          gameLogger.debug(`[女巫解药] 使用解药救: ${target.seatNo}号位`);
-
-          await context.eventWriter.writeWitchAntidoteEvent({
+          const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
             targetId: target.id,
             targetSeatNo: target.seatNo,
-            thinking: result.thinking,
+            thinking: reasoning,
           });
+          await context.eventBus?.publish(antidoteEvent);
 
-          return { witchAntidoteTarget: target.id };
+          return {
+            witchAntidoteTarget: target.id,
+            players: state.players.map((p) =>
+              p.id === witch.id ? { ...p, hasAntidoteUsed: true, antidoteUsedOn: target.id } : p,
+            ),
+          };
         } else {
-          gameLogger.debug('[女巫解药] 选择不使用解药');
-
-          await context.eventWriter.writeWitchAntidoteEvent({
+          const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
             targetId: witch.id,
             targetSeatNo: 0,
-            thinking: result.thinking,
+            thinking: reasoning,
           });
+          await context.eventBus?.publish(antidoteEvent);
 
           return {};
         }
+      } catch (error) {
+        gameLogger.error(
+          `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
 
-      // Agent 调用失败，触发降级策略
-      gameLogger.warn(
-        `[女巫解药] Agent 执行失败，降级为自动使用${result.error ? `: ${result.error}` : ''}`,
-      );
-    } catch (error) {
-      gameLogger.error(
-        `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+      // 降级策略：自动使用解药
 
-    gameLogger.debug(`[女巫解药] 降级决策，使用解药救: ${targetPlayer.seatNo}号位`);
+      const fallbackAntidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
+        gameId: state.gameId,
+        day: state.currentDay,
+        actorId: witch.id,
+        targetId: targetPlayer.id,
+        targetSeatNo: targetPlayer.seatNo,
+      });
+      await context.eventBus?.publish(fallbackAntidoteEvent);
 
-    await context.eventWriter.writeWitchAntidoteEvent({
-      gameId: state.gameId,
-      day: state.currentDay,
-      actorId: witch.id,
-      targetId: targetPlayer.id,
-      targetSeatNo: targetPlayer.seatNo,
-    });
-
-    return { witchAntidoteTarget: targetPlayer.id };
-  };
-};
+      return {
+        witchAntidoteTarget: targetPlayer.id,
+        players: state.players.map((p) =>
+          p.id === witch.id ? { ...p, hasAntidoteUsed: true, antidoteUsedOn: targetPlayer.id } : p,
+        ),
+      };
+    };
+  }
+}

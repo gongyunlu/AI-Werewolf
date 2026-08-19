@@ -1,71 +1,53 @@
-import type { StructuredToolInterface } from '@langchain/core/tools';
-import type { ToolContext } from './tool-context';
-
-/**
- * 角色工具构建器
- *
- * 根据上下文构建该角色的工具列表
- */
-export type RoleToolBuilder = (ctx: ToolContext) => StructuredToolInterface[];
-
 /**
  * 角色工具注册表
  *
- * 负责管理角色 → 工具的映射关系，支持动态注册新角色
+ * @deprecated 两阶段决策模式已移除工具调用，改用 Structured Output。
+ * 保留此类仅为保持架构完整性，注册表实现已清空。
  *
- * 设计理念：
- * - 新增角色只需调用 register()，无需修改工厂代码
- * - 支持角色不存在时返回默认工具（skip_action）
- * - 所有角色工具在模块加载时自动注册
+ * 历史架构：
+ * - 插拔式架构：每个角色注册自己的工具集
+ * - 支持运行时动态注册新角色工具
+ * - 与场景无关，只关心角色
+ *
+ * 当前架构：
+ * - 所有决策通过两阶段模式完成（streamReasoning + generateDecision）
+ * - Node 层使用 JSON Schema 定义结构化输出
  */
 class RoleToolsRegistry {
-  private builders = new Map<string, RoleToolBuilder>();
+  private registry = new Map<string, any>();
 
   /**
-   * 注册角色工具构建器
-   *
-   * @param role 角色名称（与 GameState.players[].role 一致）
-   * @param builder 工具构建器函数
+   * @deprecated 不再使用
    */
-  register(role: string, builder: RoleToolBuilder): void {
-    if (this.builders.has(role)) {
-      throw new Error(`角色工具构建器已存在: ${role}`);
-    }
-    this.builders.set(role, builder);
+  register(_role: string, _toolsFactory: any) {
+    // No-op
   }
 
   /**
-   * 获取角色的工具列表
-   *
-   * @param role 角色名称
-   * @param ctx 工具上下文
-   * @returns 工具列表（如果角色未注册，返回空数组）
+   * @deprecated 不再使用
    */
-  getTools(role: string, ctx: ToolContext): StructuredToolInterface[] {
-    const builder = this.builders.get(role);
-    if (!builder) {
-      return []; // 未注册角色返回空工具列表
-    }
-    const tools = builder(ctx);
-    return tools;
+  getTools(_role: string, _ctx: any): any[] {
+    return [];
   }
 
   /**
-   * 检查角色是否已注册
+   * @deprecated 不再使用
    */
-  hasRole(role: string): boolean {
-    return this.builders.has(role);
+  hasRole(_role: string): boolean {
+    return false;
   }
 
   /**
-   * 获取所有已注册的角色列表
+   * @deprecated 不再使用
    */
   getRegisteredRoles(): string[] {
-    return Array.from(this.builders.keys());
+    return [];
   }
 }
 
 /**
  * 全局角色工具注册表实例
+ *
+ * @deprecated 不再使用
  */
 export const roleToolsRegistry = new RoleToolsRegistry();

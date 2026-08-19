@@ -4,11 +4,16 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ZodValidationPipe, cleanupOpenApiDoc } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import type { Env } from './config/env.validation';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    // 默认关闭 debug/verbose 两档，避免游戏引擎日志刷屏；排查时按需开启
+    logger: ['log', 'error', 'warn', 'fatal'],
+  });
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalFilters(new AllExceptionsFilter());
   app.enableShutdownHooks();
 
   const swaggerConfig = new DocumentBuilder()

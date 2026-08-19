@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateGameDto } from './dto/create-game.dto';
 import type { QueryGamesDto } from './dto/query-games.dto';
@@ -13,6 +13,8 @@ const SKILL_VERSION = 'v1';
 
 @Injectable()
 export class GamesService {
+  private readonly logger = new Logger(GamesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly gameExecutor: GameExecutorService,
@@ -49,6 +51,7 @@ export class GamesService {
               role: true,
               faction: true,
               deathDay: true,
+              deathCause: true,
               displayName: true,
               modelName: true,
               isSheriff: true,
@@ -183,31 +186,33 @@ export class GamesService {
     const agentIds = game.players.map((p) => p.agent.id);
     const assignments = assignRolesAndSeats(roleAssignments, agentIds);
 
-    // 4. 批量更新 Player 记录
-    await Promise.all(
-      assignments.map((assignment) => {
-        const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
-        return this.prisma.player.update({
-          where: { id: player.id },
-          data: {
-            seatNo: assignment.seatNo,
-            role: assignment.role,
-            faction: assignment.faction,
-          },
-        });
-      }),
-    );
+    // 4. 批量更新 Player 记录 + 更新 Game 状态（事务内保证原子性）
+    return this.prisma.$transaction(async (tx) => {
+      await Promise.all(
+        assignments.map((assignment) => {
+          const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
+          return tx.player.update({
+            where: { id: player.id },
+            data: {
+              seatNo: assignment.seatNo,
+              role: assignment.role,
+              faction: assignment.faction,
+            },
+          });
+        }),
+      );
 
-    // 5. 更新 Game 状态
-    return this.prisma.game.update({
-      where: { id: gameId },
-      data: { status: GAME_STATUSES.INITIALIZED },
-      include: {
-        players: {
-          orderBy: { seatNo: 'asc' },
-          include: { agent: true },
+      // 5. 更新 Game 状态
+      return tx.game.update({
+        where: { id: gameId },
+        data: { status: GAME_STATUSES.INITIALIZED },
+        include: {
+          players: {
+            orderBy: { seatNo: 'asc' },
+            include: { agent: true },
+          },
         },
-      },
+      });
     });
   }
 
@@ -221,7 +226,23 @@ export class GamesService {
   async getGameById(id: string) {
     const game = await this.prisma.game.findUnique({
       where: { id },
-      include: { players: { orderBy: { seatNo: 'asc' }, include: { agent: true } } },
+      include: {
+        ruleset: { select: { id: true, name: true } },
+        players: {
+          select: {
+            id: true,
+            seatNo: true,
+            role: true,
+            faction: true,
+            deathDay: true,
+            deathCause: true,
+            displayName: true,
+            modelName: true,
+            isSheriff: true,
+          },
+          orderBy: { seatNo: 'asc' },
+        },
+      },
     });
     if (!game) {
       throw new NotFoundException(`Game ${id} 不存在`);
@@ -259,22 +280,24 @@ export class GamesService {
       }
       const agentIds = game.players.map((p) => p.agent.id);
       const assignments = assignRolesAndSeats(parsed.data.roles, agentIds);
-      await Promise.all(
-        assignments.map((assignment) => {
-          const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
-          return this.prisma.player.update({
-            where: { id: player.id },
-            data: {
-              seatNo: assignment.seatNo,
-              role: assignment.role,
-              faction: assignment.faction,
-            },
-          });
-        }),
-      );
-      await this.prisma.game.update({
-        where: { id: gameId },
-        data: { status: GAME_STATUSES.INITIALIZED },
+      await this.prisma.$transaction(async (tx) => {
+        await Promise.all(
+          assignments.map((assignment) => {
+            const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
+            return tx.player.update({
+              where: { id: player.id },
+              data: {
+                seatNo: assignment.seatNo,
+                role: assignment.role,
+                faction: assignment.faction,
+              },
+            });
+          }),
+        );
+        await tx.game.update({
+          where: { id: gameId },
+          data: { status: GAME_STATUSES.INITIALIZED },
+        });
       });
     }
 
@@ -319,7 +342,7 @@ export class GamesService {
     const game = await this.getGameById(gameId);
 
     if (game.status !== GAME_STATUSES.RUNNING) {
-      throw new Error(`只能暂停 running 状态的对局，当前状态: ${game.status}`);
+      throw new BadRequestException(`只能暂停 running 状态的对局，当前状态: ${game.status}`);
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -349,7 +372,7 @@ export class GamesService {
     const game = await this.getGameById(gameId);
 
     if (game.status !== GAME_STATUSES.PAUSED) {
-      throw new Error(`只能继续 paused 状态的对局，当前状态: ${game.status}`);
+      throw new BadRequestException(`只能继续 paused 状态的对局，当前状态: ${game.status}`);
     }
 
     return this.prisma.game.update({
@@ -365,7 +388,7 @@ export class GamesService {
     const game = await this.getGameById(gameId);
 
     if (game.status === GAME_STATUSES.FINISHED || game.status === GAME_STATUSES.ABORTED) {
-      throw new Error(`对局已结束，无法取消`);
+      throw new BadRequestException(`对局已结束，无法取消`);
     }
 
     await this.prisma.$transaction(async (tx) => {

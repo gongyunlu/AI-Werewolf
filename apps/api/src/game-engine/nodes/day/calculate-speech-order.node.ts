@@ -48,7 +48,7 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
     });
 
     // 写入 Event（记录发言顺序）
-    await context.eventWriter.writeSpeechOrderDeterminedEvent({
+    const event = await context.eventWriter.writeSpeechOrderDeterminedEvent({
       gameId: state.gameId,
       day: state.currentDay,
       speechOrder: orderResult.speechOrder,
@@ -56,6 +56,7 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
       direction: orderResult.direction,
       reason: orderResult.reason,
     });
+    await context.eventBus?.publish(event);
 
     // 写入状态
     return {

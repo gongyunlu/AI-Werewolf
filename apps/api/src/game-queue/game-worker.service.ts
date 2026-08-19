@@ -1,11 +1,13 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger, OnModuleInit } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import { GameExecutorService } from '../game-executor/game-executor.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { GameJobData } from './game-queue.service';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GamePausedException } from '../game-engine/core/game-engine.exception';
+import type { Env } from '../config/env.validation';
 
 /**
  * 游戏队列 Worker
@@ -15,22 +17,22 @@ import { GamePausedException } from '../game-engine/core/game-engine.exception';
  * 2. 调用 GameExecutorService 执行游戏
  * 3. 处理任务失败和重试
  */
+// 装饰器在模块导入期求值，早于 ConfigModule 加载 .env，
+// 因此这里只能读 process.env（容器/Shell 注入的变量此时可见）。
+// .env 中的 GAME_WORKER_CONCURRENCY 已由 env.validation 校验，
+// 如需让 .env 的值作用于并发数，请在启动命令前预载 dotenv。
 @Processor('game-queue', {
   concurrency: parseInt(process.env.GAME_WORKER_CONCURRENCY || '1', 10),
 })
-export class GameWorkerService extends WorkerHost implements OnModuleInit {
+export class GameWorkerService extends WorkerHost {
   private readonly logger = new Logger(GameWorkerService.name);
 
   constructor(
     private readonly gameExecutor: GameExecutorService,
     private readonly prisma: PrismaService,
+    private readonly configService: ConfigService<Env, true>,
   ) {
     super();
-  }
-
-  async onModuleInit() {
-    const concurrency = parseInt(process.env.GAME_WORKER_CONCURRENCY || '1', 10);
-    this.logger.log(`GameWorkerService 已启动，并发数: ${concurrency}`);
   }
 
   async process(job: Job<GameJobData>): Promise<void> {

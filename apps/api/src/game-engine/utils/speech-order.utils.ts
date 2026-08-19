@@ -3,26 +3,26 @@ import { gameLogger } from './game-logger';
 
 export interface SpeechOrderConfig {
   // 警长相关配置
-  sheriffSpeaksLast?: boolean; // 警长最后发言
-  allowSheriffChooseOrder?: boolean; // 允许警长指定顺序
+  sheriffSpeaksLast?: boolean;
+  allowSheriffChooseOrder?: boolean;
   alternateDaily?: boolean; // 每天换手
 
   // 无警长时的配置
-  useTimeRule?: boolean; // 使用时间规则
+  useTimeRule?: boolean;
   timeRuleConfig?: {
     oddMinuteDirection: 'clockwise' | 'counterclockwise';
     evenMinuteDirection: 'clockwise' | 'counterclockwise';
   };
-  useDeathPosition?: boolean; // 结合死者位置
+  useDeathPosition?: boolean;
   deathPositionOffset?: 'next' | 'previous'; // 从死者的下一位还是上一位开始
 }
 
 export interface SpeechOrderResult {
   speechOrder: number[]; // 发言顺序（座位号数组）
-  startSeatNo: number; // 起始座位号
-  direction: 'clockwise' | 'counterclockwise'; // 方向
-  reason: string; // 计算原因
-  sheriffSeatNo?: number; // 警长座位号（如果有）
+  startSeatNo: number;
+  direction: 'clockwise' | 'counterclockwise';
+  reason: string;
+  sheriffSeatNo?: number;
 }
 
 /**
@@ -39,7 +39,7 @@ export function calculateSpeechOrder(params: {
   config: SpeechOrderConfig;
   currentTime?: Date; // 用于时间规则
   sheriffChoice?: {
-    // 警长的选择（简化版：只选方向）
+    // 警长选择的方向
     direction: 'left' | 'right'; // left=从警长左边开始（逆时针），right=从警长右边开始（顺时针）
   };
 }): SpeechOrderResult {
@@ -78,7 +78,7 @@ export function calculateSpeechOrder(params: {
 }
 
 /**
- * 情况 1: 警长指定方向（简化版）
+ * 情况 1: 警长指定方向
  */
 function calculateOrderWithSheriffChoice(
   alivePlayers: PlayerState[],
@@ -185,10 +185,6 @@ function calculateOrderFromTime(
     : config.timeRuleConfig?.evenMinuteDirection || 'counterclockwise';
 
   const reason = `time_rule_${minutes}_${direction}`;
-
-  gameLogger.debug(
-    `[发言顺序] 时间规则: ${currentTime.getHours()}:${minutes} → ${tens}+${ones}=${sum} → 从${startSeatNo}号位开始${direction === 'clockwise' ? '顺时针' : '逆时针'}`,
-  );
 
   return generateOrder(alivePlayers, startSeatNo, direction, reason, undefined);
 }

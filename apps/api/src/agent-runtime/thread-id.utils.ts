@@ -30,7 +30,7 @@ export function getWolfTeamThreadId(gameId: string): string {
 }
 
 /**
- * 生成特定角色团队的 threadId（预留扩展）
+ * 生成特定角色团队的 threadId
  *
  * 格式：{gameId}-{role}-team
  *

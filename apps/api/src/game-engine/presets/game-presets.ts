@@ -48,6 +48,7 @@ export const Standard6pPreset: GamePreset = {
 
   dayPipeline: [
     'announceDay', // 公布死讯
+    'wolfExplode', // 狼人自爆（天亮公布死讯后，任一狼自爆即跳过发言投票进入黑夜）
     'processDeathSkills', // 处理死亡技能
     'lastWords', // 死者遗言
     'sheriffDecideOrder', // 警长决定发言顺序
@@ -57,7 +58,6 @@ export const Standard6pPreset: GamePreset = {
     'pkSpeech', // 平票PK发言
     'pkVote', // 平票PK投票
     'execute', // 执行放逐
-    'checkWin', // 检查胜利条件（放逐后立即判定）
     'exileLastWords', // 被放逐者遗言
     'processExileSkills', // 处理放逐触发技能
   ],
@@ -91,6 +91,7 @@ export const Standard9pPreset: GamePreset = {
 
   dayPipeline: [
     'announceDay',
+    'wolfExplode', // 狼人自爆（天亮公布死讯后）
     'processDeathSkills',
     'lastWords', // 死者遗言
     'sheriffDecideOrder', // 警长决定发言顺序
@@ -102,7 +103,7 @@ export const Standard9pPreset: GamePreset = {
     'execute',
     'exileLastWords', // 被放逐者遗言
     'processExileSkills', // 处理放逐触发技能
-    'hunterShoot', // 猎人开枪（待实现）
+    // TODO: 猎人开枪（hunterShoot）尚未实现
   ],
 
   rules: {
@@ -122,7 +123,7 @@ export const GuardPreset: GamePreset = {
 
   nightPipeline: [
     'werewolfKill',
-    'guardProtect', // 守卫守护（待实现）
+    // TODO: 守卫守护（guardProtect）尚未实现
     'witchAntidote', // 女巫解药
     'witchPoison', // 女巫毒药
     'seerCheck',
@@ -131,6 +132,7 @@ export const GuardPreset: GamePreset = {
 
   dayPipeline: [
     'announceDay',
+    'wolfExplode', // 狼人自爆（天亮公布死讯后）
     'processDeathSkills',
     'lastWords',
     'sheriffDecideOrder', // 警长决定发言顺序

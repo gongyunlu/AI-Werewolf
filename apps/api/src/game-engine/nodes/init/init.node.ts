@@ -14,12 +14,11 @@ export const createInitNode: NodeFactory = (context) => {
       throw new Error('[初始化] 玩家列表为空');
     }
 
-    gameLogger.debug(`[初始化] 玩家数量: ${state.players.length}`);
-
-    await context.eventWriter.writeGameStartEvent({
+    const event = await context.eventWriter.writeGameStartEvent({
       gameId: state.gameId,
       playerCount: state.players.length,
     });
+    await context.eventBus?.publish(event);
 
     // 设置初始状态
     return {

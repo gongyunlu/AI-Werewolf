@@ -1,40 +1,24 @@
-import { AGENT_SCENARIOS, FACTIONS } from '@ai-werewolf/shared';
+import { FACTIONS } from '@ai-werewolf/shared';
+import { z } from 'zod';
 import type { GameGraphState, PlayerState } from '../../core/types';
 import type { NodeContext } from '../node.types';
-import { createWolfChatTool, type WolfChatOutput } from '@/agent-runtime/tools/werewolf.tool';
-import { createProposeKillTool, type ProposeKillOutput } from '@/agent-runtime/tools/werewolf.tool';
 import { getWolfTeamThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 
 /**
- * Agent Thinking 记录
- *
- * 用于前端展示 Agent 的推理过程
- *
- * TODO Thinking 存储和查询接口
- *
- * @example
- * const thinking: AgentThinking = {
- *   playerId: wolf.id,
- *   playerSeatNo: wolf.seatNo,
- *   role: 'werewolf',
- *   scenario: 'wolf_kill',
- *   thinkingProcess: result.thinking || '',
- *   finalDecision: `刀 ${toolResult.targetSeatNo}号位`,
- *   timestamp: new Date(),
- * };
- * await context.eventWriter?.writeAgentThinking(thinking);
+ * 狼人刀人决策 Schema
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export interface AgentThinking {
-  playerId: string;
-  playerSeatNo: number;
-  role: string;
-  scenario: string; // 'wolf_kill' | 'seer_check' | 'witch_decision'
-  thinkingProcess: string; // Agent 的推理过程
-  finalDecision: string; // 最终决策
-  timestamp: Date;
-}
+const ProposeKillDecisionSchema = z.object({
+  action: z.enum(['propose_kill']),
+  targetSeatNo: z.number().int().describe('要刀的座位号'),
+  reason: z.string().optional().describe('选择该目标的理由（可选）'),
+});
+
+type ProposeKillDecision = {
+  action: 'propose_kill';
+  targetSeatNo: number;
+  reason?: string;
+};
 
 /**
  * 讨论记录
@@ -57,66 +41,50 @@ interface VoteRecord {
 }
 
 /**
- * 单狼决策
- *
- * 当只剩一只狼时，不需要讨论和投票，直接思考决策
- *
- * 关键：保留 Agent 的 Thinking 过程，供前端展示
- *
- * @param wolf 最后一只狼
- * @param state 游戏状态
- * @param context 节点上下文
- * @returns 目标玩家 ID
+ * 单狼决策（两阶段版本）
  */
 export async function singleWolfDecision(
   wolf: PlayerState,
   state: GameGraphState,
   context: NodeContext,
 ): Promise<string | null> {
-  gameLogger.debug(`[单狼决策] ${wolf.seatNo}号位独自决策`);
-
-  // 只给 propose_kill 工具
-  const tools = [createProposeKillTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
-
   try {
-    const result = await context.agentRuntime.run({
-      gameId: state.gameId,
-      playerId: wolf.id,
-      scenario: AGENT_SCENARIOS.NIGHT_ACTION,
-      availableTools: tools,
-      maxIterations: 8, // 增加迭代次数,单狼决策需要充分思考
-    });
+    const contextData = await context.agentRuntime.prepareContextPublic(
+      state.gameId,
+      wolf.id,
+      'night_action' as any,
+      undefined,
+    );
 
-    if (result.success && result.result) {
-      const toolResult = result.result as ProposeKillOutput;
+    const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
-      if (toolResult.action === 'propose_kill') {
-        const targetPlayer = state.players.find((p) => p.seatNo === toolResult.targetSeatNo);
+    // 阶段1：流式推理
+    const reasoning = await context.agentRuntime.streamReasoning(
+      contextData,
+      wolfThreadId,
+      undefined,
+      (_token) => {
+        // 可选：SSE 推送推理过程
+      },
+    );
 
-        if (!targetPlayer) {
-          throw new Error(
-            `[单狼决策] 数据一致性错误：未找到目标玩家 ${toolResult.targetSeatNo}号位`,
-          );
-        }
+    // 阶段2：生成决策
+    const decision = await context.agentRuntime.generateDecision<ProposeKillDecision>(
+      contextData,
+      reasoning,
+      ProposeKillDecisionSchema,
+      undefined,
+      wolfThreadId,
+    );
 
-        gameLogger.debug(
-          `[单狼决策] ${wolf.seatNo}号位决定刀 ${toolResult.targetSeatNo}号位${toolResult.reason ? `: ${toolResult.reason}` : ''}`,
-        );
+    if (decision.action === 'propose_kill') {
+      const targetPlayer = state.players.find((p) => p.seatNo === decision.targetSeatNo);
 
-        // TODO：保存 Thinking 到数据库或 Event 表
-        // const thinking: AgentThinking = {
-        //   playerId: wolf.id,
-        //   playerSeatNo: wolf.seatNo,
-        //   role: 'werewolf',
-        //   scenario: 'wolf_kill',
-        //   thinkingProcess: result.thinking || '',
-        //   finalDecision: `刀 ${toolResult.targetSeatNo}号位`,
-        //   timestamp: new Date(),
-        // };
-        // await context.eventWriter?.writeAgentThinking(thinking);
-
-        return targetPlayer.id;
+      if (!targetPlayer) {
+        throw new Error(`[单狼决策] 数据一致性错误：未找到目标玩家 ${decision.targetSeatNo}号位`);
       }
+
+      return targetPlayer.id;
     }
 
     gameLogger.warn(`[单狼决策] ${wolf.seatNo}号位未做出决策`);
@@ -130,36 +98,29 @@ export async function singleWolfDecision(
 }
 
 /**
- * 判断是否需要继续讨论
- *
- * 分析当前讨论历史，判断狼人是否已经达成共识
+ * 判断是否需要继续讨论（保持不变）
  */
 async function shouldContinueDiscussion(
   discussionHistory: DiscussionMessage[],
   context: NodeContext,
-  state: GameGraphState,
+  _state: GameGraphState,
   currentRound: number,
   maxRounds: number,
 ): Promise<boolean> {
-  // 如果已经是最后一轮，直接返回 false
   if (currentRound >= maxRounds) {
     return false;
   }
 
-  // 如果没有任何发言，继续讨论
   if (discussionHistory.length === 0) {
     return true;
   }
 
-  // 如果只有1条发言，继续讨论让其他狼人回应
   if (discussionHistory.length < 2) {
     return true;
   }
 
-  // 构建讨论摘要
   const summary = discussionHistory.map((msg) => `${msg.seatNo}号位: ${msg.content}`).join('\n');
 
-  // 使用 LLM 判断是否达成共识
   const prompt = `
 你是狼人杀游戏的协调者。请分析以下狼人讨论内容，判断他们是否已经达成共识，可以进入投票环节。
 
@@ -178,42 +139,26 @@ ${summary}
   `.trim();
 
   try {
-    // 从环境变量直接读取配置（临时方案）
     const { ChatOpenAI } = await import('@langchain/openai');
     const model = new ChatOpenAI({
-      apiKey: process.env.ARK_API_KEY,
-      model: process.env.ARK_DEFAULT_MODEL || 'ep-20241227185357-9cq77',
-      configuration: { baseURL: process.env.ARK_BASE_URL },
+      apiKey: context.configService.get('ARK_API_KEY', { infer: true }),
+      model: context.configService.get('ARK_DEFAULT_MODEL', { infer: true }),
+      configuration: { baseURL: context.configService.get('ARK_BASE_URL', { infer: true }) },
       temperature: 0,
     });
 
     const response = await model.invoke(prompt);
     const decision = response.content.toString().trim().toUpperCase();
 
-    gameLogger.debug(
-      `[狼人讨论] 协调判断: ${decision} (${decision === 'YES' ? '继续讨论' : '进入投票'})`,
-    );
-
     return decision === 'YES';
   } catch (error) {
     gameLogger.error(`[狼人讨论] 协调判断失败:`, error);
-    // 降级：如果判断失败，按原有逻辑继续
     return currentRound < maxRounds;
   }
 }
 
 /**
- * 狼人讨论阶段
- *
- * 规则：
- * - 最多 2 轮讨论
- * - 每只狼最多发言 2 次
- * - 随机顺序发言
- *
- * @param werewolves 存活的狼人列表
- * @param state 游戏状态
- * @param context 节点上下文
- * @returns 讨论历史
+ * 狼人讨论阶段（两阶段版本）
  */
 export async function wolfDiscussion(
   werewolves: PlayerState[],
@@ -221,33 +166,21 @@ export async function wolfDiscussion(
   context: NodeContext,
 ): Promise<DiscussionMessage[]> {
   const discussionHistory: DiscussionMessage[] = [];
-  const speechCount = new Map<string, number>(); // 记录每只狼的发言次数
+  const speechCount = new Map<string, number>();
 
   const maxRounds = 2;
   const maxSpeechPerWolf = 2;
 
-  gameLogger.debug(`[狼人讨论] 开始讨论，共 ${werewolves.length} 只狼，最多 ${maxRounds} 轮`);
-
   for (let round = 0; round < maxRounds; round++) {
-    gameLogger.debug(`[狼人讨论] 第 ${round + 1} 轮讨论`);
-
-    // 随机顺序发言
     const shuffled = [...werewolves].toSorted(() => Math.random() - 0.5);
 
     for (const wolf of shuffled) {
       const currentSpeechCount = speechCount.get(wolf.id) || 0;
 
-      // 检查是否超过发言次数限制
       if (currentSpeechCount >= maxSpeechPerWolf) {
-        gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位已发言 ${currentSpeechCount} 次，跳过`);
         continue;
       }
 
-      // 构建工具
-      // 狼人讨论不允许跳过，必须发言协调
-      const tools = [createWolfChatTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
-
-      // 构建之前的讨论记录（人类可读格式）
       const previousDiscussion =
         discussionHistory.length > 0
           ? `
@@ -256,12 +189,10 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
 `.trim()
           : '';
 
-      // 狼人讨论使用团队共享的 threadId，与个人白天发言隔离
       const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
       try {
         const sceneId = `wolf-discussion-${state.gameId}-${state.currentDay}-${round}-${wolf.id}`;
-        const startedAt = Date.now();
         context.broadcaster?.emit(state.gameId, {
           type: 'scene.open',
           sceneId,
@@ -270,75 +201,59 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           actorId: wolf.id,
         });
 
-        const result = await context.agentRuntime.run({
-          gameId: state.gameId,
-          playerId: wolf.id,
-          scenario: AGENT_SCENARIOS.NIGHT_ACTION,
-          availableTools: tools,
-          maxIterations: 8, // 增加迭代次数,狼人讨论需要充分思考和协调
-          threadId: wolfThreadId,
-          additionalContext: previousDiscussion, // 注入之前的讨论记录
-          onStreamToken: (token, contentType) => {
-            context.broadcaster?.emit(state.gameId, {
-              type: 'scene.append',
-              sceneId,
-              token,
-              contentType,
-            });
-          },
-        });
+        const contextData = await context.agentRuntime.prepareContextPublic(
+          state.gameId,
+          wolf.id,
+          'night_action' as any,
+          previousDiscussion,
+        );
 
-        const wolfMsg =
-          result.success && result.result
-            ? ((result.result as { message?: string }).message ?? '')
-            : '';
-
-        // 将工具结果的 message 也流式推送
-        if (wolfMsg) {
-          for (const char of wolfMsg) {
-            context.broadcaster?.emit(state.gameId, {
-              type: 'scene.append',
-              sceneId,
-              token: char,
-              contentType: 'content',
-            });
-          }
-        }
+        // 流式输出：思考 + 讨论发言正文
+        const { thinking, content, thinkingDurationMs, contentDurationMs } =
+          await context.agentRuntime.streamSpeech(contextData, wolfThreadId, {
+            onThinking: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'thinking',
+              });
+            },
+            onContent: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'content',
+              });
+            },
+          });
 
         context.broadcaster?.emit(state.gameId, {
           type: 'scene.close',
           sceneId,
-          fullContent: result.thinking ? `[思考]\n${result.thinking}\n\n${wolfMsg}` : wolfMsg,
-          durationMs: Date.now() - startedAt,
+          thinkingDurationMs,
+          contentDurationMs,
         });
 
-        if (result.success && result.result) {
-          const toolResult = result.result as WolfChatOutput | { action: 'skip_discussion' };
+        if (content) {
+          discussionHistory.push({
+            speakerId: wolf.id,
+            seatNo: wolf.seatNo,
+            content,
+            round: round + 1,
+          });
+          speechCount.set(wolf.id, currentSpeechCount + 1);
 
-          if (toolResult.action === 'wolf_chat') {
-            const msg = toolResult as WolfChatOutput;
-            discussionHistory.push({
-              speakerId: wolf.id,
-              seatNo: wolf.seatNo,
-              content: msg.message,
-              round: round + 1,
-            });
-            speechCount.set(wolf.id, currentSpeechCount + 1);
-            gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位: ${msg.message}`);
-
-            // 写入狼人讨论事件
-            await context.eventWriter.writeWolfDiscussionEvent({
-              gameId: state.gameId,
-              day: state.currentDay,
-              actorId: wolf.id,
-              seatNo: wolf.seatNo,
-              content: msg.message,
-              round: round + 1,
-              thinking: result.thinking,
-            });
-          } else {
-            gameLogger.debug(`[狼人讨论] ${wolf.seatNo}号位跳过发言`);
-          }
+          await context.eventWriter.writeWolfDiscussionEvent({
+            gameId: state.gameId,
+            day: state.currentDay,
+            actorId: wolf.id,
+            seatNo: wolf.seatNo,
+            content,
+            round: round + 1,
+            thinking,
+          });
         }
       } catch (error) {
         gameLogger.error(
@@ -347,7 +262,6 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
       }
     }
 
-    // 每轮讨论后，判断是否需要继续
     const shouldContinue = await shouldContinueDiscussion(
       discussionHistory,
       context,
@@ -357,25 +271,15 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
     );
 
     if (!shouldContinue) {
-      gameLogger.debug(`[狼人讨论] 协调判断: 已达成共识，提前结束讨论`);
       break;
     }
   }
 
-  gameLogger.debug(`[狼人讨论] 讨论结束，共 ${discussionHistory.length} 条发言`);
   return discussionHistory;
 }
 
 /**
- * 狼人投票阶段
- *
- * 每只狼根据讨论历史，投票决定刀人目标
- *
- * @param werewolves 存活的狼人列表
- * @param state 游戏状态
- * @param context 节点上下文
- * @param _discussion 讨论历史
- * @returns 投票记录
+ * 狼人投票阶段（两阶段版本）
  */
 export async function wolfVoting(
   werewolves: PlayerState[],
@@ -383,9 +287,6 @@ export async function wolfVoting(
   context: NodeContext,
   discussion: DiscussionMessage[],
 ): Promise<VoteRecord[]> {
-  gameLogger.debug(`[狼人投票] 开始投票，共 ${werewolves.length} 只狼`);
-
-  // 构建讨论记录（所有狼人共享）
   const discussionSummary =
     discussion.length > 0
       ? `
@@ -394,43 +295,42 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
 `.trim()
       : '';
 
-  // 并行投票：所有狼人同时投票，互不可见
   const votePromises = werewolves.map(async (wolf): Promise<VoteRecord | null> => {
-    // 只给 propose_kill 工具
-    const tools = [createProposeKillTool({ gameId: state.gameId, currentPlayerId: wolf.id })];
-
-    // 狼人投票使用团队共享的 threadId，与个人白天发言隔离
     const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
     try {
-      const result = await context.agentRuntime.run({
-        gameId: state.gameId,
-        playerId: wolf.id,
-        scenario: AGENT_SCENARIOS.NIGHT_ACTION,
-        availableTools: tools,
-        maxIterations: 8, // 增加迭代次数,狼人投票需要充分思考
-        threadId: wolfThreadId,
-        additionalContext: discussionSummary, // 只注入讨论记录，不包含其他人的投票
-      });
+      const contextData = await context.agentRuntime.prepareContextPublic(
+        state.gameId,
+        wolf.id,
+        'night_action' as any,
+        discussionSummary,
+      );
 
-      if (result.success && result.result) {
-        const toolResult = result.result as ProposeKillOutput;
+      // 阶段1：流式推理
+      const reasoning = await context.agentRuntime.streamReasoning(
+        contextData,
+        wolfThreadId,
+        undefined,
+      );
 
-        if (toolResult.action === 'propose_kill') {
-          gameLogger.debug(
-            `[狼人投票] ${wolf.seatNo}号位投票刀 ${toolResult.targetSeatNo}号位${toolResult.reason ? `: ${toolResult.reason}` : ''}`,
-          );
-          return {
-            voterId: wolf.id,
-            voterSeatNo: wolf.seatNo,
-            targetSeatNo: toolResult.targetSeatNo,
-            reason: toolResult.reason,
-          };
-        }
+      // 阶段2：生成投票决策
+      const decision = await context.agentRuntime.generateDecision<ProposeKillDecision>(
+        contextData,
+        reasoning,
+        ProposeKillDecisionSchema,
+        undefined,
+        wolfThreadId,
+      );
+
+      if (decision.action === 'propose_kill') {
+        return {
+          voterId: wolf.id,
+          voterSeatNo: wolf.seatNo,
+          targetSeatNo: decision.targetSeatNo,
+          reason: decision.reason,
+        };
       } else {
-        gameLogger.warn(
-          `[狼人投票] ${wolf.seatNo}号位未投票${result.error ? `: ${result.error}` : ''}`,
-        );
+        gameLogger.warn(`[狼人投票] ${wolf.seatNo}号位未投票`);
       }
     } catch (error) {
       gameLogger.error(
@@ -441,58 +341,38 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
     return null;
   });
 
-  // 等待所有投票完成
   const voteResults = await Promise.all(votePromises);
   const votes: VoteRecord[] = voteResults.filter((v): v is VoteRecord => v !== null);
 
-  gameLogger.debug(`[狼人投票] 投票结束，共收到 ${votes.length} 票`);
   return votes;
 }
 
 /**
- * 统计投票结果，确定刀人目标
- *
- * 规则：
- * - 得票最多的目标被选中
- * - 平票时随机选择一个
- *
- * @param votes 投票记录
- * @param state 游戏状态
- * @returns 目标玩家 ID，如果没有有效投票则返回 null
+ * 统计投票结果，确定刀人目标（逻辑不变）
  */
 export function selectTargetFromVotes(votes: VoteRecord[], state: GameGraphState): string | null {
   if (votes.length === 0) {
     gameLogger.warn('[狼人投票] 无有效投票，随机选择目标');
-    // 随机选择一个好人
     const villagers = state.players.filter((p) => p.isAlive && p.faction === FACTIONS.VILLAGER);
     if (villagers.length > 0) {
       const randomTarget = villagers[Math.floor(Math.random() * villagers.length)];
-      gameLogger.debug(`[狼人投票] 随机选择 ${randomTarget.seatNo}号位`);
       return randomTarget.id;
     }
     return null;
   }
 
-  // 统计票数
   const voteCount = new Map<number, number>();
   votes.forEach((v) => {
     voteCount.set(v.targetSeatNo, (voteCount.get(v.targetSeatNo) || 0) + 1);
   });
 
-  // 找到最高票数
   const maxVotes = Math.max(...voteCount.values());
   const candidates = Array.from(voteCount.entries())
     .filter(([_, count]) => count === maxVotes)
     .map(([seatNo]) => seatNo);
 
-  // 平票随机选择
   const targetSeatNo = candidates[Math.floor(Math.random() * candidates.length)];
 
-  gameLogger.debug(
-    `[狼人投票] ${targetSeatNo}号位得票最多 (${maxVotes}票)${candidates.length > 1 ? '，平票随机选择' : ''}`,
-  );
-
-  // 转换为 playerId
   const player = state.players.find((p) => p.seatNo === targetSeatNo);
   if (!player) {
     throw new Error(`[狼人投票] 数据一致性错误：未找到目标玩家 ${targetSeatNo}号位`);

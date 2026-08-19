@@ -11,7 +11,7 @@ export interface AgentJudgment {
   suspicious: boolean;
   notes: string;
   relationship?: string | null; // 关系标识（teammate/checked_good/checked_wolf/silver）
-  day: number; // 天数，用于时间窗口分层
+  day: number; // 用于时间窗口分层
 }
 
 /**

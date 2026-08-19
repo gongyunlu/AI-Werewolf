@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RulesetsService } from './rulesets.service';
 
@@ -15,7 +15,7 @@ export class RulesetsController {
 
   @Get(':id')
   @ApiOperation({ summary: '按 id 查询规则集详情' })
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', new ParseUUIDPipe()) id: string) {
     return this.rulesetsService.getRulesetById(id);
   }
 }

@@ -222,11 +222,11 @@ describe('resolveSpecialRoleTriggers - 特殊角色触发逻辑', () => {
       expect(result.idiotRevealed).toBe(false);
     });
 
-    it('已死亡玩家不触发特殊角色', () => {
+    it('猎人被放逐时已标记死亡（isAlive=false）仍能开枪', () => {
       const hunter = createPlayer('p1', 1, {
         role: 'hunter',
         faction: 'villager',
-        isAlive: false,
+        isAlive: false, // 真实调用场景：放逐执行后玩家已标记死亡
       });
       const players = [
         hunter,
@@ -239,8 +239,9 @@ describe('resolveSpecialRoleTriggers - 特殊角色触发逻辑', () => {
         executedCause: 'execution',
       });
 
-      // 已死亡的猎人不能再开枪
-      expect(result.hunterCanShoot).toBe(false);
+      // 死因为放逐，猎人应能开枪，触发判断与 isAlive 状态无关
+      expect(result.hunterCanShoot).toBe(true);
+      expect(result.hunterPlayerId).toBe('p1');
     });
   });
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '../agent-runtime/tools/agent-tools.factory';
@@ -6,7 +6,6 @@ import { EventWriterService } from '../game-engine/events/event-writer.service';
 import { GameEngine } from '../game-engine/core/game-engine';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import type { GameGraphState, PlayerState } from '../game-engine/core/types';
-import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.validation';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
@@ -15,19 +14,19 @@ import {
   GameAbortedException,
 } from '../game-engine/core/game-engine.exception';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
+import { EventBusService } from '../event-bus/event-bus.service';
+import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
+import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 
 /**
  * 游戏执行服务
  *
  * 职责：
- * 1. 启动 LangGraph 游戏引擎
- * 2. 管理游戏状态的持久化
- * 3. 处理游戏执行过程中的异常
+ * 1. 启动游戏引擎
+ * 2. 处理游戏执行过程中的异常
  */
 @Injectable()
 export class GameExecutorService {
-  private readonly logger = new Logger(GameExecutorService.name);
-  private checkpointer: PostgresSaver | null = null;
   private abortControllers = new Map<string, AbortController>(); // 存储每个游戏的 AbortController
 
   constructor(
@@ -37,20 +36,10 @@ export class GameExecutorService {
     private readonly eventWriter: EventWriterService,
     private readonly configService: ConfigService<Env, true>,
     private readonly broadcaster: SseBroadcasterService,
+    private readonly nodeRegistrar: NodeRegistrar,
+    private readonly eventBus: EventBusService,
+    private readonly speechSummarizer: SpeechSummarizerService,
   ) {}
-
-  /**
-   * 初始化 PostgreSQL Checkpointer
-   */
-  private async ensureCheckpointer(): Promise<PostgresSaver> {
-    if (!this.checkpointer) {
-      const databaseUrl = this.configService.get('DATABASE_URL', { infer: true });
-      this.checkpointer = PostgresSaver.fromConnString(databaseUrl);
-      await this.checkpointer.setup();
-      this.logger.log('PostgreSQL Checkpointer 初始化完成');
-    }
-    return this.checkpointer;
-  }
 
   /**
    * 执行游戏对局
@@ -59,8 +48,6 @@ export class GameExecutorService {
    * @returns 游戏最终状态
    */
   async executeGame(gameId: string): Promise<GameGraphState> {
-    this.logger.log(`开始执行游戏对局: ${gameId}`);
-
     // 校验必需的依赖
     if (!this.agentRuntime || !this.toolsFactory) {
       throw new Error('AI 狼人杀项目必须配置 AgentRuntime 和 ToolsFactory');
@@ -87,7 +74,6 @@ export class GameExecutorService {
     }
 
     const initialState = this.buildInitialState(game);
-    const checkpointer = await this.ensureCheckpointer();
     const preset = ALL_PRESETS[game.ruleset.id];
     if (!preset) {
       throw new Error(`ruleset ${game.ruleset.id} 不支持，请检查数据一致性`);
@@ -100,6 +86,10 @@ export class GameExecutorService {
       this.prisma,
       this.eventWriter,
       this.broadcaster,
+      this.nodeRegistrar,
+      this.eventBus,
+      this.configService,
+      this.speechSummarizer,
     );
 
     // 4. 创建 AbortController（用于中断游戏）
@@ -108,16 +98,7 @@ export class GameExecutorService {
 
     // 5. 运行游戏
     try {
-      // LangGraph 会自动检测 checkpoint 是否存在：
-      // - 如果存在同 thread_id 的 checkpoint，会从断点恢复
-      // - 如果不存在，会从 initialState 开始执行
-      const finalState = await engine.run(
-        initialState,
-        100,
-        checkpointer,
-        preset,
-        abortController.signal,
-      );
+      const finalState = await engine.run(initialState, preset, abortController.signal);
 
       // 6. 更新游戏结束状态
       await this.prisma.game.update({
@@ -129,8 +110,6 @@ export class GameExecutorService {
           endedAt: new Date(),
         },
       });
-
-      this.logger.log(`游戏对局 ${gameId} 执行完成，胜方: ${finalState.winner}`);
 
       return finalState;
     } catch (error) {
@@ -157,7 +136,6 @@ export class GameExecutorService {
     const abortController = this.abortControllers.get(gameId);
     if (abortController) {
       abortController.abort();
-      this.logger.log(`已发送中断信号到游戏: ${gameId}`);
       return true;
     }
     return false;

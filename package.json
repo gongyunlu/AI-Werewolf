@@ -38,5 +38,8 @@
     "lint-staged": "^17.1.1",
     "prettier": "^3.9.6",
     "typescript": "catalog:"
+  },
+  "dependencies": {
+    "@nestjs/terminus": "^11.1.1"
   }
 }

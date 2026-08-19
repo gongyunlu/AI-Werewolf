@@ -4,6 +4,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
 import { PrismaService } from '../prisma/prisma.service';
+import { ACTION_TYPES, VISIBILITY_TYPES, ROLES, SEER_CHECK_RESULTS } from '@ai-werewolf/shared';
 import { AgentJudgmentService, AgentJudgment } from '../agent-judgment/agent-judgment.service';
 import type { Env } from '../config/env.validation';
 import { readFileSync } from 'fs';
@@ -29,7 +30,7 @@ export interface SpeechRecord {
 }
 
 /**
- * 发言摘要（LLM 生成）
+ * 发言摘要（LLM 生成，落 SpeechSummary 表，全局共享）
  */
 export interface SpeechSummary {
   day: number;
@@ -47,13 +48,13 @@ export interface JudgmentSummary {
 }
 
 /**
- * 个性化摘要结果
+ * 个性化摘要结果（纯读组装，不含 LLM 调用）
  */
 export interface PersonalSummary {
   // 近2天完整发言
   recentSpeeches: SpeechRecord[];
 
-  // 2天以前的发言摘要（LLM 生成）
+  // 2天以前的发言摘要（读 SpeechSummary 表）
   olderSpeechesSummary: SpeechSummary[];
 
   // 我的主观判断（近2天完整）
@@ -61,23 +62,22 @@ export interface PersonalSummary {
 
   // 我的主观判断（2天以前摘要）
   olderJudgmentsSummary: JudgmentSummary[];
-
-  // 行动计划（当天）
-  actionPlan: string;
 }
+
+/** 近 N 天保留完整发言/判断，更早的压缩成摘要 */
+const RECENT_WINDOW = 2;
 
 /**
  * Speech Summarizer Service
  *
- * 职责：
- * 1. 为每个 Agent 生成个性化的发言摘要
- * 2. 注入角色视角和私有信息
- * 3. 生成主观判断（信任度评分、可疑标记）
- * 4. 存储判断结果用于历史追溯
+ * 职责拆分（步骤②：摘要/判断时机搬迁）：
+ * 1. `summarizeForAgent` —— 纯读组装：查近2天原文 + SpeechSummary 摘要 + 历史判断，不调 LLM
+ * 2. `generateDaySummaries` —— 白天结束时统一执行：①全局发言摘要 ②逐玩家主观判断
  */
 @Injectable()
 export class SpeechSummarizerService {
   private readonly logger = new Logger(SpeechSummarizerService.name);
+  private readonly templateCache = new Map<string, string>();
 
   constructor(
     private readonly configService: ConfigService<Env, true>,
@@ -86,176 +86,266 @@ export class SpeechSummarizerService {
   ) {}
 
   /**
-   * 为特定 Agent 生成个性化摘要（增量 + 时间窗口分层）
+   * 为特定 Agent 组装个性化摘要（纯读，不调 LLM）
    *
    * @param gameId 对局 ID
-   * @param day 天数
+   * @param day 当前天数
    * @param agentId 当前 Agent ID
-   * @param role 当前 Agent 角色
-   * @param privateInfo 当前 Agent 的私有信息
    * @param visiblePlayerSeats 可见的玩家座位号
    */
   async summarizeForAgent(
     gameId: string,
     day: number,
     agentId: string,
-    role: string,
-    privateInfo: PrivateInfo,
     visiblePlayerSeats: number[],
   ): Promise<PersonalSummary> {
-    this.logger.log(
-      `[个性化摘要] Agent ${agentId} (${role}, 座位${privateInfo.seatNo}) - gameId: ${gameId}, day: ${day}`,
-    );
+    // 1. 近2天完整发言（原文）
+    const recentSpeeches = await this.loadRecentSpeeches(gameId, day, visiblePlayerSeats);
 
-    const RECENT_WINDOW = 2; // 最近2天保留完整发言
-
-    // 1. 查询所有历史发言（按天分层）
-    const allSpeeches = await this.prisma.event.findMany({
-      where: {
-        gameId,
-        actionType: 'player_speech',
-        day: { lte: day }, // 包括当天及之前
-      },
-      select: {
-        id: true,
-        day: true,
-        content: true,
-        sequence: true,
-      },
-      orderBy: { sequence: 'asc' },
+    // 2. 2天以前的发言摘要（读 SpeechSummary 表）
+    const olderSummaryRecords = await this.prisma.speechSummary.findMany({
+      where: { gameId, day: { lte: day - RECENT_WINDOW - 1 } },
+      orderBy: [{ day: 'asc' }, { seatNo: 'asc' }],
     });
+    const olderSpeechesSummary: SpeechSummary[] = olderSummaryRecords.map((s) => ({
+      day: s.day,
+      seatNo: s.seatNo,
+      summary: s.summary,
+    }));
 
-    this.logger.log(`[个性化摘要] 查询到 ${allSpeeches.length} 条历史发言记录`);
-
-    if (allSpeeches.length === 0) {
-      return {
-        recentSpeeches: [],
-        olderSpeechesSummary: [],
-        recentJudgments: [],
-        olderJudgmentsSummary: [],
-        actionPlan: '',
-      };
-    }
-
-    // 2. 按时间窗口分层发言
-    const recentSpeeches: SpeechRecord[] = [];
-    const olderSpeeches: any[] = [];
-
-    for (const speech of allSpeeches) {
-      const content = speech.content as any;
-
-      // 类型检查
-      if (!content || typeof content !== 'object') {
-        continue;
-      }
-
-      const seatNo = content.seatNo;
-      const speechText = content.speech;
-
-      // 验证 seatNo
-      if (typeof seatNo !== 'number') {
-        continue;
-      }
-
-      if (!visiblePlayerSeats.includes(seatNo)) {
-        continue;
-      }
-
-      const speechDay = speech.day ?? 0;
-
-      if (speechDay >= day - RECENT_WINDOW) {
-        // 近2天：保留完整原文
-        recentSpeeches.push({
-          day: speechDay,
-          seatNo,
-          speech: speechText || '(未发言)',
-        });
-      } else {
-        // 2天以前：待摘要
-        olderSpeeches.push({
-          id: speech.id,
-          day: speechDay,
-          seatNo,
-          speech: speechText || '(未发言)',
-        });
-      }
-    }
-
-    this.logger.log(
-      `[个性化摘要] 近${RECENT_WINDOW}天发言 ${recentSpeeches.length} 条，更早发言 ${olderSpeeches.length} 条`,
-    );
-
-    // 3. 生成历史发言摘要（LLM）
-    const olderSpeechesSummary = await this.generateOlderSpeechesSummary(
-      olderSpeeches,
-      role,
-      privateInfo,
-    );
-
-    // 4. 查询当天已判断的发言（增量优化）
-    const existingJudgments = await this.agentJudgmentService.getJudgmentsByDay(
-      agentId,
-      gameId,
-      day,
-    );
-    const judgedSpeechIds = new Set(existingJudgments.map((j) => j.speechId));
-
-    // 5. 过滤出当天新增发言（尚未判断的）
-    const todayNewSpeeches = allSpeeches.filter((s) => s.day === day && !judgedSpeechIds.has(s.id));
-
-    this.logger.log(
-      `[个性化摘要] 当天已有 ${existingJudgments.length} 条判断，新增 ${todayNewSpeeches.length} 条发言`,
-    );
-
-    // 6. 查询历史判断（时间窗口分层）
+    // 3. 历史判断（近2天完整 + 更早压缩）
     const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
       agentId,
       gameId,
       day,
     );
-
-    // 7. 只对当天新增发言调用 LLM 生成判断
-    let newJudgments: AgentJudgment[] = [];
-    let actionPlan = '';
-
-    if (todayNewSpeeches.length > 0) {
-      const incrementalSummary = await this.callLLMWithRolePerspective(
-        todayNewSpeeches,
-        role,
-        privateInfo,
-        [...recentJudgments, ...existingJudgments], // 最近2天 + 当天已有
-        olderJudgments, // 更早的（压缩格式）
-        visiblePlayerSeats,
-      );
-
-      newJudgments = incrementalSummary.judgments;
-      actionPlan = incrementalSummary.actionPlan;
-
-      // 存储新增判断
-      if (newJudgments.length > 0) {
-        await this.agentJudgmentService.saveJudgments(agentId, gameId, day, newJudgments);
-        this.logger.log(`[个性化摘要] 已存储 ${newJudgments.length} 条新判断`);
-      }
-    }
-
-    // 8. 合并判断：近2天完整 + 当天新增
-    const allRecentJudgments = [...recentJudgments, ...existingJudgments, ...newJudgments];
-
-    // 9. 生成历史判断摘要
     const olderJudgmentsSummary = this.compressOlderJudgments(olderJudgments);
 
     return {
       recentSpeeches,
       olderSpeechesSummary,
-      recentJudgments: allRecentJudgments,
+      recentJudgments,
       olderJudgmentsSummary,
-      actionPlan,
     };
   }
 
   /**
-   * 调用 LLM 生成个性化摘要（注入角色视角）
-   * 增加 olderJudgments 参数用于时间窗口分层
+   * 白天结束时统一生成摘要与判断（daySummary 节点调用）
+   *
+   * @param gameId 对局 ID
+   * @param day 刚结束的白天天数
+   */
+  async generateDaySummaries(gameId: string, day: number): Promise<void> {
+    // ① 全局发言摘要（一次，默认模型），为下一天（day+1）的读取做准备
+    await this.generateGlobalSpeechSummaries(gameId, day);
+
+    // ② 逐玩家主观判断（N 次，各自模型）
+    await this.generatePlayerJudgments(gameId, day);
+  }
+
+  /**
+   * 查询近2天完整发言（原文）
+   */
+  private async loadRecentSpeeches(
+    gameId: string,
+    day: number,
+    visiblePlayerSeats: number[],
+  ): Promise<SpeechRecord[]> {
+    const events = await this.prisma.event.findMany({
+      where: {
+        gameId,
+        actionType: ACTION_TYPES.SPEECH,
+        visibility: VISIBILITY_TYPES.PUBLIC, // 只取公开表水发言，隔离狼队夜间商议
+        day: { gte: day - RECENT_WINDOW, lte: day },
+      },
+      select: { day: true, content: true },
+      orderBy: { sequence: 'asc' },
+    });
+
+    const records: SpeechRecord[] = [];
+    for (const e of events) {
+      const content = e.content as any;
+      if (!content || typeof content !== 'object') continue;
+      const seatNo = content.seatNo;
+      if (typeof seatNo !== 'number') continue;
+      if (!visiblePlayerSeats.includes(seatNo)) continue;
+      records.push({
+        day: e.day ?? 0,
+        seatNo,
+        speech: content.speech || '(未发言)',
+      });
+    }
+    return records;
+  }
+
+  /**
+   * ① 全局发言摘要：为下一天准备 2 天以前的发言摘要，落 SpeechSummary 表
+   *
+   * 边界：day+1 天读取时，`summarizeForAgent` 读 `day <= (day+1) - 3 = day - 2`，
+   * 故此处生成 `speechDay <= day - RECENT_WINDOW` 的发言摘要。
+   */
+  private async generateGlobalSpeechSummaries(gameId: string, day: number): Promise<void> {
+    const boundary = day - RECENT_WINDOW;
+
+    const olderEvents = await this.prisma.event.findMany({
+      where: {
+        gameId,
+        actionType: ACTION_TYPES.SPEECH,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        day: { lte: boundary },
+      },
+      select: { day: true, content: true },
+      orderBy: [{ day: 'asc' }, { sequence: 'asc' }],
+    });
+
+    if (olderEvents.length === 0) return;
+
+    // 已生成的 (day, seatNo) 集合，用于幂等跳过
+    const existing = await this.prisma.speechSummary.findMany({
+      where: { gameId, day: { lte: boundary } },
+      select: { day: true, seatNo: true },
+    });
+    const existingKeys = new Set(existing.map((e) => `${e.day}:${e.seatNo}`));
+
+    // 按 (day, seatNo) 分组，过滤已摘要的
+    const groups = new Map<string, { day: number; seatNo: number; speeches: string[] }>();
+    for (const e of olderEvents) {
+      const content = e.content as any;
+      if (!content || typeof content !== 'object') continue;
+      const seatNo = content.seatNo;
+      if (typeof seatNo !== 'number') continue;
+      const key = `${e.day ?? 0}:${seatNo}`;
+      if (existingKeys.has(key)) continue;
+      if (!groups.has(key)) {
+        groups.set(key, { day: e.day ?? 0, seatNo, speeches: [] });
+      }
+      groups.get(key)!.speeches.push(content.speech || '(未发言)');
+    }
+
+    if (groups.size === 0) return;
+
+    const summaries = await this.callLLMForSummaries(Array.from(groups.values()));
+
+    for (const s of summaries) {
+      await this.prisma.speechSummary.upsert({
+        where: { gameId_day_seatNo: { gameId, day: s.day, seatNo: s.seatNo } },
+        update: { summary: s.summary },
+        create: { gameId, day: s.day, seatNo: s.seatNo, summary: s.summary },
+      });
+    }
+  }
+
+  /**
+   * ② 逐玩家主观判断：对当天完整发言，为每个存活玩家生成判断
+   */
+  private async generatePlayerJudgments(gameId: string, day: number): Promise<void> {
+    // 当天全部公开发言
+    const todaySpeeches = await this.prisma.event.findMany({
+      where: {
+        gameId,
+        actionType: ACTION_TYPES.SPEECH,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        day,
+      },
+      select: { id: true, content: true },
+      orderBy: { sequence: 'asc' },
+    });
+
+    if (todaySpeeches.length === 0) return;
+
+    const alivePlayers = await this.prisma.player.findMany({
+      where: { gameId, deathDay: null },
+      select: { id: true, gameId: true, agentId: true, seatNo: true, role: true, modelName: true },
+    });
+
+    const allAliveSeats = alivePlayers.map((p) => p.seatNo).filter((s): s is number => s !== null);
+
+    const results = await Promise.allSettled(
+      alivePlayers.map(async (player) => {
+        if (player.seatNo === null || player.role === null) return;
+        const { id, agentId, seatNo, role, modelName } = player;
+
+        // 当天已判断的发言，跳过已判断
+        const existing = await this.agentJudgmentService.getJudgmentsByDay(agentId, gameId, day);
+        const judgedIds = new Set(existing.map((j) => j.speechId));
+        const newSpeeches = todaySpeeches.filter((s) => !judgedIds.has(s.id));
+        if (newSpeeches.length === 0) return;
+
+        const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
+          agentId,
+          gameId,
+          day,
+        );
+
+        const privateInfo = await this.buildPrivateInfo({ gameId, id, seatNo, role });
+
+        const { judgments } = await this.callLLMWithRolePerspective(
+          newSpeeches,
+          role,
+          privateInfo,
+          [...recentJudgments, ...existing], // 最近2天 + 当天已有
+          olderJudgments, // 更早的（压缩格式）
+          allAliveSeats.filter((s) => s !== seatNo), // 排除自己
+          modelName,
+        );
+
+        if (judgments.length > 0) {
+          await this.agentJudgmentService.saveJudgments(agentId, gameId, day, judgments);
+        }
+      }),
+    );
+
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        this.logger.warn(
+          `[逐玩家判断] ${alivePlayers[i].seatNo}号位判断生成失败，跳过: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+        );
+      }
+    });
+  }
+
+  /**
+   * 构建玩家私有信息（狼人队友 / 预言家查验）
+   */
+  private async buildPrivateInfo(player: {
+    gameId: string;
+    id: string;
+    seatNo: number;
+    role: string;
+  }): Promise<PrivateInfo> {
+    const privateInfo: PrivateInfo = { seatNo: player.seatNo, role: player.role };
+
+    if (player.role === ROLES.WEREWOLF) {
+      const teammates = await this.prisma.player.findMany({
+        where: { gameId: player.gameId, role: ROLES.WEREWOLF, id: { not: player.id } },
+        select: { seatNo: true },
+      });
+      privateInfo.teammates = teammates.map((t) => t.seatNo).filter((s): s is number => s !== null);
+    }
+
+    if (player.role === ROLES.SEER) {
+      const checks = await this.prisma.event.findMany({
+        where: {
+          gameId: player.gameId,
+          actionType: ACTION_TYPES.SEER_CHECK,
+          actorId: player.id,
+        },
+        select: { content: true },
+      });
+      privateInfo.checkedResults = checks
+        .map((e) => e.content as any)
+        .filter((c) => c && typeof c === 'object')
+        .map((c) => ({
+          target: c.targetSeatNo,
+          result: c.result === SEER_CHECK_RESULTS.WEREWOLF ? '狼人' : '好人',
+        }));
+    }
+
+    return privateInfo;
+  }
+
+  /**
+   * 调用 LLM 生成个性化判断（注入角色视角）
    */
   private async callLLMWithRolePerspective(
     speeches: any[],
@@ -264,10 +354,11 @@ export class SpeechSummarizerService {
     recentJudgments: AgentJudgment[], // 最近2天的判断（完整）
     olderJudgments: AgentJudgment[], // 更早的判断（压缩）
     visiblePlayerSeats: number[],
-  ): Promise<{ judgments: AgentJudgment[]; actionPlan: string }> {
+    modelName: string,
+  ): Promise<{ judgments: AgentJudgment[] }> {
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
-      model: this.configService.get('ARK_DEFAULT_MODEL'),
+      model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3, // 保持一定创造性，但不过度随机
       maxRetries: 2,
@@ -295,7 +386,6 @@ export class SpeechSummarizerService {
 
       // 验证必要字段
       const judgments = Array.isArray(parsed.judgments) ? parsed.judgments : [];
-      const actionPlan = parsed.actionPlan || '';
 
       // 验证并过滤判断记录
       const validJudgments = judgments
@@ -324,10 +414,7 @@ export class SpeechSummarizerService {
           relationship: j.relationship || null,
         }));
 
-      return {
-        judgments: validJudgments,
-        actionPlan,
-      };
+      return { judgments: validJudgments };
     } catch (error) {
       // 分层错误处理
       const err = error as any; // TypeScript 类型断言
@@ -343,41 +430,31 @@ export class SpeechSummarizerService {
 
       // 2. JSON 解析失败 → Silent Fail（LLM 返回格式错误，重试无意义）
       if (error instanceof SyntaxError || err.name === 'JsonParseError') {
-        return {
-          judgments: [],
-          actionPlan: '',
-        };
+        return { judgments: [] };
       }
 
-      // 3. 其他未知错误 → Fail Fast（保险策略）
+      // 3. 其他未知错误 → Fail Fast
       throw error;
     }
   }
 
   /**
-   * 生成历史发言摘要（2天以前的发言，调用 LLM 生成摘要）
+   * 调用 LLM 生成全局发言摘要（中性，与玩家无关）
    */
-  private async generateOlderSpeechesSummary(
-    speeches: Array<{ id: string; day: number; seatNo: number; speech: string }>,
-    role: string,
-    privateInfo: PrivateInfo,
+  private async callLLMForSummaries(
+    groups: Array<{ day: number; seatNo: number; speeches: string[] }>,
   ): Promise<SpeechSummary[]> {
-    if (speeches.length === 0) {
-      return [];
-    }
+    const model = new ChatOpenAI({
+      apiKey: this.configService.get('ARK_API_KEY'),
+      model: this.configService.get('ARK_DEFAULT_MODEL'),
+      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      temperature: 0.3,
+      maxRetries: 2,
+      timeout: 60000,
+    });
 
-    try {
-      const model = new ChatOpenAI({
-        apiKey: this.configService.get('ARK_API_KEY'),
-        model: this.configService.get('ARK_DEFAULT_MODEL'),
-        configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-        temperature: 0.3,
-        maxRetries: 2,
-        timeout: 60000,
-      });
-
-      const systemPrompt = `你是${role}（座位号 ${privateInfo.seatNo}）。
-        请为以下历史发言生成简洁摘要，每条发言用一句话概括核心内容（30字以内）。
+    const systemPrompt = `你是狼人杀对局的记录员。
+        请为每位玩家当天的发言生成客观摘要，一句话概括核心内容（30字以内），不带主观评价。
 
         输出 JSON 格式：
         {
@@ -387,28 +464,28 @@ export class SpeechSummarizerService {
           ]
       }`;
 
-      const speechesText = speeches
-        .map((s) => `Day ${s.day} - ${s.seatNo}号位：${s.speech.substring(0, 200)}...`)
-        .join('\n\n');
+    const speechesText = groups
+      .map((g) => `Day ${g.day} - ${g.seatNo}号位：${g.speeches.join('；').substring(0, 200)}...`)
+      .join('\n\n');
 
-      const humanPrompt = `请为以下发言生成摘要：\n\n${speechesText}`;
+    const humanPrompt = `请为以下发言生成摘要：\n\n${speechesText}`;
 
-      const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt)];
+    const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt)];
 
+    try {
       const parser = new JsonOutputParser<{ summaries: SpeechSummary[] }>();
       const chain = model.pipe(parser);
       const parsed = await chain.invoke(messages);
-
       return parsed.summaries || [];
     } catch (error) {
       this.logger.warn(
-        `[历史发言摘要] LLM 调用失败: ${error instanceof Error ? error.message : String(error)}`,
+        `[全局发言摘要] LLM 调用失败: ${error instanceof Error ? error.message : String(error)}`,
       );
       // 降级：返回简单摘要
-      return speeches.map((s) => ({
-        day: s.day,
-        seatNo: s.seatNo,
-        summary: s.speech.substring(0, 30) + '...',
+      return groups.map((g) => ({
+        day: g.day,
+        seatNo: g.seatNo,
+        summary: g.speeches.join('；').substring(0, 30) + '...',
       }));
     }
   }
@@ -434,6 +511,17 @@ export class SpeechSummarizerService {
     }));
   }
   /**
+   * 读取模板文件（带内存缓存，避免每个 Agent 每轮同步读盘阻塞事件循环）
+   */
+  private readTemplate(filePath: string): string {
+    const cached = this.templateCache.get(filePath);
+    if (cached !== undefined) return cached;
+    const content = readFileSync(filePath, 'utf-8');
+    this.templateCache.set(filePath, content);
+    return content;
+  }
+
+  /**
    * 获取角色视角的上下文
    */
   private getRoleContext(role: string, privateInfo: PrivateInfo): string {
@@ -444,7 +532,7 @@ export class SpeechSummarizerService {
         : 'default.md';
 
       const mdPath = join(__dirname, '../role-contexts', roleFile);
-      let template = readFileSync(mdPath, 'utf-8');
+      let template = this.readTemplate(mdPath);
 
       // 替换变量
       if (role === 'werewolf') {
@@ -478,7 +566,7 @@ export class SpeechSummarizerService {
   private loadSystemPromptTemplate(role: string, privateInfo: PrivateInfo): string {
     try {
       const templatePath = join(__dirname, '../role-contexts', 'system-prompt-template.md');
-      let template = readFileSync(templatePath, 'utf-8');
+      let template = this.readTemplate(templatePath);
 
       // 替换变量
       template = template.replace('{{role}}', role);
@@ -610,8 +698,6 @@ export class SpeechSummarizerService {
     gameId: string,
     currentDay: number,
   ): Promise<{ recentJudgments: AgentJudgment[]; olderJudgments: AgentJudgment[] }> {
-    const RECENT_WINDOW = 2; // 最近2天保留完整判断
-
     const allJudgments = await this.agentJudgmentService.getHistoryJudgments(
       agentId,
       gameId,

@@ -13,8 +13,6 @@ import { gameLogger } from '../../utils/game-logger';
  */
 export const createExecuteNode: NodeFactory = (context) => {
   return async (state: GameGraphState): Promise<Partial<GameGraphState>> => {
-    gameLogger.debug(`[放逐执行] Day ${state.currentDay} 执行放逐`);
-
     const { exileTarget } = state;
 
     if (!exileTarget) {
@@ -26,8 +24,6 @@ export const createExecuteNode: NodeFactory = (context) => {
     if (!target) {
       throw new Error(`[放逐执行] 数据一致性错误：未找到放逐目标玩家 ${exileTarget}`);
     }
-
-    gameLogger.log(`[放逐执行] 放逐 ${target.seatNo}号位 (${target.role})`);
 
     // 法官播报：执行放逐
 
@@ -45,13 +41,14 @@ export const createExecuteNode: NodeFactory = (context) => {
     });
 
     // 写入 Event 表
-    await context.eventWriter.writePlayerExiledEvent({
+    const event = await context.eventWriter.writePlayerExiledEvent({
       gameId: state.gameId,
       day: state.currentDay,
       targetId: target.id,
       targetSeatNo: target.seatNo,
       voteCount: state.exileVoteCount || 0,
     });
+    await context.eventBus?.publish(event);
 
     // 同步死亡状态到数据库
     await context.prisma.player.update({
@@ -61,8 +58,6 @@ export const createExecuteNode: NodeFactory = (context) => {
         deathCause: DEATH_CAUSES.EXECUTION,
       },
     });
-
-    gameLogger.debug(`[放逐执行] ${target.seatNo}号位已出局`);
 
     return {
       players: updatedPlayers,

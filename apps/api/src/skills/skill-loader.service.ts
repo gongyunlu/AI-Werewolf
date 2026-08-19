@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -50,7 +50,7 @@ export interface SkillContent {
  * 支持三级渐进式披露（L1/L2/L3）：
  * - L1: Metadata（元数据目录，启动时加载）
  * - L2: Core Content（完整指令，按需加载）
- * - L3: Supporting Resources（支持资源，按需加载，暂未实现）
+ * - L3: Supporting Resources（支持资源，按需加载）
  *
  * 架构：
  * - Layer 0: 核心决策框架（加载到 System Prompt）
@@ -61,13 +61,15 @@ export interface SkillContent {
  */
 @Injectable()
 export class SkillLoaderService implements OnModuleInit {
+  private readonly logger = new Logger(SkillLoaderService.name);
   private readonly skillsDir: string;
   private readonly cache = new Map<string, Skill>();
+  private readonly catalogMarkdownCache = new Map<string, string>();
   private catalog: SkillMetadata[] = [];
 
   constructor(private readonly configService: ConfigService<Env, true>) {
     const envSkillsDir = this.configService.get('SKILLS_DIR', { infer: true });
-    // 当前只支持 v1，未来可以根据配置或参数动态选择版本
+    // 当前只支持 v1
     this.skillsDir = envSkillsDir || path.join(__dirname, 'v1');
   }
 
@@ -93,8 +95,10 @@ export class SkillLoaderService implements OnModuleInit {
         const categoryPath = path.join(this.skillsDir, category.name);
         await this.scanCategory(categoryPath, category.name);
       }
-    } catch {
-      //
+    } catch (error) {
+      this.logger.warn(
+        `加载技能目录失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -115,8 +119,10 @@ export class SkillLoaderService implements OnModuleInit {
           this.catalog.push(metadata);
         }
       }
-    } catch {
-      //
+    } catch (error) {
+      this.logger.warn(
+        `扫描技能分类 ${categoryName} 失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -189,16 +195,23 @@ export class SkillLoaderService implements OnModuleInit {
    * @returns Markdown 格式的目录
    */
   getCatalogMarkdown(context?: Record<string, any>): string {
+    const cacheKey = context ? JSON.stringify(context) : '__no_context__';
+    const cached = this.catalogMarkdownCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const catalog = this.getCatalog(context);
 
     if (catalog.length === 0) {
+      this.catalogMarkdownCache.set(cacheKey, '');
       return '';
     }
 
     const lines: string[] = [
       '## 可用技能库',
       '',
-      '你可以通过 `load_skill` 工具加载以下技能的详细内容：',
+      '以下技能内容已在当前上下文中按需加载，供参考：',
       '',
     ];
 
@@ -225,7 +238,9 @@ export class SkillLoaderService implements OnModuleInit {
       lines.push('');
     }
 
-    return lines.join('\n');
+    const markdown = lines.join('\n');
+    this.catalogMarkdownCache.set(cacheKey, markdown);
+    return markdown;
   }
 
   /**
@@ -358,6 +373,7 @@ export class SkillLoaderService implements OnModuleInit {
    */
   clearCache(): void {
     this.cache.clear();
+    this.catalogMarkdownCache.clear();
   }
 
   // ==================== 向后兼容的方法 ====================

@@ -5,19 +5,19 @@ import { ROLES } from '@ai-werewolf/shared';
 export interface SpecialRoleTriggerInput {
   players: PlayerState[];
   executedPlayerId: string | null; // 本次死亡的玩家 ID
-  executedCause: DeathCause | null; // 死亡原因
+  executedCause: DeathCause | null;
 }
 
 export interface SpecialRoleTriggerResult {
-  hunterCanShoot: boolean; // 猎人是否可以开枪
-  hunterPlayerId: string | null; // 猎人玩家 ID
-  wolfKingCanShoot: boolean; // 狼王是否可以开枪
-  wolfKingPlayerId: string | null; // 狼王玩家 ID
+  hunterCanShoot: boolean;
+  hunterPlayerId: string | null;
+  wolfKingCanShoot: boolean;
+  wolfKingPlayerId: string | null;
   whiteWolfCanKill: boolean; // 白狼王自爆是否可以带走一人
-  whiteWolfPlayerId: string | null; // 白狼王玩家 ID
+  whiteWolfPlayerId: string | null;
   idiotRevealed: boolean; // 白痴是否翻牌
-  idiotPlayerId: string | null; // 白痴玩家 ID
-  idiotSurvives: boolean; // 白痴是否存活
+  idiotPlayerId: string | null;
+  idiotSurvives: boolean;
 }
 
 /**
@@ -50,9 +50,9 @@ export function resolveSpecialRoleTriggers(
     return result;
   }
 
-  // 找到死亡玩家（必须是存活状态才能触发特殊能力）
+  // 找到死亡玩家（触发死亡技能时该玩家已被标记死亡，不能校验 isAlive）
   const executedPlayer = players.find((p) => p.id === executedPlayerId);
-  if (!executedPlayer || !executedPlayer.isAlive) {
+  if (!executedPlayer) {
     return result;
   }
 

@@ -112,7 +112,6 @@ export default function GamesListPage() {
         open={!!pendingGameId}
         onOpenChange={handleDialogClose}
         onSelect={handleSelectPerspective}
-        onClose={() => handleDialogClose(false)}
       />
 
       <div className={styles.body}>
@@ -159,7 +158,7 @@ export default function GamesListPage() {
                               <span className={styles.aliveCount}>{aliveCount} 人存活</span>
                             </>
                           )}
-                          {game.totalDays && (
+                          {game.totalDays != null && (
                             <>
                               <span>•</span>
                               <span>第 {game.totalDays} 天</span>

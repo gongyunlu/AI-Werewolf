@@ -27,9 +27,6 @@ export class AbortControllerManager {
     }
 
     this.controllers.get(gameId)!.add(controller);
-    this.logger.debug(
-      `注册 AbortController for game ${gameId}，当前数量: ${this.controllers.get(gameId)!.size}`,
-    );
 
     return controller;
   }
@@ -44,7 +41,6 @@ export class AbortControllerManager {
 
       if (controllers.size === 0) {
         this.controllers.delete(gameId);
-        this.logger.debug(`游戏 ${gameId} 的所有 AbortController 已清理`);
       }
     }
   }
@@ -56,7 +52,6 @@ export class AbortControllerManager {
     const controllers = this.controllers.get(gameId);
 
     if (!controllers || controllers.size === 0) {
-      this.logger.debug(`游戏 ${gameId} 没有活跃的 AbortController`);
       return;
     }
 

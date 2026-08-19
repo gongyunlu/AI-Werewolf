@@ -7,10 +7,14 @@ import { GameEngine } from '../core/game-engine';
 import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { EventWriterService } from '../events/event-writer.service';
 import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
+import type { EventBusService } from '@/event-bus/event-bus.service';
 import { Standard6pPreset } from '../presets/game-presets';
 import { createGameState, createPlayer } from './test-utils';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { NodeRegistrar } from '../nodes/node-registrar.service';
+import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.service';
 import { join } from 'node:path';
+import type { Env } from '@/config/env.validation';
 
 /**
  * 完整对局集成测试（真实 API 调用版本）
@@ -32,6 +36,7 @@ describe('完整游戏流程集成测试（真实 API）', () => {
   let toolsFactory: AgentToolsFactory;
   let eventWriter: EventWriterService;
   let gameEngine: GameEngine;
+  let configService: ConfigService<Env, true>;
 
   const mockBroadcaster = {
     emit: jest.fn(),
@@ -40,6 +45,14 @@ describe('完整游戏流程集成测试（真实 API）', () => {
     complete: jest.fn(),
     exists: jest.fn(),
   } as unknown as SseBroadcasterService;
+
+  const mockEventBus = {
+    publish: jest.fn(),
+  } as unknown as EventBusService;
+
+  const mockSpeechSummarizer = {
+    generateDaySummaries: jest.fn(),
+  } as unknown as SpeechSummarizerService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -63,6 +76,7 @@ describe('完整游戏流程集成测试（真实 API）', () => {
     agentRuntime = moduleRef.get<AgentRuntimeService>(AgentRuntimeService);
     toolsFactory = moduleRef.get<AgentToolsFactory>(AgentToolsFactory);
     eventWriter = moduleRef.get<EventWriterService>(EventWriterService);
+    configService = moduleRef.get(ConfigService) as ConfigService<Env, true>;
 
     // 等待 AgentRuntimeService 初始化完成
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -155,7 +169,20 @@ describe('完整游戏流程集成测试（真实 API）', () => {
       }
 
       // 4. 创建游戏引擎
-      gameEngine = new GameEngine(agentRuntime, toolsFactory, prisma, eventWriter, mockBroadcaster);
+      const mockNodeRegistrar = {
+        registerAll: jest.fn(),
+      } as unknown as NodeRegistrar;
+      gameEngine = new GameEngine(
+        agentRuntime,
+        toolsFactory,
+        prisma,
+        eventWriter,
+        mockBroadcaster,
+        mockNodeRegistrar,
+        mockEventBus,
+        configService,
+        mockSpeechSummarizer,
+      );
 
       // 5. 准备初始状态
       const playerStates = players.map((p) =>
@@ -174,8 +201,8 @@ describe('完整游戏流程集成测试（真实 API）', () => {
 
       console.log(`🎲 游戏开始 (gameId: ${game.id})`);
 
-      // 6. 运行游戏（限制最多 100 轮，避免无限循环）
-      const finalState = await gameEngine.run(initialState, 100, undefined, Standard6pPreset);
+      // 6. 运行游戏
+      const finalState = await gameEngine.run(initialState, Standard6pPreset);
 
       // 7. 验证游戏结果
       expect(finalState.isGameOver).toBe(true);
@@ -199,7 +226,7 @@ describe('完整游戏流程集成测试（真实 API）', () => {
 
       // 验证关键事件存在
       const eventTypes = events.map((e) => e.actionType);
-      expect(eventTypes).toContain('death_announcement');
+      expect(eventTypes).toContain('player_died');
 
       console.log(
         `✅ 游戏结束: ${finalState.winner} 阵营胜利, 共 ${finalState.currentDay} 天, ${events.length} 个事件`,

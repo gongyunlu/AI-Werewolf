@@ -1,10 +1,7 @@
-import { AGENT_SCENARIOS } from '@ai-werewolf/shared';
+import { Injectable } from '@nestjs/common';
+import { z } from 'zod';
 import type { GameGraphState } from '@/game-engine/core/types';
 import type { NodeFactory } from '@/game-engine/nodes/node.types';
-import {
-  createDecideSpeechOrderTool,
-  type DecideSpeechOrderOutput,
-} from '@/agent-runtime/tools/decide-speech-order.tool';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import {
   calculateSpeechOrder,
@@ -12,103 +9,112 @@ import {
 } from '@/game-engine/utils/speech-order.utils';
 import type { TypedRuleset } from '@/prisma/typed-models';
 import { gameLogger } from '../../utils/game-logger';
+import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+
+const SheriffDecideOrderSchema = z.object({
+  direction: z.enum(['left', 'right']).describe('发言方向：left=逆时针，right=顺时针'),
+});
+
+type SheriffDecideOrderDecision = {
+  direction: 'left' | 'right';
+};
 
 /**
- * 警长决定发言顺序节点
- *
- * 规则：
- * - 只有警长存活时才执行
- * - 警长可以指定起始位置和方向
- * - 如果警长决策失败，使用默认规则
+ * 警长决定发言顺序节点（两阶段版本）
  */
-export const createSheriffDecideOrderNode: NodeFactory = (context) => {
-  return async (state: GameGraphState) => {
-    const alivePlayers = state.players.filter((p) => p.isAlive);
-    const sheriff = alivePlayers.find((p) => p.isSheriff);
+@Injectable()
+export class SheriffDecideOrderNode {
+  constructor(private readonly agentRuntime: AgentRuntimeService) {}
 
-    // 如果没有警长，直接跳过（使用后续的默认规则）
-    if (!sheriff) {
-      return {};
-    }
+  create(): NodeFactory {
+    return (context) => async (state: GameGraphState) => {
+      const alivePlayers = state.players.filter((p) => p.isAlive);
+      const sheriff = alivePlayers.find((p) => p.isSheriff);
 
-    // 从 ruleset 读取配置
-    const ruleset = (await context.prisma.ruleset.findUnique({
-      where: { id: state.rulesetId },
-    })) as TypedRuleset | null;
+      if (!sheriff) {
+        return {};
+      }
 
-    if (!ruleset) {
-      throw new Error(`[警长决定发言顺序] 数据一致性错误：未找到 ruleset ${state.rulesetId}`);
-    }
+      const ruleset = (await context.prisma.ruleset.findUnique({
+        where: { id: state.rulesetId },
+      })) as TypedRuleset | null;
 
-    const config: SpeechOrderConfig = ruleset.definition.speechRules || {
-      allowSheriffChooseOrder: true,
-      sheriffSpeaksLast: true,
-      alternateDaily: false,
-    };
+      if (!ruleset) {
+        throw new Error(`[警长决定发言顺序] 数据一致性错误：未找到 ruleset ${state.rulesetId}`);
+      }
 
-    // 如果不允许警长指定顺序，直接跳过
-    if (!config.allowSheriffChooseOrder) {
-      return {};
-    }
+      const config: SpeechOrderConfig = ruleset.definition.speechRules || {
+        allowSheriffChooseOrder: true,
+        sheriffSpeaksLast: true,
+        alternateDaily: false,
+      };
 
-    let sheriffChoice: { direction: 'left' | 'right' } | undefined;
+      if (!config.allowSheriffChooseOrder) {
+        return {};
+      }
 
-    try {
-      // 派发警长 Agent
-      const tools = [
-        createDecideSpeechOrderTool({ gameId: state.gameId, currentPlayerId: sheriff.id }),
-      ];
+      let sheriffChoice: { direction: 'left' | 'right' } | undefined;
 
-      const result = await context.agentRuntime.run({
-        gameId: state.gameId,
-        playerId: sheriff.id,
-        scenario: AGENT_SCENARIOS.SHERIFF_DECIDE_ORDER,
-        availableTools: tools,
-        maxIterations: 3,
-        threadId: getPlayerThreadId(state.gameId, sheriff.id),
+      try {
+        const contextData = await this.agentRuntime.prepareContextPublic(
+          state.gameId,
+          sheriff.id,
+          'sheriff_decide_order' as any,
+          undefined,
+        );
+
+        const threadId = getPlayerThreadId(state.gameId, sheriff.id);
+
+        // 阶段1：流式推理
+        const reasoning = await this.agentRuntime.streamReasoning(
+          contextData,
+          threadId,
+          undefined,
+          (_token) => {
+            // 警长决定发言顺序不推送推理过程
+          },
+        );
+
+        // 阶段2：生成决策
+        const decision = await this.agentRuntime.generateDecision<SheriffDecideOrderDecision>(
+          contextData,
+          reasoning,
+          SheriffDecideOrderSchema,
+          undefined,
+          threadId,
+        );
+
+        sheriffChoice = {
+          direction: decision.direction,
+        };
+
+        const event = await context.eventWriter.writeSheriffDecideOrderEvent({
+          gameId: state.gameId,
+          day: state.currentDay,
+          sheriffId: sheriff.id,
+          sheriffSeatNo: sheriff.seatNo!,
+          direction: decision.direction,
+        });
+        await context.eventBus?.publish(event);
+      } catch (error) {
+        gameLogger.error(
+          `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      const orderResult = calculateSpeechOrder({
+        state,
+        config,
+        currentTime: new Date(),
+        sheriffChoice,
       });
 
-      if (result.success && result.result) {
-        const toolResult = result.result as DecideSpeechOrderOutput;
-
-        if (toolResult.action === 'decide_speech_order') {
-          sheriffChoice = {
-            direction: toolResult.direction,
-          };
-
-          await context.eventWriter.writeSheriffDecideOrderEvent({
-            gameId: state.gameId,
-            day: state.currentDay,
-            sheriffId: sheriff.id,
-            sheriffSeatNo: sheriff.seatNo!,
-            direction: toolResult.direction,
-          });
-        }
-      }
-    } catch (error) {
-      gameLogger.error(
-        `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    // 计算最终的发言顺序
-    const orderResult = calculateSpeechOrder({
-      state,
-      config,
-      currentTime: new Date(),
-      sheriffChoice,
-    });
-
-    gameLogger.debug(
-      `[警长决定发言顺序] 按 ${orderResult.direction === 'clockwise' ? '顺时针' : '逆时针'}顺序发言`,
-    );
-
-    // 写入状态
-    return {
-      speechOrder: orderResult.speechOrder,
-      speechDirection: orderResult.direction,
-      speechStartSeatNo: orderResult.startSeatNo,
-      speechOrderReason: orderResult.reason,
+      return {
+        speechOrder: orderResult.speechOrder,
+        speechDirection: orderResult.direction,
+        speechStartSeatNo: orderResult.startSeatNo,
+        speechOrderReason: orderResult.reason,
+      };
     };
-  };
-};
+  }
+}

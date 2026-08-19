@@ -1,22 +1,19 @@
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { gameLogger } from '../../utils/game-logger';
 
 /**
  * 白天公布死讯节点
  */
 export const createAnnounceDayNode: NodeFactory = (context) => {
   return async (state: GameGraphState) => {
-    await context.eventWriter.writeJudgeEvent({
+    const judgeEvent = await context.eventWriter.writeJudgeEvent({
       gameId: state.gameId,
       day: state.currentDay,
       content: `天亮了，第 ${state.currentDay} 天开始。`,
     });
+    await context.eventBus?.publish(judgeEvent);
 
     if (state.nightDeaths?.length) {
-      const deadPlayerIds = state.nightDeaths.map((d) => d.playerId).join(', ');
-      gameLogger.log(`[死亡公告] 昨晚死亡的玩家: ${deadPlayerIds}`);
-
       // 写入死亡公告 Event
       const deaths = state.nightDeaths.map((d) => {
         const player = state.players.find((p) => p.id === d.playerId);
@@ -30,19 +27,19 @@ export const createAnnounceDayNode: NodeFactory = (context) => {
         };
       });
 
-      await context.eventWriter.writeDeathAnnouncementEvent({
+      const deathEvent = await context.eventWriter.writeDeathAnnouncementEvent({
         gameId: state.gameId,
         day: state.currentDay,
         deaths,
       });
+      await context.eventBus?.publish(deathEvent);
     } else {
-      gameLogger.log(`[死亡公告] 昨晚平安夜`);
-
       // 写入平安夜 Event
-      await context.eventWriter.writePeacefulNightEvent({
+      const peacefulEvent = await context.eventWriter.writePeacefulNightEvent({
         gameId: state.gameId,
         day: state.currentDay,
       });
+      await context.eventBus?.publish(peacefulEvent);
     }
 
     // 不修改状态，只是公布信息

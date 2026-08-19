@@ -1,31 +1,24 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
-import {
-  SystemMessage,
-  HumanMessage,
-  ToolMessage,
-  AIMessage,
-  AIMessageChunk,
-} from '@langchain/core/messages';
-import { concat } from '@langchain/core/utils/stream';
+import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
+import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
-import { AbortControllerManager } from './abort-controller.manager';
-import { createLoadSkillTool } from '../skills/tools/load-skill.tool';
-import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
+import { PostgresChatMessageHistory } from '@langchain/community/stores/message/postgres';
 import type { Env } from '../config/env.validation';
-import type { StructuredToolInterface } from '@langchain/core/tools';
 import { Prisma } from '../generated/prisma/client';
 import { Pool } from 'pg';
-import { getPlayerThreadId } from './thread-id.utils';
 import {
+  ACTION_TYPES,
   AGENT_SCENARIOS,
   FACTIONS,
+  PURPOSES,
   ROLES,
+  SEER_CHECK_RESULTS,
   VISIBILITY_TYPES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
@@ -40,30 +33,6 @@ type Event = EventRecord;
 /**
  * Agent 输入
  */
-export interface AgentInput {
-  gameId: string;
-  playerId: string;
-  scenario: AgentScenario;
-  availableTools: StructuredToolInterface[];
-  maxIterations?: number;
-  threadId?: string; // 会话 ID，默认使用 gameId-playerId
-  additionalContext?: string; // 额外的上下文信息（例如狼人投票时的讨论摘要）
-  signal?: AbortSignal; // 用于中断 LLM 调用
-  onStreamToken?: (token: string, contentType: 'thinking' | 'content') => void; // 流式输出回调
-  onStreamComplete?: (fullContent: string, contentType: 'thinking' | 'content') => void; // 流式完成回调
-}
-
-/**
- * Agent 输出
- */
-export interface AgentOutput {
-  success: boolean;
-  result?: any;
-  error?: string;
-  systemPrompt?: string;
-  iterations?: number;
-  thinking?: string; // AI 的推理过程（response.content）
-}
 
 /**
  * 分层上下文
@@ -75,16 +44,28 @@ interface LayeredContext {
 }
 
 /**
- * Agent Runtime Service - 完整重构版本
+ * Agent 上下文（prepareContext 的产物，贯穿两阶段决策）
+ */
+interface AgentContext {
+  systemPrompt: string;
+  player: PlayerWithGame;
+  game: Prisma.GameGetPayload<Record<string, never>>;
+  /** 当前场景，用于映射 ModelCall.purpose */
+  scenario?: AgentScenario;
+}
+
+/**
+ * Agent Runtime Service - 两阶段决策模式
  *
  * 1. prepareContext - 准备上下文
  * 2. buildLayeredContext - 分层记忆
  * 3. assembleSystemPrompt - 组装 System Prompt（包含 Skill）
- * 4. reasonLoop - ReAct 循环 + 会话历史
+ * 4. streamReasoning - 阶段1：流式输出推理过程
+ * 5. generateDecision - 阶段2：生成结构化决策
  */
 @Injectable()
 export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
-  private checkpointSaver: PostgresSaver | null = null;
+  private readonly logger = new Logger(AgentRuntimeService.name);
   private pool: Pool | null = null;
 
   constructor(
@@ -93,14 +74,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
-    private readonly abortManager: AbortControllerManager,
   ) {}
 
   /**
-   * 模块初始化时创建 PostgresSaver
+   * 模块初始化时创建连接池
    */
   async onModuleInit() {
-    await this.initializeCheckpointSaver();
+    const databaseUrl = this.configService.get('DATABASE_URL');
+    if (databaseUrl) {
+      this.pool = new Pool({ connectionString: databaseUrl });
+    }
   }
 
   /**
@@ -113,96 +96,297 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 初始化 PostgresSaver
+   * 阶段1：流式输出角色推理过程（纯文本思考）
+   *
+   * @param context 已准备好的上下文（包含 systemPrompt、player、game）
+   * @param threadId 会话 ID
+   * @param signal 中断信号
+   * @param onStreamToken 流式 token 回调
+   * @param onStreamComplete 流式完成回调
+   * @returns 推理文本内容
    */
-  private async initializeCheckpointSaver() {
-    try {
-      const databaseUrl = this.configService.get('DATABASE_URL');
-      if (!databaseUrl) {
-        return;
+  async streamReasoning(
+    context: AgentContext,
+    threadId: string,
+    signal?: AbortSignal,
+    onStreamToken?: (token: string) => void,
+    onStreamComplete?: (fullContent: string) => void,
+  ): Promise<string> {
+    const startTime = Date.now();
+    const modelName = context.player.modelName;
+    const model = new ChatOpenAI({
+      apiKey: this.configService.get('ARK_API_KEY'),
+      model: modelName,
+      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      streaming: !!onStreamToken,
+      modelKwargs: {
+        thinking: { type: 'enabled' },
+        reasoning_effort: 'medium',
+      },
+    });
+
+    // 加载会话历史
+    const history = await this.loadHistory(threadId);
+
+    const humanMessage = new HumanMessage(
+      '你已明确自己的身份、阵营与队友（见系统提示）。请直接基于当前局势进行推理，输出你的下一步判断与理由，不要重复介绍身份或队友。',
+    );
+    const messages: BaseMessage[] = [
+      new SystemMessage(context.systemPrompt),
+      ...history,
+      humanMessage,
+    ];
+
+    let fullContent = '';
+
+    if (onStreamToken) {
+      const stream = await model.stream(messages, { signal });
+
+      for await (const chunk of stream) {
+        if (signal?.aborted) {
+          throw new Error('LLM generation aborted');
+        }
+
+        if (typeof chunk.content === 'string' && chunk.content) {
+          fullContent += chunk.content;
+          onStreamToken(chunk.content);
+        }
+
+        const reasoningContent = (chunk.additional_kwargs as any)?.reasoning_content;
+        if (typeof reasoningContent === 'string' && reasoningContent) {
+          fullContent += reasoningContent;
+          onStreamToken(reasoningContent);
+        }
       }
 
-      this.pool = new Pool({ connectionString: databaseUrl });
+      if (onStreamComplete) {
+        onStreamComplete(fullContent);
+      }
+    } else {
+      const response = await model.invoke(messages, { signal });
 
-      this.checkpointSaver = new PostgresSaver(this.pool);
-      await this.checkpointSaver.setup();
-    } catch {
-      this.checkpointSaver = null;
+      const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
+      if (typeof responseReasoning === 'string' && responseReasoning.trim()) {
+        fullContent = responseReasoning;
+      } else if (typeof response.content === 'string' && response.content.trim()) {
+        fullContent = response.content;
+      }
     }
+
+    // 记录调用 + 保存历史（跨轮记忆）
+    await this.recordModelCall({
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      purpose: this.scenarioToPurpose(context.scenario),
+      requestPrompt: this.serializeMessages(messages),
+      responseText: fullContent,
+      latencyMs: Date.now() - startTime,
+    });
+
+    return fullContent;
   }
 
   /**
-   * 运行 Agent Runtime
+   * 单次自然语言流式调用（不使用 thinking 模式 / reasoning_content / Structured Output）
    *
-   * 统一入口，处理所有场景
+   * @param model 已配置 streaming 的模型实例
+   * @param messages 消息列表
+   * @param signal 中断信号
+   * @param onToken 流式 token 回调（可空，仅用于实时转发）
+   * @returns 完整文本
    */
-  async run(input: AgentInput): Promise<AgentOutput> {
-    const maxIterations = input.maxIterations ?? 5;
-    const threadId = input.threadId ?? getPlayerThreadId(input.gameId, input.playerId);
+  private async streamPlainChat(
+    model: ChatOpenAI,
+    messages: BaseMessage[],
+    signal: AbortSignal | undefined,
+    onToken?: (token: string) => void,
+  ): Promise<string> {
+    let fullContent = '';
+    const stream = await model.stream(messages, { signal });
 
-    // 自动创建并注册 AbortController（如果未提供 signal）
-    let autoController: AbortController | null = null;
-    let signal = input.signal;
-
-    if (!signal) {
-      autoController = this.abortManager.register(input.gameId);
-      signal = autoController.signal;
-    }
-
-    try {
-      // 0. Middleware: 自动构建行动摘要
-      const actionSummary = await this.buildActionSummary(threadId);
-
-      // 1. Prepare Context（准备上下文）
-      const context = await this.prepareContext({
-        ...input,
-        additionalContext: [actionSummary, input.additionalContext].filter(Boolean).join('\n\n'),
-      });
-
-      // 1.5. 注入 load_skill 工具（渐进式披露）
-      const skillVersion = context.player.game.skillVersion || 'v1';
-      const loadedSkills = new Set<string>();
-      const loadSkillTool = createLoadSkillTool(this.skillLoader, loadedSkills, skillVersion);
-      const allTools = [...input.availableTools, loadSkillTool];
-
-      // 2-3. Reason & Execute Tool（推理 + 执行工具）
-      const result = await this.reasonLoop(
-        context,
-        allTools,
-        maxIterations,
-        threadId,
-        signal,
-        input.onStreamToken,
-        input.onStreamComplete,
-      );
-
-      return {
-        success: true,
-        result: result.finalResult,
-        systemPrompt: context.systemPrompt,
-        iterations: result.iterations,
-        thinking: result.thinking,
-      };
-    } catch (error) {
-      // 如果是 AbortError（AbortController 触发），重新抛出
-      if (
-        error instanceof Error &&
-        (error.name === 'AbortError' || error.message.includes('aborted'))
-      ) {
-        throw error;
+    for await (const chunk of stream) {
+      if (signal?.aborted) {
+        throw new Error('LLM generation aborted');
       }
 
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-        iterations: 0,
-      };
-    } finally {
-      // 清理自动创建的 AbortController
-      if (autoController) {
-        this.abortManager.unregister(input.gameId, autoController);
+      if (typeof chunk.content === 'string' && chunk.content) {
+        fullContent += chunk.content;
+        onToken?.(chunk.content);
       }
     }
+
+    return fullContent;
+  }
+
+  /**
+   * 发言类场景：流式输出「思考」与「正文」
+   *
+   * 两段自然语言流式调用，均以 content 字段流式输出（不使用 reasoning_content、
+   * Structured Output 或工具调用），满足「后端直接转发 LLM 真实流」的需求。
+   *
+   * @param context 已准备好的上下文
+   * @param threadId 会话 ID
+   * @param options.onThinking 思考 token 回调
+   * @param options.onContent 正文 token 回调
+   * @returns 思考与正文完整文本
+   */
+  async streamSpeech(
+    context: AgentContext,
+    threadId: string,
+    options: {
+      signal?: AbortSignal;
+      onThinking?: (token: string) => void;
+      onContent?: (token: string) => void;
+    } = {},
+  ): Promise<{
+    thinking: string;
+    content: string;
+    thinkingDurationMs: number;
+    contentDurationMs: number;
+  }> {
+    const { signal, onThinking, onContent } = options;
+    const startTime = Date.now();
+    const modelName = context.player.modelName;
+
+    const model = new ChatOpenAI({
+      apiKey: this.configService.get('ARK_API_KEY'),
+      model: modelName,
+      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      streaming: true,
+    });
+
+    const history = await this.loadHistory(threadId);
+
+    const thinkingPrompt = new HumanMessage(
+      '你已明确自己的身份、阵营与队友（见系统提示）。请直接分析当前局势，输出你的思考过程，不要重复介绍身份或队友，不要任何前缀标记或 JSON。',
+    );
+    const thinkingMessages = [new SystemMessage(context.systemPrompt), ...history, thinkingPrompt];
+
+    // 阶段1：流式输出思考
+    const thinking = await this.streamPlainChat(model, thinkingMessages, signal, onThinking);
+
+    // 记录思考调用
+    await this.recordModelCall({
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      purpose: this.scenarioToPurpose(context.scenario),
+      requestPrompt: this.serializeMessages(thinkingMessages),
+      responseText: thinking,
+      latencyMs: Date.now() - startTime,
+    });
+
+    const contentStartTime = Date.now();
+    const contentPrompt = new HumanMessage(
+      `你的思考过程如下：\n\n${thinking}\n\n请基于以上思考，输出你的发言内容。直接输出发言正文，不要重复自我介绍，不要任何前缀、标题、JSON 或额外解释。`,
+    );
+    const contentMessages = [new SystemMessage(context.systemPrompt), contentPrompt];
+
+    // 阶段2：流式输出发言正文
+    const content = await this.streamPlainChat(model, contentMessages, signal, onContent);
+
+    // 记录正文调用
+    await this.recordModelCall({
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      purpose: this.scenarioToPurpose(context.scenario),
+      requestPrompt: this.serializeMessages(contentMessages),
+      responseText: content,
+      latencyMs: Date.now() - contentStartTime,
+    });
+
+    const contentEndTime = Date.now();
+    return {
+      thinking,
+      content,
+      thinkingDurationMs: contentStartTime - startTime,
+      contentDurationMs: contentEndTime - contentStartTime,
+    };
+  }
+
+  /**
+   * 阶段2：根据推理结果生成结构化决策
+   *
+   * @param context 已准备好的上下文
+   * @param reasoning 阶段1的推理文本
+   * @param zodSchema 决策的 Zod Schema
+   * @param signal 中断信号
+   * @returns 结构化决策对象
+   */
+  async generateDecision<T = any>(
+    context: AgentContext,
+    reasoning: string,
+    zodSchema: z.ZodType,
+    signal?: AbortSignal,
+    threadId?: string,
+  ): Promise<T> {
+    const startTime = Date.now();
+    const modelName = context.player.modelName;
+    const baseModel = new ChatOpenAI({
+      apiKey: this.configService.get('ARK_API_KEY'),
+      model: modelName,
+      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      streaming: false,
+    });
+
+    // 使用 withStructuredOutput 自动解析 JSON。
+    // 采用 jsonMode（response_format=json_object）而非 functionCalling（tools + tool_choice）：
+    // 火山方舟 plan v3 下并非所有模型都支持工具调用（deepseek-v4-pro / kimi-k3 会返回
+    // 400 InvalidParameter），而 json_object 是所有模型都支持的基础能力。
+    // jsonMode 不会把 schema 透传给模型，故由 Zod 派生 JSON Schema 注入 prompt；
+    // 输出再用 Zod 硬校验（enum/required），失败则带错误上下文单次重试。
+    const jsonSchema = z.toJSONSchema(zodSchema);
+    const model = baseModel.withStructuredOutput(jsonSchema, { method: 'jsonMode' });
+
+    const baseMessages: BaseMessage[] = [
+      new SystemMessage(
+        `${context.systemPrompt}\n\n## 决策任务\n请基于以上身份与规则，将 HumanMessage 中的推理过程严格转换为结构化输出，不要修改或优化推理结论。`,
+      ),
+      new HumanMessage(
+        `推理过程：\n\n${reasoning}\n\n请严格按照以下 JSON Schema 输出决策，只输出 JSON，不要包含任何其他内容：\n${JSON.stringify(jsonSchema)}`,
+      ),
+    ];
+
+    // 首次调用 + Zod 硬校验
+    let decision: unknown = await model.invoke(baseMessages, { signal });
+    const firstParse = zodSchema.safeParse(decision);
+
+    // 校验失败：单次重试，把失败输出与错误原因反馈给模型
+    if (!firstParse.success) {
+      const issues = firstParse.error.issues.map((i) => i.message).join('；');
+      this.logger.warn(`[决策校验] ${modelName} 输出未通过 Zod 校验，触发单次重试: ${issues}`);
+      const retryMessages: BaseMessage[] = [
+        ...baseMessages,
+        new AIMessage(JSON.stringify(decision)),
+        new HumanMessage(
+          `你的输出未通过校验：${issues}\n请修正后重新输出，只输出符合 Schema 的 JSON。`,
+        ),
+      ];
+      decision = zodSchema.parse(await model.invoke(retryMessages, { signal }));
+    }
+
+    await this.recordModelCall({
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      purpose: this.scenarioToPurpose(context.scenario),
+      requestPrompt: this.serializeMessages(baseMessages),
+      responseText: JSON.stringify(decision),
+      latencyMs: Date.now() - startTime,
+    });
+
+    // 保存决策结论到跨轮记忆（只存结论，不存推理过程）
+    if (threadId) {
+      const history = await this.loadHistory(threadId);
+      await this.saveHistory(threadId, [
+        ...history,
+        new AIMessage(`决策结果：${JSON.stringify(decision)}`),
+      ]);
+    }
+
+    return decision as T;
   }
 
   /**
@@ -229,19 +413,20 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       case ROLES.WITCH:
         visibilities.push(VISIBILITY_TYPES.WITCH); // 女巫能看到女巫频道
 
-        // 女巫能看到狼人刀口信息（WOLF 频道），但需要满足条件
+        // 女巫能看到狼人刀口信息（WOLF_KILL 频道），但需要满足条件
         // 条件：1. 女巫存活  2. 女巫未使用解药
         const isAlive = !player.deathDay; // deathDay 为 null 表示存活
         const hasUsedAntidote = events.some(
-          (e) => e.actionType === 'witch_save' && e.actorId === player.id,
+          (e) => e.actionType === ACTION_TYPES.WITCH_SAVE && e.actorId === player.id,
         );
 
         if (isAlive && !hasUsedAntidote) {
-          visibilities.push(VISIBILITY_TYPES.WOLF); // 能看到狼人刀口
+          visibilities.push(VISIBILITY_TYPES.WOLF_KILL); // 能看到狼人刀口
         }
         break;
       case ROLES.WEREWOLF:
-        visibilities.push(VISIBILITY_TYPES.WOLF); // 狼人能看到狼人频道
+        visibilities.push(VISIBILITY_TYPES.WOLF); // 狼人能看到狼人商议频道
+        visibilities.push(VISIBILITY_TYPES.WOLF_KILL); // 狼人能看到刀口信息
         break;
       case ROLES.GUARD:
         visibilities.push(VISIBILITY_TYPES.GUARD); // 守卫能看到守卫频道
@@ -249,6 +434,25 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     }
 
     return visibilities;
+  }
+
+  /**
+   * 步骤 1: Prepare Context（准备上下文）- 公开版本
+   *
+   * 供外部调用（如 Node 层），用于两阶段模式
+   */
+  async prepareContextPublic(
+    gameId: string,
+    playerId: string,
+    scenario: AgentScenario,
+    additionalContext?: string,
+  ): Promise<AgentContext> {
+    return this.prepareContext({
+      gameId,
+      playerId,
+      scenario,
+      additionalContext,
+    });
   }
 
   /**
@@ -260,11 +464,12 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 4. 构建分层上下文
    * 5. 组装 System Prompt
    */
-  private async prepareContext(input: AgentInput): Promise<{
-    systemPrompt: string;
-    player: PlayerWithGame;
-    game: Prisma.GameGetPayload<Record<string, never>>;
-  }> {
+  private async prepareContext(input: {
+    gameId: string;
+    playerId: string;
+    scenario: AgentScenario;
+    additionalContext?: string;
+  }): Promise<AgentContext> {
     const { gameId, playerId, scenario, additionalContext } = input;
 
     // 1. 查询 Player + Game
@@ -332,13 +537,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       .map((p) => p.seatNo)
       .filter((seatNo): seatNo is number => seatNo !== null);
 
-    // 使用个性化摘要
+    // 使用个性化摘要（纯读组装，摘要与判断已由 daySummary 节点统一生成）
     const personalSummary = await this.speechSummarizer.summarizeForAgent(
       gameId,
       currentDay,
       player.agentId,
-      player.role!,
-      await this.getPrivateInfo(player, events),
       visiblePlayerSeats,
     );
 
@@ -357,6 +560,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       systemPrompt,
       player,
       game: player.game,
+      scenario,
     };
   }
 
@@ -393,28 +597,31 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     // 2. 最近一轮详细：当天的所有事件
     const recentEvents = events.filter((e) => e.day === currentDay);
 
-    // player_speech 统一由 SpeechSummarizerService 处理，不在此重复
+    // speech 统一由 SpeechSummarizerService 处理，不在此重复
     const recent =
       recentEvents.length > 0
         ? recentEvents
             .map((e) => {
               const content = e.content as any;
               switch (e.actionType) {
-                case 'wolf_kill':
+                case ACTION_TYPES.WOLF_KILL:
                   return `- 狼人刀了 ${content.targetSeatNo}号位`;
-                case 'seer_check':
+                case ACTION_TYPES.SEER_CHECK:
                   return `- 预言家查验了 ${content.targetSeatNo}号位，结果：${content.result}`;
-                case 'witch_action':
-                  if (content.useAntidote)
-                    return `- 女巫使用了解药救 ${content.antidoteTarget}号位`;
-                  if (content.usePoison) return `- 女巫使用了毒药毒 ${content.poisonTarget}号位`;
-                  return `- 女巫未使用药`;
-                case 'player_speech':
+                case ACTION_TYPES.WITCH_SAVE:
+                  return content.saved
+                    ? `- 女巫使用了解药救 ${content.targetSeatNo}号位`
+                    : '- 女巫未使用解药';
+                case ACTION_TYPES.WITCH_POISON:
+                  return content.used
+                    ? `- 女巫使用了毒药毒 ${content.targetSeatNo}号位`
+                    : '- 女巫未使用毒药';
+                case ACTION_TYPES.SPEECH:
                   // 发言统一由 SpeechSummarizerService 处理
                   return null;
-                case 'player_vote':
+                case ACTION_TYPES.VOTE:
                   return `- ${content.voterSeatNo}号位投票给 ${content.targetSeatNo}号位`;
-                case 'death_announcement':
+                case ACTION_TYPES.PLAYER_DIED:
                   return `- 死亡公告：${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
                 default:
                   return `- ${e.actionType}`;
@@ -430,19 +637,26 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       historyEvents.length > 0
         ? historyEvents
             .filter((e) =>
-              ['wolf_kill', 'seer_check', 'death_announcement', 'exile'].includes(e.actionType),
+              (
+                [
+                  ACTION_TYPES.WOLF_KILL,
+                  ACTION_TYPES.SEER_CHECK,
+                  ACTION_TYPES.PLAYER_DIED,
+                  ACTION_TYPES.PLAYER_EXECUTED,
+                ] as string[]
+              ).includes(e.actionType),
             )
             .map((e) => {
               const content = e.content as any;
               const dayLabel = e.day ?? 0;
               switch (e.actionType) {
-                case 'wolf_kill':
+                case ACTION_TYPES.WOLF_KILL:
                   return `Day ${dayLabel}: 狼人刀了 ${content.targetSeatNo}号位`;
-                case 'seer_check':
+                case ACTION_TYPES.SEER_CHECK:
                   return `Day ${dayLabel}: 预言家查验 ${content.targetSeatNo}号位 → ${content.result}`;
-                case 'death_announcement':
+                case ACTION_TYPES.PLAYER_DIED:
                   return `Day ${dayLabel}: 死亡 ${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
-                case 'exile':
+                case ACTION_TYPES.PLAYER_EXECUTED:
                   return `Day ${dayLabel}: 放逐 ${content.targetSeatNo}号位`;
                 default:
                   return '';
@@ -511,7 +725,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       你是：${player.displayName}\n
       座位号：${player.seatNo}\n
       你的角色：${player.role}\n
-      你的阵营：${player.faction === FACTIONS.WEREWOLF ? '狼人阵营' : '好人阵营'}\n
+      你的阵营：${player.faction === FACTIONS.WEREWOLF ? '狼人阵营' : player.faction === FACTIONS.THIRD_PARTY ? '第三方阵营' : '好人阵营'}\n
       存活状态：${player.deathDay === null ? '存活' : '已出局'}\n
     `.trim();
 
@@ -577,8 +791,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       ## 狼人杀基础规则
       ${basicRules}
 
-      ## 可加载的技能目录
-      以下是你可以按需加载的技能列表。当你需要某个技能的详细内容时，使用 load_skill 工具加载：
+      ## 可用技能目录
       ${skillCatalog}
 
       ## 你的人设
@@ -608,7 +821,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const checkEvents = await this.prisma.event.findMany({
       where: {
         gameId,
-        actionType: 'seer_check',
+        actionType: ACTION_TYPES.SEER_CHECK,
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -620,7 +833,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const history = checkEvents
       .map((e) => {
         const content = e.content as { targetSeatNo: number; result: string };
-        const result = content.result === 'werewolf' ? '狼人' : '好人';
+        const result = content.result === SEER_CHECK_RESULTS.WEREWOLF ? '狼人' : '好人';
         return `  - ${content.targetSeatNo}号位：${result}`;
       })
       .join('\n');
@@ -629,225 +842,19 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 步骤 2-3: Reason Loop（推理循环 + 工具执行）
-   *
-   * ReAct 循环 + 会话历史管理 + 流式输出
-   */
-  private async reasonLoop(
-    context: {
-      systemPrompt: string;
-      player: PlayerWithGame;
-      game: Prisma.GameGetPayload<Record<string, never>>;
-    },
-    tools: StructuredToolInterface[],
-    maxIterations: number,
-    threadId: string,
-    signal?: AbortSignal,
-    onStreamToken?: (token: string, contentType: 'thinking' | 'content') => void,
-    onStreamComplete?: (fullContent: string, contentType: 'thinking' | 'content') => void,
-  ): Promise<{ finalResult: unknown; iterations: number; thinking?: string }> {
-    const model = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
-      model: this.configService.get('ARK_DEFAULT_MODEL'),
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-      streaming: !!onStreamToken, // 仅在有回调时启用流式
-      modelKwargs: {
-        thinking: { type: 'enabled' }, // 开启推理模式，模型会输出 reasoning_content
-        reasoning_effort: 'medium', // 中等推理强度
-      },
-    }).bindTools(tools);
-
-    // 加载会话历史
-    const history = await this.loadHistory(threadId);
-
-    // 构建消息列表
-    const messages: BaseMessage[] = [
-      new SystemMessage(context.systemPrompt),
-      ...history,
-      new HumanMessage(
-        '请基于当前信息做出决策。\n\n**重要**：你必须调用可用的工具来执行你的决策。不要只输出文字说明，必须实际调用工具（如 make_speech、cast_vote、check_identity 等）。',
-      ),
-    ];
-
-    let finalResult: unknown = null;
-    let thinking: string | undefined;
-
-    for (let iteration = 0; iteration < maxIterations; iteration++) {
-      let fullContent = '';
-
-      if (onStreamToken) {
-        // 流式模式：累积所有 chunk 以获取完整的 tool_calls
-        const stream = await model.stream(messages, { signal });
-        let gatheredMessage: AIMessageChunk | undefined;
-
-        for await (const chunk of stream) {
-          // 检测：如果 signal 被取消，抛出 AbortError
-          if (signal?.aborted) {
-            throw new Error('LLM generation aborted: no active SSE connections');
-          }
-
-          // 累积完整消息（tool_call_chunks 需跨 chunk 拼接才能得到完整 tool_calls）
-          gatheredMessage = gatheredMessage === undefined ? chunk : concat(gatheredMessage, chunk);
-
-          // 处理文本内容（实时推送）
-          if (typeof chunk.content === 'string' && chunk.content) {
-            fullContent += chunk.content;
-            onStreamToken(chunk.content, 'thinking');
-          }
-
-          // 处理 ARK/豆包 的 reasoning_content（推理内容）
-          const reasoningContent = (chunk.additional_kwargs as any)?.reasoning_content;
-          if (typeof reasoningContent === 'string' && reasoningContent) {
-            fullContent += reasoningContent;
-            onStreamToken(reasoningContent, 'thinking');
-          }
-        }
-
-        // 流式完成回调
-        if (onStreamComplete && fullContent) {
-          onStreamComplete(fullContent, 'thinking');
-        }
-
-        thinking = fullContent;
-
-        // 检查累积后的消息是否包含 tool_calls
-        const toolCalls = gatheredMessage?.tool_calls ?? [];
-        if (toolCalls.length === 0) {
-          // 没有工具调用，继续下一轮迭代
-          if (fullContent) {
-            messages.push(new AIMessage(fullContent));
-          }
-          if (iteration === maxIterations - 1) {
-            throw new Error('超出迭代上限，未产出有效决策');
-          }
-          continue;
-        }
-
-        // 有工具调用，将完整消息加入历史
-        if (gatheredMessage) {
-          messages.push(gatheredMessage);
-        }
-
-        // 执行工具
-        for (const toolCall of toolCalls) {
-          const tool = tools.find((t) => t.name === toolCall.name);
-          if (!tool) {
-            throw new Error(`工具 ${toolCall.name} 未注册`);
-          }
-
-          try {
-            const toolResult = await tool.invoke(toolCall.args ?? {});
-            messages.push(
-              new ToolMessage({
-                content: JSON.stringify(toolResult),
-                tool_call_id: toolCall.id!,
-              }),
-            );
-
-            // 只有带 action 字段的工具结果才算有效决策
-            if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
-              finalResult = toolResult;
-            }
-          } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            messages.push(
-              new ToolMessage({
-                content: JSON.stringify({ error: errorMsg }),
-                tool_call_id: toolCall.id!,
-              }),
-            );
-          }
-        }
-
-        // 所有工具执行完毕后，如果有成功的结果，保存历史并返回
-        if (finalResult !== null) {
-          await this.saveHistory(threadId, messages.slice(1));
-          return { finalResult, iterations: iteration + 1, thinking };
-        }
-      } else {
-        // 非流式模式（原有逻辑）
-        const response = await model.invoke(messages, { signal });
-        messages.push(response);
-
-        // 捕获推理内容（优先 ARK reasoning_content，降级 response.content）
-        const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
-        if (typeof responseReasoning === 'string' && responseReasoning.trim()) {
-          thinking = responseReasoning;
-        } else if (typeof response.content === 'string' && response.content.trim()) {
-          thinking = response.content;
-        }
-
-        const toolCalls = response.tool_calls ?? [];
-        if (toolCalls.length === 0) {
-          if (iteration === maxIterations - 1) {
-            throw new Error('超出迭代上限，未产出决策');
-          }
-          continue;
-        }
-
-        // 执行工具
-        for (const toolCall of toolCalls) {
-          const tool = tools.find((t) => t.name === toolCall.name);
-          if (!tool) {
-            throw new Error(`工具 ${toolCall.name} 未注册`);
-          }
-
-          try {
-            const toolResult = await tool.invoke(toolCall.args ?? {});
-            messages.push(
-              new ToolMessage({
-                content: JSON.stringify(toolResult),
-                tool_call_id: toolCall.id!,
-              }),
-            );
-
-            // 只有带 action 字段的工具结果才算有效决策
-            // load_skill 等辅助工具不算最终决策
-            if (toolResult && typeof toolResult === 'object' && 'action' in toolResult) {
-              finalResult = toolResult;
-            }
-          } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            messages.push(
-              new ToolMessage({
-                content: JSON.stringify({ error: errorMsg }),
-                tool_call_id: toolCall.id!,
-              }),
-            );
-          }
-        }
-
-        // 所有工具执行完毕后，如果有成功的结果，保存历史并返回
-        if (finalResult !== null) {
-          await this.saveHistory(threadId, messages.slice(1));
-          return { finalResult, iterations: iteration + 1, thinking };
-        }
-      }
-    }
-
-    throw new Error('超出迭代上限，未产出有效决策');
-  }
-
-  /**
    * 加载会话历史
    */
   private async loadHistory(threadId: string): Promise<BaseMessage[]> {
-    if (!this.checkpointSaver) {
+    if (!this.pool) {
       return [];
     }
 
     try {
-      // 使用 getTuple 获取完整的 checkpoint
-      const tuple = await this.checkpointSaver.getTuple({
-        configurable: { thread_id: threadId },
+      const history = new PostgresChatMessageHistory({
+        sessionId: threadId,
+        pool: this.pool,
       });
-
-      if (!tuple || !tuple.checkpoint) {
-        return [];
-      }
-
-      const messages = (tuple.checkpoint.channel_values as any)?.messages || [];
-      return messages;
+      return await history.getMessages();
     } catch {
       return [];
     }
@@ -857,41 +864,105 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 保存会话历史
    */
   private async saveHistory(threadId: string, messages: BaseMessage[]): Promise<void> {
-    if (!this.checkpointSaver) {
+    if (!this.pool) {
       return;
     }
 
     try {
-      const config = { configurable: { thread_id: threadId } };
+      const history = new PostgresChatMessageHistory({
+        sessionId: threadId,
+        pool: this.pool,
+      });
 
-      // 获取当前 checkpoint（如果存在）
-      const currentTuple = await this.checkpointSaver.getTuple(config);
+      // 滑动窗口：只保留最近 N 条消息，避免跨轮记忆无限增长
+      const HISTORY_WINDOW = 20;
+      const trimmed =
+        messages.length > HISTORY_WINDOW
+          ? messages.slice(messages.length - HISTORY_WINDOW)
+          : messages;
 
-      const checkpoint = {
-        v: 1,
-        ts: new Date().toISOString(),
-        id: threadId,
-        channel_values: { messages },
-        channel_versions: currentTuple?.checkpoint?.channel_versions || {},
-        versions_seen: currentTuple?.checkpoint?.versions_seen || {},
-      };
-
-      const metadata = {
-        source: 'update' as const,
-        step: (currentTuple?.metadata?.step || -1) + 1,
-        writes: null,
-        parents: currentTuple?.metadata?.parents || {},
-      };
-
-      await this.checkpointSaver.put(
-        config,
-        checkpoint,
-        metadata,
-        {}, // newVersions
+      // 清空现有历史并添加新消息
+      await history.clear();
+      for (const message of trimmed) {
+        await history.addMessage(message);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `保存会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
       );
-    } catch {
-      //
     }
+  }
+
+  /**
+   * 记录一次 LLM 调用到 ModelCall 表（成本追踪、决策审计）
+   *
+   * 落库失败只告警、不阻断游戏流程。
+   */
+  private async recordModelCall(params: {
+    gameId: string;
+    playerId: string;
+    modelName: string;
+    purpose: string;
+    requestPrompt: string;
+    responseText: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    latencyMs?: number;
+    status?: 'success' | 'error' | 'timeout';
+    errorMessage?: string;
+  }): Promise<void> {
+    try {
+      await this.prisma.modelCall.create({
+        data: {
+          gameId: params.gameId,
+          playerId: params.playerId,
+          modelName: params.modelName,
+          provider: 'ark',
+          purpose: params.purpose,
+          requestPrompt: params.requestPrompt,
+          responseText: params.responseText,
+          inputTokens: params.inputTokens ?? 0,
+          outputTokens: params.outputTokens ?? 0,
+          cost: 0,
+          latencyMs: params.latencyMs,
+          status: params.status ?? 'success',
+          errorMessage: params.errorMessage,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `[ModelCall] 落库失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 场景 → ModelCall.purpose 映射
+   */
+  private scenarioToPurpose(scenario?: AgentScenario): string {
+    switch (scenario) {
+      case AGENT_SCENARIOS.NIGHT_ACTION:
+        return PURPOSES.NIGHT_ACTION;
+      case AGENT_SCENARIOS.DAY_SPEECH:
+      case AGENT_SCENARIOS.LAST_WORDS:
+        return PURPOSES.SPEECH;
+      case AGENT_SCENARIOS.VOTE:
+        return PURPOSES.VOTE;
+      default:
+        return PURPOSES.ANALYSIS;
+    }
+  }
+
+  /**
+   * 序列化消息列表为可读文本（用于 ModelCall.requestPrompt 落库）
+   */
+  private serializeMessages(messages: BaseMessage[]): string {
+    return messages
+      .map((m) => {
+        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        return `[${m._getType()}]\n${content}`;
+      })
+      .join('\n\n');
   }
 
   /**
@@ -966,61 +1037,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 获取 Agent 的私有信息
-   */
-  private async getPrivateInfo(
-    player: PlayerWithGame,
-    events: Event[],
-  ): Promise<{
-    seatNo: number;
-    role: string;
-    teammates?: number[];
-    checkedResults?: Array<{ target: number; result: string }>;
-  }> {
-    const privateInfo: any = {
-      seatNo: player.seatNo!,
-      role: player.role!,
-    };
-
-    // 狼人：获取队友座位号
-    if (player.role === ROLES.WEREWOLF) {
-      const teammates = await this.prisma.player.findMany({
-        where: {
-          gameId: player.gameId,
-          role: ROLES.WEREWOLF,
-          id: { not: player.id },
-        },
-        select: { seatNo: true },
-      });
-
-      privateInfo.teammates = teammates.map((t) => t.seatNo).filter(Boolean);
-    }
-
-    // 预言家：获取查验结果
-    if (player.role === ROLES.SEER) {
-      const checks = events
-        .filter(
-          (e) =>
-            e.actionType === 'seer_check' &&
-            e.actorId === player.id &&
-            e.content &&
-            typeof e.content === 'object',
-        )
-        .map((e) => {
-          const content = e.content as any;
-          return {
-            target: content.targetSeatNo,
-            result: content.result === 'werewolf' ? '狼人' : '好人',
-          };
-        });
-
-      privateInfo.checkedResults = checks;
-    }
-
-    return privateInfo;
-  }
-
-  /**
    * 格式化个性化摘要
    */
   private formatPersonalSummary(summary: {
@@ -1037,7 +1053,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       latestTrustScore: number;
       notes: string;
     }>;
-    actionPlan: string;
   }): string {
     const parts: string[] = [];
 
@@ -1087,11 +1102,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       for (const j of summary.olderJudgmentsSummary) {
         parts.push(`- ${j.seatNo}号位：最新信任度${j.latestTrustScore}% - ${j.notes}`);
       }
-    }
-
-    // 行动计划
-    if (summary.actionPlan) {
-      parts.push(`\n## 行动计划\n${summary.actionPlan}`);
     }
 
     return parts.join('\n');

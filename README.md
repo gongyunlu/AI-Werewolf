@@ -10,7 +10,7 @@
 | 语言       | TypeScript 6 + `verbatimModuleSyntax` + `NodeNext`                          |
 | 运行时     | Node.js 24 LTS                                                              |
 | 后端       | NestJS 11 + Prisma 7 + PostgreSQL 16                                        |
-| Agent 编排 | LangChain / LangGraph                                                       |
+| Agent 编排 | 自研状态机 + LangChain (Structured Output)                                  |
 | LLM        | 火山方舟(OpenAI 兼容协议,`@langchain/openai` + baseURL 指向 `ARK_BASE_URL`) |
 | 队列       | BullMQ + Redis 7                                                            |
 | 前端       | Vite 8 + React 19 + Tailwind 4 + shadcn/ui                                  |
@@ -22,10 +22,10 @@
 
 ```
 apps/
-  api/           NestJS API + Prisma schema + LangGraph 编排(核心)
+  api/           NestJS API + Prisma schema + 游戏引擎节点编排(核心)
   web/           React 前端
 packages/
-  shared/        枚举/常量单一真源(ROLES / FACTIONS / MEMORY_TYPES 等)
+  shared/        枚举/常量(ROLES / FACTIONS / MEMORY_TYPES 等)
   tsconfig/      共享 tsconfig
   oxlint-config/ 共享 lint 规则
 docs/            文档相关
