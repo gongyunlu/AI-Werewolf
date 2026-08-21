@@ -9,6 +9,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { PinoLogger } from 'nestjs-pino';
 import { CreateGameDto } from './dto/create-game.dto';
 import { QueryGamesDto } from './dto/query-games.dto';
 import { GamesService } from './games.service';
@@ -21,7 +22,10 @@ export class GamesController {
   constructor(
     private readonly gamesService: GamesService,
     private readonly gameQueue: GameQueueService,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(GamesController.name);
+  }
 
   @Get()
   @ApiOperation({ summary: '查询对局列表' })
@@ -31,8 +35,10 @@ export class GamesController {
 
   @Post()
   @ApiOperation({ summary: '创建对局（对局大厅，未分配角色）' })
-  create(@Body() dto: CreateGameDto) {
-    return this.gamesService.createGame(dto);
+  async create(@Body() dto: CreateGameDto) {
+    const game = await this.gamesService.createGame(dto);
+    this.logger.info({ gameId: game.id, rulesetId: dto.rulesetId }, '对局已创建');
+    return game;
   }
 
   @Post(':id/initialize')
@@ -48,6 +54,7 @@ export class GamesController {
     // 避免 worker 在状态更新前处理任务导致跳过执行
     const game = await this.gamesService.startGame(id);
     await this.gameQueue.addGameJob(id);
+    this.logger.info({ gameId: id }, '对局已投递到队列');
 
     return game;
   }
@@ -69,6 +76,7 @@ export class GamesController {
   async cancel(@Param('id', new ParseUUIDPipe()) id: string) {
     const removedFromQueue = await this.gameQueue.cancelJob(id);
     const success = await this.gamesService.cancelGame(id);
+    this.logger.info({ gameId: id, removedFromQueue }, '对局已取消');
     return { success, message: '对局已取消', removedFromQueue };
   }
 

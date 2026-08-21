@@ -56,8 +56,21 @@ export interface GameFinishedEvent {
   winner: string;
 }
 
+export interface PlayerDiedEvent {
+  type: 'player.died';
+  sequence: number;
+  playerId: string;
+  deathDay: number;
+  deathCause: string;
+}
+
 export type SseMessage =
-  ConnectionReadyEvent | SceneOpenEvent | SceneAppendEvent | SceneCloseEvent | GameFinishedEvent;
+  | ConnectionReadyEvent
+  | SceneOpenEvent
+  | SceneAppendEvent
+  | SceneCloseEvent
+  | GameFinishedEvent
+  | PlayerDiedEvent;
 
 /** 实际广播出去的场景事件（emit 后带 sequence），不含连接握手事件 */
 export type SseSceneMessage = Exclude<SseMessage, ConnectionReadyEvent>;
@@ -67,4 +80,5 @@ export type SseEmitPayload =
   | Omit<SceneOpenEvent, 'sequence'>
   | Omit<SceneAppendEvent, 'sequence'>
   | Omit<SceneCloseEvent, 'sequence'>
-  | Omit<GameFinishedEvent, 'sequence'>;
+  | Omit<GameFinishedEvent, 'sequence'>
+  | Omit<PlayerDiedEvent, 'sequence'>;

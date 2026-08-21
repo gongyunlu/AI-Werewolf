@@ -38,7 +38,27 @@ export default function GameWatchPage() {
   const { state, handleMessage } = useSceneEngine(perspective);
   const nightActionState = useNightActionState(state.closedScenes);
 
-  const onMessage = useCallback((msg: SseMessage) => handleMessage(msg), [handleMessage]);
+  const onMessage = useCallback(
+    (msg: SseMessage) => {
+      handleMessage(msg);
+      // 玩家出局：同步更新头像死亡状态（对局中 game 只拉取一次，需靠 SSE 事件驱动）
+      if (msg.type === 'player.died') {
+        setGame((prev) =>
+          prev
+            ? {
+                ...prev,
+                players: prev.players.map((p) =>
+                  p.id === msg.playerId
+                    ? { ...p, deathDay: msg.deathDay, deathCause: msg.deathCause }
+                    : p,
+                ),
+              }
+            : prev,
+        );
+      }
+    },
+    [handleMessage],
+  );
 
   const isRunning = game?.status === GAME_STATUSES.RUNNING;
 

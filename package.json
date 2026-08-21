@@ -21,6 +21,8 @@
     "docker:up": "docker compose up -d --wait",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
+    "docker:langfuse": "docker compose --profile observability up -d --wait langfuse-web",
+    "docker:langfuse:down": "docker compose --profile observability stop langfuse-web langfuse-worker langfuse-postgres langfuse-clickhouse langfuse-redis langfuse-minio",
     "lint": "pnpm -r run lint",
     "lint:fix": "pnpm -r run lint:fix",
     "check": "pnpm lint && pnpm typecheck",

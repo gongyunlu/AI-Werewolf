@@ -9,9 +9,17 @@ import { MemoryModule } from '../memory/memory.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SkillLoaderModule } from '../skills/skill-loader.module';
 import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.module';
+import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, MemoryModule, SkillLoaderModule, SpeechSummarizerModule],
+  imports: [
+    ConfigModule,
+    PrismaModule,
+    MemoryModule,
+    SkillLoaderModule,
+    SpeechSummarizerModule,
+    ObservabilityModule,
+  ],
   controllers: [AgentRuntimeController],
   providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer, AbortControllerManager],
   exports: [AgentRuntimeService, AgentToolsFactory, AbortControllerManager],

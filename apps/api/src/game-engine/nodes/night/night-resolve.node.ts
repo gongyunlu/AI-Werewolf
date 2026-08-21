@@ -53,6 +53,16 @@ export const createNightResolveNode: NodeFactory = (context) => {
       });
     }
 
+    // 广播死亡状态，供前端实时更新头像状态
+    for (const death of nightDeaths) {
+      context.broadcaster?.emit(state.gameId, {
+        type: 'player.died',
+        playerId: death.playerId,
+        deathDay: state.currentDay,
+        deathCause: death.cause,
+      });
+    }
+
     return {
       players: updatedPlayers,
       nightDeaths,

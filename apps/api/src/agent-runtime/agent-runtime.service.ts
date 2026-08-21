@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
+import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
 import { PostgresChatMessageHistory } from '@langchain/community/stores/message/postgres';
 import type { Env } from '../config/env.validation';
 import { Prisma } from '../generated/prisma/client';
@@ -16,7 +17,6 @@ import {
   ACTION_TYPES,
   AGENT_SCENARIOS,
   FACTIONS,
-  PURPOSES,
   ROLES,
   SEER_CHECK_RESULTS,
   VISIBILITY_TYPES,
@@ -50,7 +50,7 @@ interface AgentContext {
   systemPrompt: string;
   player: PlayerWithGame;
   game: Prisma.GameGetPayload<Record<string, never>>;
-  /** 当前场景，用于映射 ModelCall.purpose */
+  /** 当前场景 */
   scenario?: AgentScenario;
 }
 
@@ -74,6 +74,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly memoryService: MemoryService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
+    private readonly langfuse: LangfuseService,
   ) {}
 
   /**
@@ -112,7 +113,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     onStreamToken?: (token: string) => void,
     onStreamComplete?: (fullContent: string) => void,
   ): Promise<string> {
-    const startTime = Date.now();
     const modelName = context.player.modelName;
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -123,6 +123,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         thinking: { type: 'enabled' },
         reasoning_effort: 'medium',
       },
+    });
+
+    const trace = this.langfuse.trace({
+      runName: 'reasoning',
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      scenario: context.scenario,
+      seatNo: context.player.seatNo,
+      role: context.player.role,
     });
 
     // 加载会话历史
@@ -140,7 +150,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     let fullContent = '';
 
     if (onStreamToken) {
-      const stream = await model.stream(messages, { signal });
+      const stream = await model.stream(messages, { signal, ...trace });
 
       for await (const chunk of stream) {
         if (signal?.aborted) {
@@ -163,7 +173,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         onStreamComplete(fullContent);
       }
     } else {
-      const response = await model.invoke(messages, { signal });
+      const response = await model.invoke(messages, { signal, ...trace });
 
       const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
       if (typeof responseReasoning === 'string' && responseReasoning.trim()) {
@@ -172,17 +182,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         fullContent = response.content;
       }
     }
-
-    // 记录调用 + 保存历史（跨轮记忆）
-    await this.recordModelCall({
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      purpose: this.scenarioToPurpose(context.scenario),
-      requestPrompt: this.serializeMessages(messages),
-      responseText: fullContent,
-      latencyMs: Date.now() - startTime,
-    });
 
     return fullContent;
   }
@@ -194,6 +193,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * @param messages 消息列表
    * @param signal 中断信号
    * @param onToken 流式 token 回调（可空，仅用于实时转发）
+   * @param trace 追踪配置（未启用追踪时 callbacks 为空数组）
    * @returns 完整文本
    */
   private async streamPlainChat(
@@ -201,9 +201,10 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     messages: BaseMessage[],
     signal: AbortSignal | undefined,
     onToken?: (token: string) => void,
+    trace?: TraceConfig,
   ): Promise<string> {
     let fullContent = '';
-    const stream = await model.stream(messages, { signal });
+    const stream = await model.stream(messages, { signal, ...trace });
 
     for await (const chunk of stream) {
       if (signal?.aborted) {
@@ -256,6 +257,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       streaming: true,
     });
 
+    const traceParams = {
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      scenario: context.scenario,
+      seatNo: context.player.seatNo,
+      role: context.player.role,
+    };
+    const thinkingTrace = this.langfuse.trace({ runName: 'speech-thinking', ...traceParams });
+
     const history = await this.loadHistory(threadId);
 
     const thinkingPrompt = new HumanMessage(
@@ -264,18 +275,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const thinkingMessages = [new SystemMessage(context.systemPrompt), ...history, thinkingPrompt];
 
     // 阶段1：流式输出思考
-    const thinking = await this.streamPlainChat(model, thinkingMessages, signal, onThinking);
-
-    // 记录思考调用
-    await this.recordModelCall({
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      purpose: this.scenarioToPurpose(context.scenario),
-      requestPrompt: this.serializeMessages(thinkingMessages),
-      responseText: thinking,
-      latencyMs: Date.now() - startTime,
-    });
+    const thinking = await this.streamPlainChat(
+      model,
+      thinkingMessages,
+      signal,
+      onThinking,
+      thinkingTrace,
+    );
 
     const contentStartTime = Date.now();
     const contentPrompt = new HumanMessage(
@@ -283,19 +289,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     );
     const contentMessages = [new SystemMessage(context.systemPrompt), contentPrompt];
 
-    // 阶段2：流式输出发言正文
-    const content = await this.streamPlainChat(model, contentMessages, signal, onContent);
+    const contentTrace = this.langfuse.trace({ runName: 'speech-content', ...traceParams });
 
-    // 记录正文调用
-    await this.recordModelCall({
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      purpose: this.scenarioToPurpose(context.scenario),
-      requestPrompt: this.serializeMessages(contentMessages),
-      responseText: content,
-      latencyMs: Date.now() - contentStartTime,
-    });
+    // 阶段2：流式输出发言正文
+    const content = await this.streamPlainChat(
+      model,
+      contentMessages,
+      signal,
+      onContent,
+      contentTrace,
+    );
 
     const contentEndTime = Date.now();
     return {
@@ -322,7 +325,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     signal?: AbortSignal,
     threadId?: string,
   ): Promise<T> {
-    const startTime = Date.now();
     const modelName = context.player.modelName;
     const baseModel = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -331,12 +333,16 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       streaming: false,
     });
 
-    // 使用 withStructuredOutput 自动解析 JSON。
-    // 采用 jsonMode（response_format=json_object）而非 functionCalling（tools + tool_choice）：
-    // 火山方舟 plan v3 下并非所有模型都支持工具调用（deepseek-v4-pro / kimi-k3 会返回
-    // 400 InvalidParameter），而 json_object 是所有模型都支持的基础能力。
-    // jsonMode 不会把 schema 透传给模型，故由 Zod 派生 JSON Schema 注入 prompt；
-    // 输出再用 Zod 硬校验（enum/required），失败则带错误上下文单次重试。
+    const trace = this.langfuse.trace({
+      runName: 'decision',
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName,
+      scenario: context.scenario,
+      seatNo: context.player.seatNo,
+      role: context.player.role,
+    });
+
     const jsonSchema = z.toJSONSchema(zodSchema);
     const model = baseModel.withStructuredOutput(jsonSchema, { method: 'jsonMode' });
 
@@ -350,7 +356,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     ];
 
     // 首次调用 + Zod 硬校验
-    let decision: unknown = await model.invoke(baseMessages, { signal });
+    let decision: unknown = await model.invoke(baseMessages, { signal, ...trace });
     const firstParse = zodSchema.safeParse(decision);
 
     // 校验失败：单次重试，把失败输出与错误原因反馈给模型
@@ -364,18 +370,21 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
           `你的输出未通过校验：${issues}\n请修正后重新输出，只输出符合 Schema 的 JSON。`,
         ),
       ];
-      decision = zodSchema.parse(await model.invoke(retryMessages, { signal }));
+      decision = zodSchema.parse(
+        await model.invoke(retryMessages, {
+          signal,
+          ...this.langfuse.trace({
+            runName: 'decision-retry',
+            gameId: context.player.gameId,
+            playerId: context.player.id,
+            modelName,
+            scenario: context.scenario,
+            seatNo: context.player.seatNo,
+            role: context.player.role,
+          }),
+        }),
+      );
     }
-
-    await this.recordModelCall({
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      purpose: this.scenarioToPurpose(context.scenario),
-      requestPrompt: this.serializeMessages(baseMessages),
-      responseText: JSON.stringify(decision),
-      latencyMs: Date.now() - startTime,
-    });
 
     // 保存决策结论到跨轮记忆（只存结论，不存推理过程）
     if (threadId) {
@@ -891,78 +900,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         `保存会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-  }
-
-  /**
-   * 记录一次 LLM 调用到 ModelCall 表（成本追踪、决策审计）
-   *
-   * 落库失败只告警、不阻断游戏流程。
-   */
-  private async recordModelCall(params: {
-    gameId: string;
-    playerId: string;
-    modelName: string;
-    purpose: string;
-    requestPrompt: string;
-    responseText: string;
-    inputTokens?: number;
-    outputTokens?: number;
-    latencyMs?: number;
-    status?: 'success' | 'error' | 'timeout';
-    errorMessage?: string;
-  }): Promise<void> {
-    try {
-      await this.prisma.modelCall.create({
-        data: {
-          gameId: params.gameId,
-          playerId: params.playerId,
-          modelName: params.modelName,
-          provider: 'ark',
-          purpose: params.purpose,
-          requestPrompt: params.requestPrompt,
-          responseText: params.responseText,
-          inputTokens: params.inputTokens ?? 0,
-          outputTokens: params.outputTokens ?? 0,
-          cost: 0,
-          latencyMs: params.latencyMs,
-          status: params.status ?? 'success',
-          errorMessage: params.errorMessage,
-        },
-      });
-    } catch (error) {
-      this.logger.warn(
-        `[ModelCall] 落库失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
-  /**
-   * 场景 → ModelCall.purpose 映射
-   */
-  private scenarioToPurpose(scenario?: AgentScenario): string {
-    switch (scenario) {
-      case AGENT_SCENARIOS.NIGHT_ACTION:
-        return PURPOSES.NIGHT_ACTION;
-      case AGENT_SCENARIOS.DAY_SPEECH:
-      case AGENT_SCENARIOS.LAST_WORDS:
-        return PURPOSES.SPEECH;
-      case AGENT_SCENARIOS.VOTE:
-        return PURPOSES.VOTE;
-      default:
-        return PURPOSES.ANALYSIS;
-    }
-  }
-
-  /**
-   * 序列化消息列表为可读文本（用于 ModelCall.requestPrompt 落库）
-   */
-  private serializeMessages(messages: BaseMessage[]): string {
-    return messages
-      .map((m) => {
-        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        return `[${m._getType()}]\n${content}`;
-      })
-      .join('\n\n');
   }
 
   /**

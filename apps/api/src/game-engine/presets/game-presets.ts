@@ -58,6 +58,7 @@ export const Standard6pPreset: GamePreset = {
     'pkSpeech', // 平票PK发言
     'pkVote', // 平票PK投票
     'execute', // 执行放逐
+    'checkWin', // 放逐后立即判定胜负（避免先发遗言再判胜负）
     'exileLastWords', // 被放逐者遗言
     'processExileSkills', // 处理放逐触发技能
   ],
@@ -101,6 +102,7 @@ export const Standard9pPreset: GamePreset = {
     'pkSpeech', // 平票PK发言
     'pkVote', // 平票PK投票
     'execute',
+    'checkWin', // 放逐后立即判定胜负（避免先发遗言再判胜负）
     'exileLastWords', // 被放逐者遗言
     'processExileSkills', // 处理放逐触发技能
     // TODO: 猎人开枪（hunterShoot）尚未实现
@@ -142,6 +144,7 @@ export const GuardPreset: GamePreset = {
     'pkSpeech', // 平票PK发言
     'pkVote', // 平票PK投票
     'execute',
+    'checkWin', // 放逐后立即判定胜负（避免先发遗言再判胜负）
     'exileLastWords',
     'processExileSkills',
   ],

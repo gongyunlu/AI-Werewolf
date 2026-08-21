@@ -59,6 +59,14 @@ export const createExecuteNode: NodeFactory = (context) => {
       },
     });
 
+    // 广播放逐死亡状态，供前端实时更新头像状态
+    context.broadcaster?.emit(state.gameId, {
+      type: 'player.died',
+      playerId: target.id,
+      deathDay: state.currentDay,
+      deathCause: DEATH_CAUSES.EXECUTION,
+    });
+
     return {
       players: updatedPlayers,
       exileTarget: null,

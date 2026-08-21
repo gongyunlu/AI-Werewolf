@@ -19,11 +19,14 @@ export function useGameStream(
   const retryCount = useRef(0);
   const esRef = useRef<EventSource | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const endedRef = useRef(false);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
   const connect = useCallback(() => {
     if (!enabledRef.current) return;
+    // 已收到 game.finished：对局结束，不再重连
+    if (endedRef.current) return;
     if (retryCount.current >= MAX_RETRIES) {
       console.error(`SSE 连接失败，已达最大重试次数 ${MAX_RETRIES}`);
       return;
@@ -42,7 +45,11 @@ export function useGameStream(
 
     es.addEventListener('message', (e: MessageEvent) => {
       const msg = JSON.parse(e.data as string) as SseMessage;
-      if (msg.type !== 'connection.ready') {
+      retryCount.current = 0;
+      if (msg.type === 'game.finished') {
+        endedRef.current = true;
+        es.close();
+      } else if (msg.type !== 'connection.ready') {
         try {
           sessionStorage.setItem(
             `sse-seq-${gameId}`,
@@ -52,12 +59,13 @@ export function useGameStream(
           // 忽略写入失败，仅影响断线续传
         }
       }
-      retryCount.current = 0;
       onMessage(msg);
     });
 
     es.addEventListener('error', () => {
       es.close();
+      // 对局已正常结束导致的服务端关闭，无需重连
+      if (endedRef.current) return;
       const delay = RETRY_DELAYS[Math.min(retryCount.current, RETRY_DELAYS.length - 1)];
       retryCount.current += 1;
       retryTimerRef.current = setTimeout(connect, delay);
@@ -74,6 +82,7 @@ export function useGameStream(
       }
       esRef.current?.close();
       retryCount.current = 0;
+      endedRef.current = false;
     };
   }, [connect, enabled]);
 }

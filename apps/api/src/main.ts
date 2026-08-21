@@ -2,15 +2,14 @@ import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ZodValidationPipe, cleanupOpenApiDoc } from 'nestjs-zod';
+import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import type { Env } from './config/env.validation';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
-    // 默认关闭 debug/verbose 两档，避免游戏引擎日志刷屏；排查时按需开启
-    logger: ['log', 'error', 'warn', 'fatal'],
-  });
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(Logger));
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
   app.useGlobalFilters(new AllExceptionsFilter());
@@ -27,8 +26,6 @@ async function bootstrap() {
   const config = app.get(ConfigService<Env, true>);
   await app.listen(config.get('API_PORT', { infer: true }));
 
-  // 显式响应终止信号，触发 Nest 生命周期钩子并关闭 HTTP server：
-  // 一是让 --watch 重启时端口及时释放，二是让未来接入的 DB/Redis 连接池能正常关闭
   const shutdown = async () => {
     await app.close();
     process.exit(0);

@@ -17,15 +17,16 @@ import { RulesetsModule } from './rulesets/rulesets.module';
 import { GameQueueModule } from './game-queue/game-queue.module';
 import { GameExecutorModule } from './game-executor/game-executor.module';
 import { HealthModule } from './health/health.module';
+import { ObservabilityModule } from './observability/observability.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      // 数组前项优先：.env.local（本地私密覆盖）> .env（仓库/生产默认）
       envFilePath: [join(__dirname, '../../../.env.local'), join(__dirname, '../../../.env')],
       validate: validateEnv,
     }),
+    ObservabilityModule,
     PrismaModule,
     RedisModule,
     GamesModule,
@@ -38,7 +39,7 @@ import { HealthModule } from './health/health.module';
     GameQueueModule,
     HealthModule,
     ThrottlerModule.forRoot({
-      throttlers: [{ ttl: 60_000, limit: 100 }], // 每 IP 每分钟最多 100 次请求
+      throttlers: [{ ttl: 60_000, limit: 100 }],
     }),
   ],
   controllers: [AppController],

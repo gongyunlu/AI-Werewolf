@@ -6,7 +6,8 @@
   },
   "rules": {
     "typescript/no-explicit-any": "off",
-    "no-await-in-loop": "off"
+    "no-await-in-loop": "off",
+    "no-underscore-dangle": ["warn", { "allow": ["_avg", "_count", "_sum", "_min", "_max"] }]
   },
   "overrides": [
     {

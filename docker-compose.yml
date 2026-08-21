@@ -1,3 +1,41 @@
+# ─────────────────────────────────────────────────────────────
+# LangFuse v4 自托管（可选组件，见下方 observability profile）
+# 镜像来自官方 GitHub Container Registry（ghcr.io），经 1ms.run 的 ghcr 加速前缀拉取：
+# Docker Hub 的 langfuse/langfuse 自 v2 起停更；直连 ghcr.io 在国内只有 ~28KB/s，
+# 换 ghcr.1ms.run 加速（与 daemon.json 里已配的 docker.1ms.run 同一家）。
+# v3 起架构拆分：web + worker 两进程 + ClickHouse(OLAP) + MinIO(S3) + Redis + Postgres。
+# ─────────────────────────────────────────────────────────────
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://localhost:3100
+  NEXTAUTH_SECRET: dev-only-nextauth-secret-change-me
+  DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+  SALT: dev-only-salt-change-me
+  ENCRYPTION_KEY: 22c44ccf410df97681433ee3ed33c57c33d5d88dcae9f3cf20df03284295011e # 生产环境用 openssl rand -hex 32 生成替换
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:clickhouse@langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: 'false'
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: '6379'
+  REDIS_AUTH: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: 'true'
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: 'true'
+  TELEMETRY_ENABLED: 'false'
+  # v3 SDK（langfuse-langchain@3.x）仍走 legacy /api/public/ingestion，
+  # 而 v4 server 默认 events_only 会拒收。dual 模式让 v4 同时接受 legacy 上报并转写进 events 表。
+  LANGFUSE_MIGRATION_V4_WRITE_MODE: 'dual'
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -16,6 +54,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: werewolf-redis
@@ -31,6 +70,133 @@ services:
       timeout: 3s
       retries: 10
 
+  # ─────────────────────────────────────────────────────────────
+  # 追踪面板为可选组件，挂在 observability profile 下：
+  # 默认 `docker compose up` 不启动，需要时用 pnpm docker:langfuse
+  # ─────────────────────────────────────────────────────────────
+  langfuse-postgres:
+    image: postgres:17
+    container_name: werewolf-langfuse-postgres
+    profiles: ['observability']
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    ports:
+      - '5433:5432'
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U langfuse']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    container_name: werewolf-langfuse-clickhouse
+    profiles: ['observability']
+    restart: unless-stopped
+    user: '101:101'
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    ports:
+      - '127.0.0.1:8123:8123'
+      - '127.0.0.1:9000:9000'
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7
+    container_name: werewolf-langfuse-redis
+    profiles: ['observability']
+    restart: unless-stopped
+    command: '--requirepass langfuse --maxmemory-policy noeviction'
+    ports:
+      - '6378:6379'
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', 'langfuse', 'ping']
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  langfuse-minio:
+    image: minio/minio
+    container_name: werewolf-langfuse-minio
+    profiles: ['observability']
+    restart: unless-stopped
+    entrypoint: sh
+    # 单节点文件系统后端：目录即 bucket，启动前先 mkdir 出 langfuse bucket
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - '127.0.0.1:9090:9000'
+      - '127.0.0.1:9001:9001'
+    volumes:
+      - langfuse_minio_data:/data
+
+  langfuse-web:
+    image: ghcr.1ms.run/langfuse/langfuse:4
+    container_name: werewolf-langfuse-web
+    profiles: ['observability']
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_started
+    environment:
+      <<: *langfuse-env
+    ports:
+      - '3100:3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3000/api/public/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse-worker:
+    image: ghcr.1ms.run/langfuse/langfuse-worker:4
+    container_name: werewolf-langfuse-worker
+    profiles: ['observability']
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_started
+    environment:
+      <<: *langfuse-env
+    ports:
+      - '127.0.0.1:3030:3030'
+
 volumes:
   postgres_data:
   redis_data:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

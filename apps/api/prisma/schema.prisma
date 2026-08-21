@@ -34,15 +34,12 @@ model Game {
   status        String    @default("created") @db.VarChar(32) // 对局状态，取值口径见 packages/shared 的 GAME_STATUSES
   winnerFaction String?   @map("winner_faction") @db.VarChar(16) // 胜利者阵营（好人/狼人），使用字符串存储而非 enum
   totalDays     Int?      @map("total_days") // 游戏总天数
-  totalCost     Decimal?  @map("total_cost") @db.Decimal(14, 8) // 游戏总花费，精度与 ModelCall.cost/GameSummary.totalCost 统一为 (14,8)：scale=8 保证累加不丢精度，整数位 6 位避免单局费用破百的天花板
-  totalTokens   Int?      @map("total_tokens") // 总计消费 token
   startedAt     DateTime  @default(now()) @map("started_at") @db.Timestamptz
   endedAt       DateTime? @map("ended_at") @db.Timestamptz
 
   ruleset           Ruleset            @relation(fields: [rulesetId], references: [id])
   players           Player[]
   events            Event[]
-  modelCalls        ModelCall[]
   memories          Memory[]
   agentPerformances AgentPerformance[]
   gameSummary       GameSummary?
@@ -92,7 +89,6 @@ model Player {
   game              Game               @relation(fields: [gameId], references: [id], onDelete: Cascade)
   agent             Agent              @relation(fields: [agentId], references: [id]) // Agent 不可硬删（软删走 isActive），故不设 onDelete
   events            Event[]
-  modelCalls        ModelCall[]
   agentPerformances AgentPerformance[]
 
   @@unique([gameId, seatNo])
@@ -128,42 +124,11 @@ model Event {
 
   game       Game            @relation(fields: [gameId], references: [id], onDelete: Cascade)
   actor      Player?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  modelCalls ModelCall[]
   memories   Memory[]
   judgments  AgentJudgment[]
 
   @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
   @@map("events")
-}
-
-// 模型调用
-// 每次 LLM API 调用的不可变记录，用于成本追踪、决策审计和 prompt 优化。
-model ModelCall {
-  id            String   @id @default(uuid()) @db.Uuid
-  gameId        String   @map("game_id") @db.Uuid // 所属对局
-  playerId      String?  @map("player_id") @db.Uuid // 发起调用的玩家，NULL 表示系统级调用
-  eventId       String?  @map("event_id") @db.Uuid // 关联的事件，一个事件可能触发多次调用
-  modelName     String   @map("model_name") @db.VarChar(128) // 实际调用的模型名称
-  provider      String   @db.VarChar(32) // 模型提供商，如 deepseek/openai
-  purpose       String   @db.VarChar(64) // 调用目的，取值口径见 packages/shared 的 PURPOSES
-  requestPrompt String   @map("request_prompt") @db.Text // 发送给模型的完整 prompt
-  responseText  String   @map("response_text") @db.Text // 模型返回的原始文本
-  inputTokens   Int      @map("input_tokens") @db.Integer // 输入 token 数
-  outputTokens  Int      @map("output_tokens") @db.Integer // 输出 token 数
-  cost          Decimal  @db.Decimal(14, 8) // 本次调用费用（单位统一，如 CNY）；精度口径与 Game.totalCost/GameSummary.totalCost 统一为 (14,8)
-  latencyMs     Int?     @map("latency_ms") // 调用耗时（毫秒）
-  status        String   @default("success") @db.VarChar(32) // 状态：success/error/timeout
-  errorMessage  String?  @map("error_message") @db.Text // 失败时的错误信息
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
-
-  game   Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  player Player? @relation(fields: [playerId], references: [id], onDelete: SetNull)
-  event  Event?  @relation(fields: [eventId], references: [id], onDelete: SetNull)
-
-  @@index([gameId])
-  @@index([playerId])
-  @@index([eventId])
-  @@map("model_calls")
 }
 
 // Agent 长期记忆表，跨对局持久化，用于自我进化。
@@ -254,7 +219,7 @@ model AgentPerformance {
 }
 
 /// 对局结束后的统计摘要，便于快速查询和分析。
-/// 所有计数类字段为去规范化缓存，权威写入方是对局结束时的结算服务（读取 Event/ModelCall/Player 聚合后写入），
+/// 所有计数类字段为去规范化缓存，权威写入方是对局结束时的结算服务（读取 Event/Player 聚合后写入），
 /// 业务代码只读，不直接修改这些字段。
 model GameSummary {
   id                   String   @id @default(uuid()) @db.Uuid
@@ -268,9 +233,6 @@ model GameSummary {
   keyEvents            Json?    @map("key_events") @db.JsonB // 关键事件摘要
   mvpPlayerId          String?  @map("mvp_player_id") @db.Uuid // 本局 MVP 玩家
   totalSpeechCount     Int      @map("total_speech_count") // 发言总数（从 Event 聚合）
-  totalModelCalls      Int      @map("total_model_calls") // LLM 调用总数（从 ModelCall 聚合）
-  totalTokens          Int      @map("total_tokens") // 总 token 消耗（从 ModelCall 聚合，勿用 SmallInt 会溢出）
-  totalCost            Decimal  @map("total_cost") @db.Decimal(14, 8) // 总费用（从 ModelCall 聚合）；精度口径与 Game.totalCost/ModelCall.cost 统一为 (14,8)
   generatedAt          DateTime @default(now()) @map("generated_at") @db.Timestamptz
 
   game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)

@@ -5,7 +5,6 @@ export * from './constants/visibility-types';
 export * from './constants/action-types';
 export * from './constants/roles';
 export * from './constants/game-statuses';
-export * from './constants/purposes';
 export * from './constants/memory-types';
 export * from './constants/global-memory-types';
 export * from './constants/agent-scenarios';

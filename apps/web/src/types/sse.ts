@@ -55,5 +55,18 @@ export interface GameFinishedEvent {
   winner: string;
 }
 
+export interface PlayerDiedEvent {
+  type: 'player.died';
+  sequence: number;
+  playerId: string;
+  deathDay: number;
+  deathCause: string;
+}
+
 export type SseMessage =
-  ConnectionReadyEvent | SceneOpenEvent | SceneAppendEvent | SceneCloseEvent | GameFinishedEvent;
+  | ConnectionReadyEvent
+  | SceneOpenEvent
+  | SceneAppendEvent
+  | SceneCloseEvent
+  | GameFinishedEvent
+  | PlayerDiedEvent;
