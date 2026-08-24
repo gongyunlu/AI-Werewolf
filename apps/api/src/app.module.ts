@@ -18,6 +18,7 @@ import { GameQueueModule } from './game-queue/game-queue.module';
 import { GameExecutorModule } from './game-executor/game-executor.module';
 import { HealthModule } from './health/health.module';
 import { ObservabilityModule } from './observability/observability.module';
+import { BatchModule } from './evaluation/batch.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { ObservabilityModule } from './observability/observability.module';
     GameEngineModule,
     GameExecutorModule,
     GameQueueModule,
+    BatchModule,
     HealthModule,
     ThrottlerModule.forRoot({
       throttlers: [{ ttl: 60_000, limit: 100 }],

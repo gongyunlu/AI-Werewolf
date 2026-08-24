@@ -13,13 +13,13 @@ import { PostgresChatMessageHistory } from '@langchain/community/stores/message/
 import type { Env } from '../config/env.validation';
 import { Prisma } from '../generated/prisma/client';
 import { Pool } from 'pg';
+import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
 import {
   ACTION_TYPES,
   AGENT_SCENARIOS,
   FACTIONS,
   ROLES,
   SEER_CHECK_RESULTS,
-  VISIBILITY_TYPES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
 
@@ -408,41 +408,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * @returns 可见的 visibility 列表
    */
   private async getVisibleVisibilities(player: PlayerWithGame, events: Event[]): Promise<string[]> {
-    const visibilities: string[] = [VISIBILITY_TYPES.PUBLIC]; // 所有人都能看到 public
-
-    const role = player.role;
-    if (!role) {
-      return visibilities;
-    }
-
-    switch (role) {
-      case ROLES.SEER:
-        visibilities.push(VISIBILITY_TYPES.SEER); // 预言家能看到预言家频道
-        break;
-      case ROLES.WITCH:
-        visibilities.push(VISIBILITY_TYPES.WITCH); // 女巫能看到女巫频道
-
-        // 女巫能看到狼人刀口信息（WOLF_KILL 频道），但需要满足条件
-        // 条件：1. 女巫存活  2. 女巫未使用解药
-        const isAlive = !player.deathDay; // deathDay 为 null 表示存活
-        const hasUsedAntidote = events.some(
-          (e) => e.actionType === ACTION_TYPES.WITCH_SAVE && e.actorId === player.id,
-        );
-
-        if (isAlive && !hasUsedAntidote) {
-          visibilities.push(VISIBILITY_TYPES.WOLF_KILL); // 能看到狼人刀口
-        }
-        break;
-      case ROLES.WEREWOLF:
-        visibilities.push(VISIBILITY_TYPES.WOLF); // 狼人能看到狼人商议频道
-        visibilities.push(VISIBILITY_TYPES.WOLF_KILL); // 狼人能看到刀口信息
-        break;
-      case ROLES.GUARD:
-        visibilities.push(VISIBILITY_TYPES.GUARD); // 守卫能看到守卫频道
-        break;
-    }
-
-    return visibilities;
+    return getVisibleVisibilitiesForRole({
+      role: player.role,
+      isAlive: !player.deathDay, // deathDay 为 null 表示存活
+      hasUsedAntidote: events.some(
+        (e) => e.actionType === ACTION_TYPES.WITCH_SAVE && e.actorId === player.id,
+      ),
+    });
   }
 
   /**

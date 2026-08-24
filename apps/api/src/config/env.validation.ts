@@ -13,6 +13,7 @@ const envSchema = z.object({
   ARK_API_KEY: z.string().min(1),
   ARK_BASE_URL: z.url(),
   ARK_DEFAULT_MODEL: z.string().min(1),
+  JUDGE_MODEL: emptyToUndefined, // 决策质量评估模型，缺省回退 ARK_DEFAULT_MODEL
   GAME_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(1),
   SKILLS_DIR: z.string().optional(),
   PROMPTS_DIR: z.string().optional(),

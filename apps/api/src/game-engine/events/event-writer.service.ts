@@ -2,9 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { type Prisma, type Event } from '@/generated/prisma/client';
 import { ACTION_TYPES, VISIBILITY_TYPES, PHASES, type SeerCheckResult } from '@ai-werewolf/shared';
-
-/** sequence 冲突时的最大重试次数 */
-const MAX_SEQUENCE_RETRY = 10;
+import { RedisService } from '@/redis/redis.service';
 
 /** 判断是否为 Prisma 唯一约束冲突（P2002） */
 function isUniqueConstraintViolation(error: unknown): boolean {
@@ -17,14 +15,16 @@ function isUniqueConstraintViolation(error: unknown): boolean {
 }
 
 /**
- * Event 写入服务（纯持久化仓储）
+ * Event 写入服务
  *
- * 只负责将游戏事件写入 Event 表；广播由节点层在写入后显式调用 EventBusService.publish 发起，
- * 落库与广播职责解耦（流式场景无需广播，避免同一段发言出现两张卡片）。
+ * 负责事件落库，广播由节点层调用 EventBusService 处理
  */
 @Injectable()
 export class EventWriterService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   /**
    * 写入预言家查验事件
@@ -463,37 +463,70 @@ export class EventWriterService {
   }
 
   /**
+   * 初始化游戏的 Redis sequence 计数器
+   *
+   * 从数据库读取该游戏的最大 sequence，初始化 Redis 计数器。
+   * 使用 SET NX 确保只在计数器不存在时初始化，避免覆盖正在运行的游戏的计数器。
+   *
+   * @param gameId - 游戏对局ID
+   */
+  async initializeSequenceCounter(gameId: string): Promise<void> {
+    const key = `game:${gameId}:event_seq`;
+    const exists = await this.redis.exists(key);
+
+    // 如果计数器已存在，说明游戏正在运行或刚运行过，不需要初始化
+    if (exists) {
+      return;
+    }
+
+    // 从数据库读取最大 sequence
+    const lastEvent = await this.prisma.event.findFirst({
+      where: { gameId },
+      orderBy: { sequence: 'desc' },
+      select: { sequence: true },
+    });
+
+    const maxSequence = lastEvent?.sequence || 0;
+
+    // 使用 SET NX 原子地初始化计数器（仅当 key 不存在时设置）
+    // 避免并发初始化覆盖问题
+    await this.redis.set(key, maxSequence, 'NX');
+  }
+
+  /**
    * 原子分配 sequence 并写入事件
    *
-   * sequence 的「读最大值 + 1」与事件写入必须原子，否则并发写入（如投票节点 Promise.all 并行投票）会读到同一
-   * lastSequence、算出重复 sequence，撞 @@unique([gameId, sequence])。这里把两步放进同一事务，冲突时乐观重试。
+   * 使用 Redis INCR 原子递增生成 sequence，避免并发冲突和重试开销。
+   * 前提：Redis 需开持久化（AOF/RDB），sequence 计数器依赖 key 不因重启丢失；
+   * 若对局中途 Redis 重启导致计数器与 DB 失同步，下方 P2002 兜底会重建计数器后重试一次。
    */
   private async createEventWithSequence(
     gameId: string,
     data: Omit<Prisma.EventUncheckedCreateInput, 'gameId' | 'sequence'>,
   ): Promise<Event> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const event = await this.prisma.$transaction(async (tx) => {
-          const lastEvent = await tx.event.findFirst({
-            where: { gameId },
-            orderBy: { sequence: 'desc' },
-            select: { sequence: true },
-          });
+    const key = `game:${gameId}:event_seq`;
+    const sequence = await this.redis.incr(key);
 
-          const sequence = (lastEvent?.sequence || 0) + 1;
-
-          return tx.event.create({
-            data: { ...data, gameId, sequence },
-          });
-        });
-
-        return event;
-      } catch (error) {
-        if (!isUniqueConstraintViolation(error) || attempt >= MAX_SEQUENCE_RETRY) {
-          throw error;
-        }
+    try {
+      return await this.prisma.event.create({
+        data: { ...data, gameId, sequence },
+      });
+    } catch (error) {
+      // Redis 计数器与 DB 失同步（典型：对局中途 Redis 重启导致计数器归零）→ 撞 @@unique([gameId, sequence])。
+      // 从 DB 读最大 sequence 重建计数器后重试一次。事件溯源允许序列空洞，仅兜底唯一约束冲突。
+      if (!isUniqueConstraintViolation(error)) {
+        throw error;
       }
+      const lastEvent = await this.prisma.event.findFirst({
+        where: { gameId },
+        orderBy: { sequence: 'desc' },
+        select: { sequence: true },
+      });
+      await this.redis.set(key, lastEvent?.sequence || 0);
+      const nextSequence = await this.redis.incr(key);
+      return this.prisma.event.create({
+        data: { ...data, gameId, sequence: nextSequence },
+      });
     }
   }
 }

@@ -45,6 +45,7 @@ model Game {
   gameSummary       GameSummary?
   agentJudgments    AgentJudgment[]
   speechSummaries   SpeechSummary[]
+  decisionJudgments DecisionJudgment[]
 
   @@map("games")
 }
@@ -90,6 +91,7 @@ model Player {
   agent             Agent              @relation(fields: [agentId], references: [id]) // Agent 不可硬删（软删走 isActive），故不设 onDelete
   events            Event[]
   agentPerformances AgentPerformance[]
+  decisionJudgments DecisionJudgment[]
 
   @@unique([gameId, seatNo])
   @@unique([gameId, agentId]) // 同一 Agent 一局最多一个座位
@@ -126,6 +128,7 @@ model Event {
   actor      Player?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
   memories   Memory[]
   judgments  AgentJudgment[]
+  decisionJudgments DecisionJudgment[]
 
   @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
   @@map("events")
@@ -238,6 +241,31 @@ model GameSummary {
   game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
   @@map("game_summaries")
+}
+
+// 决策质量评估（LLM-as-judge），对可归属到单个玩家的关键决策（查验/用药/投票）打分。
+// 每个被评估的决策事件对应一行，@@unique(eventId) 保证同一决策只评估一次（幂等）。
+model DecisionJudgment {
+  id           String   @id @default(uuid()) @db.Uuid
+  gameId       String   @map("game_id") @db.Uuid
+  playerId     String   @map("player_id") @db.Uuid
+  eventId      String   @unique @map("event_id") @db.Uuid // 被评估的决策事件
+  actionType   String   @map("action_type") @db.VarChar(32) // seer_check/vote/witch_save/witch_poison
+  day          Int      @db.SmallInt
+  targetSeatNo Int?     @map("target_seat_no") @db.SmallInt
+  verdict      String   @db.VarChar(16) // good/fair/poor
+  score        Int      @db.SmallInt // 0-100
+  reasoning    String?  @db.Text
+  modelName    String   @map("model_name") @db.VarChar(64) // 评估所用 judge 模型
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  event  Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([gameId])
+  @@index([playerId, actionType])
+  @@map("decision_judgments")
 }
 
 // Agent 对发言的主观判断（个性化发言摘要）

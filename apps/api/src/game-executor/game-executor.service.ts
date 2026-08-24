@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import { AgentToolsFactory } from '../agent-runtime/tools/agent-tools.factory';
@@ -17,6 +17,8 @@ import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import { EventBusService } from '../event-bus/event-bus.service';
 import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
+import { SettlementService } from '../evaluation/settlement.service';
+import { JudgeQueueService } from '../evaluation/judge-queue.service';
 
 /**
  * 游戏执行服务
@@ -27,6 +29,7 @@ import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.
  */
 @Injectable()
 export class GameExecutorService {
+  private readonly logger = new Logger(GameExecutorService.name);
   private abortControllers = new Map<string, AbortController>(); // 存储每个游戏的 AbortController
 
   constructor(
@@ -39,6 +42,8 @@ export class GameExecutorService {
     private readonly nodeRegistrar: NodeRegistrar,
     private readonly eventBus: EventBusService,
     private readonly speechSummarizer: SpeechSummarizerService,
+    private readonly settlementService: SettlementService,
+    private readonly judgeQueueService: JudgeQueueService,
   ) {}
 
   /**
@@ -79,6 +84,9 @@ export class GameExecutorService {
       throw new Error(`ruleset ${game.ruleset.id} 不支持，请检查数据一致性`);
     }
 
+    // 初始化 Redis sequence 计数器（处理 Redis 重启或游戏恢复场景）
+    await this.eventWriter.initializeSequenceCounter(gameId);
+
     // 3. 创建游戏引擎
     const engine = new GameEngine(
       this.agentRuntime,
@@ -110,6 +118,17 @@ export class GameExecutorService {
           endedAt: new Date(),
         },
       });
+
+      // 7. 结算确定性指标 + 投递 LLM-as-judge 任务（失败不影响 FINISHED 落库，可手动补算/补评）
+      try {
+        await this.settlementService.settleGame(gameId);
+        const judged = await this.judgeQueueService.enqueueGame(gameId);
+        this.logger.log({ gameId, judged }, '已投递决策质量评估任务');
+      } catch (error) {
+        this.logger.error(
+          `结算/评估投递失败 gameId=${gameId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
 
       return finalState;
     } catch (error) {

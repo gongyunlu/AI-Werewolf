@@ -1,5 +1,7 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "extends": ["../../packages/oxlint-config/react.json"],
-  "rules": {}
+  "rules": {
+    "no-console": ["error", { "allow": ["warn", "error"] }]
+  }
 }

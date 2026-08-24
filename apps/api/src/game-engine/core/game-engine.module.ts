@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { GameEngine } from './game-engine';
 import { AgentRuntimeModule } from '@/agent-runtime/agent-runtime.module';
 import { PrismaModule } from '@/prisma/prisma.module';
-import { EventWriterService } from '../events/event-writer.service';
 import { EventBusModule } from '@/event-bus/event-bus.module';
 import { SseModule } from '@/sse/sse.module';
 import { SkillLoaderModule } from '@/skills/skill-loader.module';
@@ -20,6 +19,7 @@ import { SheriffDecideOrderNode } from '../nodes/day/sheriff-decide-order.node';
 import { PkSpeechNode } from '../nodes/day/pk-speech.node';
 import { PkVoteNode } from '../nodes/day/pk-vote.node';
 import { WolfExplodeNode } from '../nodes/day/wolf-explode.node';
+import { EventsModule } from '../events/events.module';
 
 /**
  * 游戏引擎模块
@@ -32,10 +32,10 @@ import { WolfExplodeNode } from '../nodes/day/wolf-explode.node';
     SseModule,
     SkillLoaderModule,
     SpeechSummarizerModule,
+    EventsModule,
   ],
   providers: [
     GameEngine,
-    EventWriterService,
     NodeRegistrar,
     WerewolfKillNode,
     WitchAntidoteNode,
@@ -50,6 +50,6 @@ import { WolfExplodeNode } from '../nodes/day/wolf-explode.node';
     PkVoteNode,
     WolfExplodeNode,
   ],
-  exports: [GameEngine, EventWriterService, NodeRegistrar],
+  exports: [GameEngine, NodeRegistrar],
 })
 export class GameEngineModule {}

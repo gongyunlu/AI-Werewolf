@@ -43,22 +43,40 @@ export function useGameStream(
     const es = apiClient.createSSEConnection(gameId, { lastSequence, perspective });
     esRef.current = es;
 
+    // 记录期望的下一个序列号
+    let expectedSequence = lastSequence;
+
     es.addEventListener('message', (e: MessageEvent) => {
       const msg = JSON.parse(e.data as string) as SseMessage;
       retryCount.current = 0;
+
+      // 跳过不带序列号的消息（connection.ready, game.finished）
+      const sequence = (msg as { sequence?: number }).sequence;
+
       if (msg.type === 'game.finished') {
         endedRef.current = true;
         es.close();
-      } else if (msg.type !== 'connection.ready') {
-        try {
-          sessionStorage.setItem(
-            `sse-seq-${gameId}`,
-            String((msg as { sequence?: number }).sequence ?? 0),
+      } else if (sequence !== undefined) {
+        // 检测漏帧：序列号跳号
+        if (sequence > expectedSequence + 1) {
+          console.warn(
+            `[SSE 漏帧检测] 期望 sequence=${expectedSequence + 1}, 实际收到 ${sequence}，缺失 ${sequence - expectedSequence - 1} 条消息，立即重连`,
           );
+          es.close();
+          // 立即重连，从最后正确的序列号开始（存入 retryTimerRef 以便 unmount 时清理）
+          retryTimerRef.current = setTimeout(() => connect(), 100);
+          return;
+        }
+        expectedSequence = sequence;
+
+        // 保存最新序列号
+        try {
+          sessionStorage.setItem(`sse-seq-${gameId}`, String(sequence));
         } catch {
           // 忽略写入失败，仅影响断线续传
         }
       }
+
       onMessage(msg);
     });
 

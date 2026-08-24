@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { GameExecutorService } from './game-executor.service';
 import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
 import { GameEngineModule } from '../game-engine/core/game-engine.module';
+import { EventsModule } from '../game-engine/events/events.module';
 import { SseModule } from '../sse/sse.module';
 import { EventBusModule } from '../event-bus/event-bus.module';
 import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.module';
+import { EvaluationModule } from '../evaluation/evaluation.module';
 
 /**
  * 游戏执行器模块
@@ -13,9 +15,11 @@ import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.m
   imports: [
     AgentRuntimeModule,
     GameEngineModule,
+    EventsModule,
     SseModule,
     EventBusModule,
     SpeechSummarizerModule,
+    EvaluationModule,
   ],
   providers: [GameExecutorService],
   exports: [GameExecutorService],
