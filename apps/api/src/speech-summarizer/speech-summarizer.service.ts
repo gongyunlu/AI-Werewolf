@@ -6,6 +6,9 @@ import { JsonOutputParser } from '@langchain/core/output_parsers';
 import { PrismaService } from '../prisma/prisma.service';
 import { ACTION_TYPES, VISIBILITY_TYPES, ROLES, SEER_CHECK_RESULTS } from '@ai-werewolf/shared';
 import { AgentJudgmentService, AgentJudgment } from '../agent-judgment/agent-judgment.service';
+import { PromptService } from '../observability/prompt.service';
+import { LangfuseService } from '../observability/langfuse.service';
+import { PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -83,6 +86,8 @@ export class SpeechSummarizerService {
     private readonly configService: ConfigService<Env, true>,
     private readonly prisma: PrismaService,
     private readonly agentJudgmentService: AgentJudgmentService,
+    private readonly promptService: PromptService,
+    private readonly langfuse: LangfuseService,
   ) {}
 
   /**
@@ -224,7 +229,7 @@ export class SpeechSummarizerService {
 
     if (groups.size === 0) return;
 
-    const summaries = await this.callLLMForSummaries(Array.from(groups.values()));
+    const summaries = await this.callLLMForSummaries(gameId, Array.from(groups.values()));
 
     for (const s of summaries) {
       await this.prisma.speechSummary.upsert({
@@ -280,6 +285,8 @@ export class SpeechSummarizerService {
         const privateInfo = await this.buildPrivateInfo({ gameId, id, seatNo, role });
 
         const { judgments } = await this.callLLMWithRolePerspective(
+          gameId,
+          id,
           newSpeeches,
           role,
           privateInfo,
@@ -348,6 +355,8 @@ export class SpeechSummarizerService {
    * 调用 LLM 生成个性化判断（注入角色视角）
    */
   private async callLLMWithRolePerspective(
+    gameId: string,
+    playerId: string,
     speeches: any[],
     role: string,
     privateInfo: PrivateInfo,
@@ -367,22 +376,34 @@ export class SpeechSummarizerService {
 
     const systemPrompt = this.loadSystemPromptTemplate(role, privateInfo);
 
-    const humanPrompt = `
-      ## 新增的发言（需要判断）\n
-      ${this.formatSpeeches(speeches, visiblePlayerSeats)}\n
-      ## 你的历史判断（最近2天，完整）\n
-      ${this.formatRecentJudgments(recentJudgments)}\n
-      ## 更早的判断（摘要）\n
-      ${this.formatOlderJudgments(olderJudgments)}\n
-      请输出 JSON 格式的分析结果。
-    `;
+    const humanPrompt = await this.promptService.render(PROMPT_NAMES.summarizerJudgmentHuman, {
+      speeches: this.formatSpeeches(speeches, visiblePlayerSeats),
+      recentJudgments: this.formatRecentJudgments(recentJudgments),
+      olderJudgments: this.formatOlderJudgments(olderJudgments),
+    });
 
-    const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt)];
+    const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt.text)];
 
+    const startAt = Date.now();
     try {
       const parser = new JsonOutputParser<any>();
       const chain = model.pipe(parser);
-      const parsed = await chain.invoke(messages);
+      const parsed = await chain.invoke(messages, {
+        ...this.langfuse.trace({
+          runName: 'summarizer-judgment',
+          gameId,
+          playerId,
+          modelName,
+          scenario: 'summarizer',
+          seatNo: privateInfo.seatNo,
+          role,
+          promptName: humanPrompt.name,
+          promptVersion: humanPrompt.version,
+        }),
+      });
+      this.logger.log(
+        `[逐玩家判断] ${role} ${modelName} 输入${humanPrompt.text.length}字 耗时${Date.now() - startAt}ms`,
+      );
 
       // 验证必要字段
       const judgments = Array.isArray(parsed.judgments) ? parsed.judgments : [];
@@ -418,6 +439,9 @@ export class SpeechSummarizerService {
     } catch (error) {
       // 分层错误处理
       const err = error as any; // TypeScript 类型断言
+      this.logger.warn(
+        `[逐玩家判断] ${role} ${modelName} 失败 耗时${Date.now() - startAt}ms 错误:${err?.name || err?.message || String(error)}`,
+      );
 
       // 1. LLM 服务故障 → Fail Fast（让队列重试）
       if (
@@ -442,27 +466,20 @@ export class SpeechSummarizerService {
    * 调用 LLM 生成全局发言摘要（中性，与玩家无关）
    */
   private async callLLMForSummaries(
+    gameId: string,
     groups: Array<{ day: number; seatNo: number; speeches: string[] }>,
   ): Promise<SpeechSummary[]> {
+    const modelName = this.configService.get('ARK_DEFAULT_MODEL');
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
-      model: this.configService.get('ARK_DEFAULT_MODEL'),
+      model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3,
       maxRetries: 2,
       timeout: 60000,
     });
 
-    const systemPrompt = `你是狼人杀对局的记录员。
-        请为每位玩家当天的发言生成客观摘要，一句话概括核心内容（30字以内），不带主观评价。
-
-        输出 JSON 格式：
-        {
-          "summaries": [
-            {"day": 1, "seatNo": 3, "summary": "自称预言家，查杀1号，号召投票"},
-            {"day": 1, "seatNo": 4, "summary": "对跳预言家，反查杀3号，保1号"}
-          ]
-      }`;
+    const systemPrompt = await this.promptService.render(PROMPT_NAMES.summarizerGlobalSummary);
 
     const speechesText = groups
       .map((g) => `Day ${g.day} - ${g.seatNo}号位：${g.speeches.join('；').substring(0, 200)}...`)
@@ -470,16 +487,30 @@ export class SpeechSummarizerService {
 
     const humanPrompt = `请为以下发言生成摘要：\n\n${speechesText}`;
 
-    const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt)];
+    const messages = [new SystemMessage(systemPrompt.text), new HumanMessage(humanPrompt)];
 
+    const startAt = Date.now();
     try {
       const parser = new JsonOutputParser<{ summaries: SpeechSummary[] }>();
       const chain = model.pipe(parser);
-      const parsed = await chain.invoke(messages);
+      const parsed = await chain.invoke(messages, {
+        ...this.langfuse.trace({
+          runName: 'summarizer-global-summary',
+          gameId,
+          playerId: gameId, // 全局摘要不绑定单个玩家，以 gameId 兜底
+          modelName,
+          scenario: 'summarizer',
+          promptName: systemPrompt.name,
+          promptVersion: systemPrompt.version,
+        }),
+      });
+      this.logger.log(
+        `[全局发言摘要] ${groups.length}条 输入${humanPrompt.length}字 耗时${Date.now() - startAt}ms`,
+      );
       return parsed.summaries || [];
     } catch (error) {
       this.logger.warn(
-        `[全局发言摘要] LLM 调用失败: ${error instanceof Error ? error.message : String(error)}`,
+        `[全局发言摘要] 失败 耗时${Date.now() - startAt}ms: ${error instanceof Error ? error.message : String(error)}`,
       );
       // 降级：返回简单摘要
       return groups.map((g) => ({

@@ -9,6 +9,8 @@ import { MemoryService, type ActiveMemory } from '../memory/memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
+import { PromptService } from '../observability/prompt.service';
+import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { PostgresChatMessageHistory } from '@langchain/community/stores/message/postgres';
 import type { Env } from '../config/env.validation';
 import { Prisma } from '../generated/prisma/client';
@@ -20,8 +22,23 @@ import {
   FACTIONS,
   ROLES,
   SEER_CHECK_RESULTS,
+  VISIBILITY_TYPES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
+
+/**
+ * 需走 functionCalling 的模型名前缀。
+ *
+ * GLM 系列不支持 response_format: json_schema（只支持 json_object），
+ * 只能通过 tool call 结构化；其余（deepseek/doubao/kimi）默认 jsonSchema。
+ */
+const FUNCTION_CALLING_MODEL_PREFIXES = ['glm'] as const;
+
+function resolveStructuredOutputMethod(modelName: string): 'functionCalling' | 'jsonSchema' {
+  return FUNCTION_CALLING_MODEL_PREFIXES.some((prefix) => modelName.startsWith(prefix))
+    ? 'functionCalling'
+    : 'jsonSchema';
+}
 
 type PlayerWithGame = Prisma.PlayerGetPayload<{
   include: { game: true };
@@ -29,10 +46,6 @@ type PlayerWithGame = Prisma.PlayerGetPayload<{
 
 type EventRecord = Prisma.EventGetPayload<Record<string, never>>;
 type Event = EventRecord;
-
-/**
- * Agent 输入
- */
 
 /**
  * 分层上下文
@@ -75,6 +88,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly langfuse: LangfuseService,
+    private readonly promptService: PromptService,
   ) {}
 
   /**
@@ -125,6 +139,9 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
+    // 渲染推理指令 prompt，版本关联到本次 trace
+    const humanPrompt = await this.promptService.render(PROMPT_NAMES.agentReasoning);
+
     const trace = this.langfuse.trace({
       runName: 'reasoning',
       gameId: context.player.gameId,
@@ -133,14 +150,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       scenario: context.scenario,
       seatNo: context.player.seatNo,
       role: context.player.role,
+      promptName: humanPrompt.name,
+      promptVersion: humanPrompt.version,
     });
 
-    // 加载会话历史
     const history = await this.loadHistory(threadId);
 
-    const humanMessage = new HumanMessage(
-      '你已明确自己的身份、阵营与队友（见系统提示）。请直接基于当前局势进行推理，输出你的下一步判断与理由，不要重复介绍身份或队友。',
-    );
+    const humanMessage = new HumanMessage(humanPrompt.text);
     const messages: BaseMessage[] = [
       new SystemMessage(context.systemPrompt),
       ...history,
@@ -265,14 +281,20 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       seatNo: context.player.seatNo,
       role: context.player.role,
     };
-    const thinkingTrace = this.langfuse.trace({ runName: 'speech-thinking', ...traceParams });
-
     const history = await this.loadHistory(threadId);
 
-    const thinkingPrompt = new HumanMessage(
-      '你已明确自己的身份、阵营与队友（见系统提示）。请直接分析当前局势，输出你的思考过程，不要重复介绍身份或队友，不要任何前缀标记或 JSON。',
-    );
-    const thinkingMessages = [new SystemMessage(context.systemPrompt), ...history, thinkingPrompt];
+    const thinkingPrompt = await this.promptService.render(PROMPT_NAMES.agentSpeechThinking);
+    const thinkingTrace = this.langfuse.trace({
+      runName: 'speech-thinking',
+      ...traceParams,
+      promptName: thinkingPrompt.name,
+      promptVersion: thinkingPrompt.version,
+    });
+    const thinkingMessages = [
+      new SystemMessage(context.systemPrompt),
+      ...history,
+      new HumanMessage(thinkingPrompt.text),
+    ];
 
     // 阶段1：流式输出思考
     const thinking = await this.streamPlainChat(
@@ -284,12 +306,19 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     );
 
     const contentStartTime = Date.now();
-    const contentPrompt = new HumanMessage(
-      `你的思考过程如下：\n\n${thinking}\n\n请基于以上思考，输出你的发言内容。直接输出发言正文，不要重复自我介绍，不要任何前缀、标题、JSON 或额外解释。`,
-    );
-    const contentMessages = [new SystemMessage(context.systemPrompt), contentPrompt];
-
-    const contentTrace = this.langfuse.trace({ runName: 'speech-content', ...traceParams });
+    const contentPrompt = await this.promptService.render(PROMPT_NAMES.agentSpeechContent, {
+      thinking,
+    });
+    const contentTrace = this.langfuse.trace({
+      runName: 'speech-content',
+      ...traceParams,
+      promptName: contentPrompt.name,
+      promptVersion: contentPrompt.version,
+    });
+    const contentMessages = [
+      new SystemMessage(context.systemPrompt),
+      new HumanMessage(contentPrompt.text),
+    ];
 
     // 阶段2：流式输出发言正文
     const content = await this.streamPlainChat(
@@ -333,6 +362,20 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       streaming: false,
     });
 
+    // GLM 系列不支持 json_schema，须走 functionCalling；其余默认 jsonSchema（见 resolveStructuredOutputMethod）
+    const model = baseModel.withStructuredOutput(zodSchema, {
+      method: resolveStructuredOutputMethod(modelName),
+    });
+
+    const [systemPrompt, userPrompt] = await Promise.all([
+      this.promptService.render(PROMPT_NAMES.agentDecisionSystem, {
+        systemPrompt: context.systemPrompt,
+      }),
+      this.promptService.render(PROMPT_NAMES.agentDecisionUser, {
+        reasoning,
+      }),
+    ]);
+
     const trace = this.langfuse.trace({
       runName: 'decision',
       gameId: context.player.gameId,
@@ -341,50 +384,42 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       scenario: context.scenario,
       seatNo: context.player.seatNo,
       role: context.player.role,
+      promptName: userPrompt.name,
+      promptVersion: userPrompt.version,
     });
 
-    const jsonSchema = z.toJSONSchema(zodSchema);
-    const model = baseModel.withStructuredOutput(jsonSchema, { method: 'jsonMode' });
-
     const baseMessages: BaseMessage[] = [
-      new SystemMessage(
-        `${context.systemPrompt}\n\n## 决策任务\n请基于以上身份与规则，将 HumanMessage 中的推理过程严格转换为结构化输出，不要修改或优化推理结论。`,
-      ),
-      new HumanMessage(
-        `推理过程：\n\n${reasoning}\n\n请严格按照以下 JSON Schema 输出决策，只输出 JSON，不要包含任何其他内容：\n${JSON.stringify(jsonSchema)}`,
-      ),
+      new SystemMessage(systemPrompt.text),
+      new HumanMessage(userPrompt.text),
     ];
 
-    // 首次调用 + Zod 硬校验
-    let decision: unknown = await model.invoke(baseMessages, { signal, ...trace });
-    const firstParse = zodSchema.safeParse(decision);
-
-    // 校验失败：单次重试，把失败输出与错误原因反馈给模型
-    if (!firstParse.success) {
-      const issues = firstParse.error.issues.map((i) => i.message).join('；');
-      this.logger.warn(`[决策校验] ${modelName} 输出未通过 Zod 校验，触发单次重试: ${issues}`);
-      const retryMessages: BaseMessage[] = [
-        ...baseMessages,
-        new AIMessage(JSON.stringify(decision)),
-        new HumanMessage(
-          `你的输出未通过校验：${issues}\n请修正后重新输出，只输出符合 Schema 的 JSON。`,
-        ),
-      ];
-      decision = zodSchema.parse(
-        await model.invoke(retryMessages, {
-          signal,
-          ...this.langfuse.trace({
-            runName: 'decision-retry',
-            gameId: context.player.gameId,
-            playerId: context.player.id,
-            modelName,
-            scenario: context.scenario,
-            seatNo: context.player.seatNo,
-            role: context.player.role,
-          }),
-        }),
+    // function calling 模式下，模型不调用工具会抛异常（而非返回非法对象），
+    // 单次重试兜底，仍失败则抛给上层降级处理。
+    let decision: unknown;
+    try {
+      decision = await model.invoke(baseMessages, { signal, ...trace });
+    } catch (error) {
+      this.logger.warn(
+        `[决策] ${modelName} 结构化输出失败，触发单次重试: ${error instanceof Error ? error.message : String(error)}`,
       );
+      decision = await model.invoke(baseMessages, {
+        signal,
+        ...this.langfuse.trace({
+          runName: 'decision-retry',
+          gameId: context.player.gameId,
+          playerId: context.player.id,
+          modelName,
+          scenario: context.scenario,
+          seatNo: context.player.seatNo,
+          role: context.player.role,
+          promptName: userPrompt.name,
+          promptVersion: userPrompt.version,
+        }),
+      });
     }
+
+    // Zod 兜底校验：结构已由 structured output 层保证，此处仅做字段级校验
+    decision = zodSchema.parse(decision);
 
     // 保存决策结论到跨轮记忆（只存结论，不存推理过程）
     if (threadId) {
@@ -491,6 +526,12 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    // 投票是并发同时执行：决策时点不应看到本轮其他人的投票，避免视角泄漏
+    if (scenario === AGENT_SCENARIOS.VOTE) {
+      const voteDay = await this.getCurrentRound(gameId, events);
+      events = events.filter((e) => !(e.actionType === ACTION_TYPES.VOTE && e.day === voteDay));
+    }
+
     // 3. 查询 Memory
     const memories = await this.memoryService.retrieveActiveMemories(
       player.agentId,
@@ -528,13 +569,21 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     speechSummary = this.formatPersonalSummary(personalSummary);
 
+    // 狼人白天发言：注入夜间商量原文（仅狼队可见，保密标注）
+    const wolfDiscussionContext =
+      scenario === AGENT_SCENARIOS.DAY_SPEECH && player.role === ROLES.WEREWOLF
+        ? this.buildWolfDiscussionContext(events, currentDay)
+        : '';
+
     // 6. 组装 System Prompt
     const systemPrompt = await this.assembleSystemPrompt({
       scenario,
       player,
       memories,
       context: layeredContext,
-      additionalContext: [speechSummary, additionalContext].filter(Boolean).join('\n\n'),
+      additionalContext: [speechSummary, wolfDiscussionContext, additionalContext]
+        .filter(Boolean)
+        .join('\n\n'),
     });
 
     return {
@@ -651,6 +700,37 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 狼人白天发言：提取夜间商量原文，附带保密标注
+   *
+   * 夜间商量内容仅狼队可见（好人是不知道的）。白天发言时狼人需要据此安排战术，
+   * 但绝不能直接说出"我们昨晚商量/刀了X"这类暴露狼队身份的话，故加标注提醒。
+   */
+  private buildWolfDiscussionContext(events: Event[], currentDay: number): string {
+    const wolfSpeeches = events.filter(
+      (e) =>
+        e.visibility === VISIBILITY_TYPES.WOLF &&
+        e.actionType === ACTION_TYPES.SPEECH &&
+        e.day === currentDay,
+    );
+
+    if (wolfSpeeches.length === 0) {
+      return '';
+    }
+
+    const lines = wolfSpeeches.map((e) => {
+      const content = e.content as any;
+      return `- ${content.seatNo}号位：${content.speech}`;
+    });
+
+    return `
+      ## 你们狼队昨晚的夜间商量（机密，仅狼队可见）
+      ${lines.join('\n')}
+
+      注意：以上是你们狼队夜间私下商量的内容，好人是不知道的。白天发言时你可以据此安排战术（谁悍跳、谁冲锋、谁倒钩），但绝不能直接说出"我们昨晚商量/刀了X"这类暴露狼队身份的话。
+    `.trim();
+  }
+
+  /**
    * 步骤 1.2: Assemble System Prompt（组装 System Prompt）
    *
    * 渐进式披露架构：
@@ -688,6 +768,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     // 基础规则
     const rulesSkill = await this.skillLoader.loadSkill('core/basic-rules', skillVersion);
     const basicRules = rulesSkill?.content || '';
+
+    // 当前板子规则（按 rulesetId 加载，例如 rulesets/standard6p）
+    const rulesetSkill = await this.skillLoader.loadSkill(
+      `rulesets/${player.game.rulesetId}`,
+      skillVersion,
+    );
+    const rulesetRules = rulesetSkill?.content || '';
 
     // 场景指令（根据当前 scenario 加载）
     const scenarioMap: Record<AgentScenario, string> = {
@@ -756,43 +843,26 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // 组合完整 System Prompt（渐进式披露）
-    const fullPrompt = `
-      请使用中文进行思考和推理。所有输出（包括推理过程）必须使用中文。
+    // 组合完整 System Prompt（渐进式披露），骨架模板走 PromptService 便于在线调整
+    const fullPrompt = await this.promptService.render(PROMPT_NAMES.agentSystemPrompt, {
+      constraints,
+      roleView,
+      teammateInfo,
+      scenarioPrompt,
+      additionalContext: additionalContext ? `\n${additionalContext}\n` : '',
+      coreFramework,
+      basicRules,
+      rulesetRules,
+      skillCatalog,
+      persona: personaMemory?.content || '暂无',
+      strategy: strategyMemory?.content || '暂无',
+      roleSpecificInfo,
+      critical: context.critical,
+      recent: context.recent,
+      history: context.history,
+    });
 
-      ${constraints}
-      ${roleView}
-      ${teammateInfo}
-      ${scenarioPrompt}
-      ${additionalContext ? `\n${additionalContext}\n` : ''}
-
-      ## 核心决策框架
-      ${coreFramework}
-
-      ## 狼人杀基础规则
-      ${basicRules}
-
-      ## 可用技能目录
-      ${skillCatalog}
-
-      ## 你的人设
-      ${personaMemory?.content || '暂无'}
-
-      ## 你的策略
-      ${strategyMemory?.content || '暂无'}
-      ${roleSpecificInfo}
-
-      ## 关键信息
-      ${context.critical}
-
-      ## 最近一轮详细
-      ${context.recent}
-
-      ## 历史摘要
-      ${context.history}
-    `.trim();
-
-    return fullPrompt;
+    return fullPrompt.text;
   }
 
   /**

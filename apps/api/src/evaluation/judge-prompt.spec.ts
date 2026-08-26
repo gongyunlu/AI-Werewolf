@@ -146,4 +146,30 @@ describe('buildJudgePrompt 视角还原', () => {
     // 最早 5 条（voterSeatNo 1..5）被截断，可见信息从 voterSeatNo 6 开始
     expect(user).toContain('【决策时点可见信息】\n6号位投票给 2号位');
   });
+
+  it('评估投票决策时排除同轮（同 day）其他投票，避免视角泄漏', () => {
+    const events: JudgeEventInput[] = [
+      // 同 day（decision.day=2）的投票 —— 应被排除
+      ev({
+        sequence: 10,
+        actionType: ACTION_TYPES.VOTE,
+        actorId: 'p1',
+        content: { voterSeatNo: 1, targetSeatNo: 2 },
+        day: 2,
+      }),
+      // 前一 day 的投票 —— 应保留
+      ev({
+        sequence: 20,
+        actionType: ACTION_TYPES.VOTE,
+        actorId: 'p3',
+        content: { voterSeatNo: 3, targetSeatNo: 4 },
+        day: 1,
+      }),
+    ];
+
+    const { user } = buildJudgePrompt({ ...baseInput, events });
+
+    expect(user).not.toContain('1号位投票给 2号位'); // 同 day 被排除
+    expect(user).toContain('3号位投票给 4号位'); // 不同 day 保留
+  });
 });

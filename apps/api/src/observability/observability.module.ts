@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { LangfuseService } from './langfuse.service';
+import { PromptService } from './prompt.service';
 import type { Env } from '../config/env.validation';
 
 /**
@@ -50,7 +51,7 @@ import type { Env } from '../config/env.validation';
       }),
     }),
   ],
-  providers: [LangfuseService],
-  exports: [LangfuseService],
+  providers: [LangfuseService, PromptService],
+  exports: [LangfuseService, PromptService],
 })
 export class ObservabilityModule {}

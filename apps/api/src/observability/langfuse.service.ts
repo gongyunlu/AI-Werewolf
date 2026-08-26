@@ -65,8 +65,20 @@ export class LangfuseService implements OnModuleDestroy {
     scenario?: string;
     seatNo?: number | null;
     role?: string | null;
+    promptName?: string;
+    promptVersion?: number | null;
   }): TraceConfig {
-    const { runName, gameId, playerId, modelName, scenario, seatNo, role } = params;
+    const {
+      runName,
+      gameId,
+      playerId,
+      modelName,
+      scenario,
+      seatNo,
+      role,
+      promptName,
+      promptVersion,
+    } = params;
 
     return {
       callbacks: this.handler ? [this.handler] : [],
@@ -79,6 +91,8 @@ export class LangfuseService implements OnModuleDestroy {
         ...(scenario ? { scenario } : {}),
         ...(seatNo === null || seatNo === undefined ? {} : { seatNo }),
         ...(role ? { role } : {}),
+        ...(promptName ? { promptName } : {}),
+        ...(promptVersion === null || promptVersion === undefined ? {} : { promptVersion }),
       },
       tags: [runName, modelName, ...(scenario ? [scenario] : [])],
       runName,

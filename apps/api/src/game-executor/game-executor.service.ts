@@ -19,6 +19,8 @@ import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { SettlementService } from '../evaluation/settlement.service';
 import { JudgeQueueService } from '../evaluation/judge-queue.service';
+import { LangfuseService } from '../observability/langfuse.service';
+import { PromptService } from '../observability/prompt.service';
 
 /**
  * 游戏执行服务
@@ -44,6 +46,8 @@ export class GameExecutorService {
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly settlementService: SettlementService,
     private readonly judgeQueueService: JudgeQueueService,
+    private readonly langfuse: LangfuseService,
+    private readonly promptService: PromptService,
   ) {}
 
   /**
@@ -98,6 +102,8 @@ export class GameExecutorService {
       this.eventBus,
       this.configService,
       this.speechSummarizer,
+      this.langfuse,
+      this.promptService,
     );
 
     // 4. 创建 AbortController（用于中断游戏）

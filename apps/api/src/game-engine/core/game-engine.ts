@@ -16,6 +16,8 @@ import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { gameLogger } from '../utils/game-logger';
 import { NodeRegistrar } from '../nodes/node-registrar.service';
 import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.service';
+import { LangfuseService } from '@/observability/langfuse.service';
+import { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
 
 /**
@@ -44,6 +46,8 @@ export class GameEngine {
     private readonly eventBus: EventBusService,
     private readonly configService: ConfigService<Env, true>,
     private readonly speechSummarizer: SpeechSummarizerService,
+    private readonly langfuse: LangfuseService,
+    private readonly promptService: PromptService,
   ) {
     this.nodeContext = {
       agentRuntime,
@@ -53,6 +57,8 @@ export class GameEngine {
       broadcaster,
       eventBus,
       configService,
+      langfuse,
+      promptService,
     };
   }
 

@@ -7,6 +7,8 @@ import type { EventWriterService } from '../events/event-writer.service';
 import type { GamePreset } from '../presets/game-presets';
 import type { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
 import type { EventBusService } from '@/event-bus/event-bus.service';
+import type { LangfuseService } from '@/observability/langfuse.service';
+import type { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
 
 /**
@@ -28,6 +30,8 @@ export interface NodeContext {
   pauseCheckWrapper?: (node: GameNode) => GameNode; // 暂停检查包装器（由 GameEngine 注入到每局上下文）
   broadcaster?: SseBroadcasterService;
   eventBus?: EventBusService;
+  langfuse: LangfuseService;
+  promptService: PromptService;
 }
 
 /**

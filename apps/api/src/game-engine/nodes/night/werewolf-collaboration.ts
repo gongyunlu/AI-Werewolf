@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { GameGraphState, PlayerState } from '../../core/types';
 import type { NodeContext } from '../node.types';
 import { getWolfTeamThreadId } from '@/agent-runtime/thread-id.utils';
+import { PROMPT_NAMES } from '@/observability/prompt-templates';
 import { gameLogger } from '../../utils/game-logger';
 
 /**
@@ -103,7 +104,7 @@ export async function singleWolfDecision(
 async function shouldContinueDiscussion(
   discussionHistory: DiscussionMessage[],
   context: NodeContext,
-  _state: GameGraphState,
+  state: GameGraphState,
   currentRound: number,
   maxRounds: number,
 ): Promise<boolean> {
@@ -121,33 +122,31 @@ async function shouldContinueDiscussion(
 
   const summary = discussionHistory.map((msg) => `${msg.seatNo}号位: ${msg.content}`).join('\n');
 
-  const prompt = `
-你是狼人杀游戏的协调者。请分析以下狼人讨论内容，判断他们是否已经达成共识，可以进入投票环节。
-
-讨论内容：
-${summary}
-
-判断标准：
-1. 所有狼人都明确表达了同意刀某个目标（例如"同意刀3号位"、"就刀3号位"）
-2. 没有明显的分歧或争议
-3. 讨论已经收敛到一个具体的行动方案
-
-如果所有狼人都明确同意了一个目标，回答 NO（不需要继续讨论）。
-如果还有分歧或没有达成一致，回答 YES（需要继续讨论）。
-
-只输出 YES 或 NO，不要解释。
-  `.trim();
-
   try {
+    const coordinationPrompt = await context.promptService.render(PROMPT_NAMES.wolfCoordination, {
+      discussion: summary,
+    });
+
     const { ChatOpenAI } = await import('@langchain/openai');
+    const modelName = context.configService.get('ARK_DEFAULT_MODEL', { infer: true });
     const model = new ChatOpenAI({
       apiKey: context.configService.get('ARK_API_KEY', { infer: true }),
-      model: context.configService.get('ARK_DEFAULT_MODEL', { infer: true }),
+      model: modelName,
       configuration: { baseURL: context.configService.get('ARK_BASE_URL', { infer: true }) },
       temperature: 0,
     });
 
-    const response = await model.invoke(prompt);
+    const response = await model.invoke(coordinationPrompt.text, {
+      ...context.langfuse.trace({
+        runName: 'wolf-coordination',
+        gameId: state.gameId,
+        playerId: state.gameId, // 协调判断不绑定单个玩家，以 gameId 兜底
+        modelName,
+        scenario: 'night_action',
+        promptName: coordinationPrompt.name,
+        promptVersion: coordinationPrompt.version,
+      }),
+    });
     const decision = response.content.toString().trim().toUpperCase();
 
     return decision === 'YES';

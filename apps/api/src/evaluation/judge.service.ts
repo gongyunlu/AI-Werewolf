@@ -6,10 +6,12 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { LangfuseService } from '../observability/langfuse.service';
+import { PromptService } from '../observability/prompt.service';
+import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { ACTION_TYPES, FACTIONS } from '@ai-werewolf/shared';
 import type { Env } from '../config/env.validation';
 import { JudgeOutputSchema, type JudgeOutput } from './judge-schema';
-import { buildJudgePrompt, type JudgeEventInput } from './judge-prompt';
+import { buildJudgePromptVariables, type JudgeEventInput } from './judge-prompt';
 
 /** 可评估的决策事件：查验/用药/投票（saved/used=false 的「不用药」不算决策） */
 export function isJudgeableAction(actionType: string, content: Record<string, unknown>): boolean {
@@ -31,7 +33,6 @@ export function isJudgeableAction(actionType: string, content: Record<string, un
  * LLM-as-judge 决策质量评估服务。
  *
  * 对单个决策事件做「决策时点视角还原」，调用 judge 模型打分并落 DecisionJudgment。
- * 幂等：upsert where eventId（@@unique），重复评估覆盖写不产生重复行。
  */
 @Injectable()
 export class JudgeService {
@@ -41,6 +42,7 @@ export class JudgeService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService<Env, true>,
     private readonly langfuse: LangfuseService,
+    private readonly promptService: PromptService,
   ) {}
 
   /** 找出对局内所有可评估的决策事件 id */
@@ -105,7 +107,7 @@ export class JudgeService {
       teammates = wolves.map((w) => w.seatNo).filter((s): s is number => s !== null);
     }
 
-    // 只取决策时点之前的事件：buildJudgePrompt 内部本就按 sequence < decision.sequence 过滤，
+    // 只取决策时点之前的事件：buildJudgePromptVariables 内部本就按 sequence < decision.sequence 过滤，
     // 决策之后的事件对评估无意义，SQL 层下推减少返回行数
     const allEvents = await this.prisma.event.findMany({
       where: { gameId, sequence: { lt: event.sequence } },
@@ -129,7 +131,7 @@ export class JudgeService {
       content: (e.content as Record<string, unknown>) ?? {},
     }));
 
-    const { system, user } = buildJudgePrompt({
+    const variables = buildJudgePromptVariables({
       playerId: player.id,
       playerSeatNo: player.seatNo,
       playerRole: player.role ?? '',
@@ -146,13 +148,20 @@ export class JudgeService {
       events: judgeEvents,
     });
 
+    const [systemPrompt, userPrompt] = await Promise.all([
+      this.promptService.render(PROMPT_NAMES.judgeSystem),
+      this.promptService.render(PROMPT_NAMES.judgeUser, variables),
+    ]);
+
     const { verdict, score, reasoning, modelName } = await this.invokeJudge(
-      system,
-      user,
+      systemPrompt.text,
+      userPrompt.text,
       gameId,
       player.id,
       player.seatNo,
       player.role,
+      userPrompt.name,
+      userPrompt.version,
     );
 
     await this.prisma.decisionJudgment.upsert({
@@ -186,6 +195,8 @@ export class JudgeService {
     playerId: string,
     seatNo: number | null,
     role: string | null,
+    promptName: string,
+    promptVersion: number | null,
   ): Promise<JudgeOutput & { modelName: string }> {
     const modelName =
       this.configService.get('JUDGE_MODEL') ?? this.configService.get('ARK_DEFAULT_MODEL');
@@ -215,6 +226,8 @@ export class JudgeService {
         scenario: 'judge',
         seatNo,
         role,
+        promptName,
+        promptVersion,
       }),
     });
 
@@ -239,6 +252,8 @@ export class JudgeService {
             scenario: 'judge',
             seatNo,
             role,
+            promptName,
+            promptVersion,
           }),
         }),
       );

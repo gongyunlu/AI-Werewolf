@@ -1,5 +1,10 @@
 import { ACTION_TYPES, SEER_CHECK_RESULTS } from '@ai-werewolf/shared';
 import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
+import {
+  FALLBACK_TEMPLATES,
+  PROMPT_NAMES,
+  renderTemplate,
+} from '../observability/prompt-templates';
 
 /** 事件输入（judge-prompt 只消费渲染所需字段，不依赖 Prisma 类型） */
 export interface JudgeEventInput {
@@ -97,7 +102,20 @@ function renderDecision(d: JudgeDecisionInput): string {
  *
  * 只包含决策时点之前该角色可见的事件，避免引入上帝视角信息
  */
-export function buildJudgePrompt(input: JudgePromptInput): { system: string; user: string } {
+/** judge prompt 的渲染变量（纯计算，与模板文本解耦） */
+export type JudgePromptVariables = {
+  identity: string;
+  contextLines: string;
+  decisionText: string;
+  thinking: string;
+};
+
+/**
+ * 计算 judge prompt 的渲染变量（视角还原 + 事件渲染 + 决策描述）。
+ *
+ * 与模板文本解耦：变量计算保持纯函数可单测，模板渲染由调用方走 PromptService。
+ */
+export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptVariables {
   const {
     playerId,
     playerSeatNo,
@@ -124,7 +142,19 @@ export function buildJudgePrompt(input: JudgePromptInput): { system: string; use
   });
 
   const contextLines = events
-    .filter((e) => e.sequence < decision.sequence && visible.includes(e.visibility))
+    .filter((e) => {
+      if (e.sequence >= decision.sequence) return false;
+      if (!visible.includes(e.visibility)) return false;
+      // 投票是并发「同时举票」：评估投票决策时排除同轮（同 day）其他投票，避免视角泄漏假象
+      if (
+        decision.actionType === ACTION_TYPES.VOTE &&
+        e.actionType === ACTION_TYPES.VOTE &&
+        e.day === decision.day
+      ) {
+        return false;
+      }
+      return true;
+    })
     .toSorted((a, b) => a.sequence - b.sequence)
     .slice(-20) // 只保留最近 20 条，防 prompt 爆炸
     .map(renderEventLine)
@@ -135,16 +165,21 @@ export function buildJudgePrompt(input: JudgePromptInput): { system: string; use
     `座位号 ${playerSeatNo ?? '?'}、角色 ${roleLabel}（${playerFaction}）` +
     (teammates.length > 0 ? `、队友座位号 [${teammates.join(', ')}]` : '');
 
-  const system =
-    '你是一名狼人杀决策质量评估员。请站在玩家做出决策的那一刻、仅凭其当时可见的有限信息，' +
-    '评估该决策是否合理（而非事后以上帝视角倒推）。' +
-    '综合考虑信息利用率、目标选择合理性、与阵营目标的契合度，给出三档结论与 0-100 分。';
+  return {
+    identity,
+    contextLines: contextLines.length > 0 ? contextLines.join('\n') : '（无可见信息）',
+    decisionText: renderDecision(decision),
+    thinking: decision.thinking ? `玩家当时的思考过程：${decision.thinking}` : '',
+  };
+}
 
-  const user =
-    `【玩家身份】\n${identity}\n\n` +
-    `【决策时点可见信息】\n${contextLines.length > 0 ? contextLines.join('\n') : '（无可见信息）'}\n\n` +
-    `【待评估决策】\n${renderDecision(decision)}` +
-    (decision.thinking ? `\n玩家当时的思考过程：${decision.thinking}` : '');
-
-  return { system, user };
+/**
+ * 构造 judge prompt
+ */
+export function buildJudgePrompt(input: JudgePromptInput): { system: string; user: string } {
+  const variables = buildJudgePromptVariables(input);
+  return {
+    system: renderTemplate(FALLBACK_TEMPLATES[PROMPT_NAMES.judgeSystem]),
+    user: renderTemplate(FALLBACK_TEMPLATES[PROMPT_NAMES.judgeUser], variables),
+  };
 }
