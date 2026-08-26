@@ -733,15 +733,13 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
   /**
    * 步骤 1.2: Assemble System Prompt（组装 System Prompt）
    *
-   * 渐进式披露架构：
-   * - Prompts: 基础行为约束 + 场景指令
-   * - Skills Layer 0: 核心决策框架（永远加载）
-   * - Skills Layer 1: 狼人杀规则（根据板子加载）
-   * - Skills Layer 2: 角色技能（根据身份加载）
-   * - Skills Layer 3: 战术（根据场景按需加载）
-   * - 人设 + 策略
-   * - 角色特定历史
-   * - 分层上下文
+   * 组装结构（骨架走 PromptService 模板，动态内容按变量注入）：
+   * - 行为约束 / 核心决策框架 / 基础规则：内联在模板正文
+   * - 板子规则：按 rulesetId 加载（rulesets/standard6p）
+   * - 场景指令：按 scenario 加载（scenarios/day-speech 等）
+   * - 角色玩法：按 player.role 加载（roles/werewolf 等）
+   * - 人设 + 策略：从 memories 提取
+   * - 角色特定历史（预言家查验记录）+ 分层上下文
    */
   private async assembleSystemPrompt(options: {
     scenario: AgentScenario;
@@ -754,20 +752,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     // 获取游戏的技能版本
     const skillVersion = player.game.skillVersion || 'v1';
-
-    // ===== Layer 0: 永远加载的核心内容 =====
-
-    // 行为约束
-    const constraintsSkill = await this.skillLoader.loadSkill('core/constraints', skillVersion);
-    const constraints = constraintsSkill?.content || '';
-
-    // 核心决策框架
-    const frameworkSkill = await this.skillLoader.loadSkill('core/framework', skillVersion);
-    const coreFramework = frameworkSkill?.content || '';
-
-    // 基础规则
-    const rulesSkill = await this.skillLoader.loadSkill('core/basic-rules', skillVersion);
-    const basicRules = rulesSkill?.content || '';
 
     // 当前板子规则（按 rulesetId 加载，例如 rulesets/standard6p）
     const rulesetSkill = await this.skillLoader.loadSkill(
@@ -787,6 +771,10 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const scenarioSkillId = scenarioMap[scenario];
     const scenarioSkill = await this.skillLoader.loadSkill(scenarioSkillId, skillVersion);
     const scenarioPrompt = scenarioSkill?.content || '';
+
+    // 角色玩法正文（按 player.role 条件加载，例如 roles/werewolf）
+    const roleSkill = await this.skillLoader.loadSkill(`roles/${player.role}`, skillVersion);
+    const roleSkillContent = roleSkill?.content || '';
 
     // 基础角色信息（只告诉玩家自己的身份）
     const roleView = `
@@ -815,19 +803,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // ===== Layer 1+: 构建可按需加载的技能目录 =====
-
-    // 构建 LoadContext 用于过滤技能目录
-    const loadContext = {
-      role: player.role,
-      faction: player.faction,
-      ruleset: player.game.rulesetId,
-      scenario,
-    };
-
-    // 生成可按需加载的技能目录（Layer 1+）
-    const skillCatalog = this.skillLoader.getCatalogMarkdown(loadContext);
-
     // 提取人设和策略记忆
     const personaMemory = memories.find((m) => m.type === 'persona');
     const strategyMemory = memories.find((m) => m.type === 'strategy');
@@ -845,15 +820,12 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
 
     // 组合完整 System Prompt（渐进式披露），骨架模板走 PromptService 便于在线调整
     const fullPrompt = await this.promptService.render(PROMPT_NAMES.agentSystemPrompt, {
-      constraints,
       roleView,
       teammateInfo,
       scenarioPrompt,
+      roleSkill: roleSkillContent,
       additionalContext: additionalContext ? `\n${additionalContext}\n` : '',
-      coreFramework,
-      basicRules,
       rulesetRules,
-      skillCatalog,
       persona: personaMemory?.content || '暂无',
       strategy: strategyMemory?.content || '暂无',
       roleSpecificInfo,
@@ -958,61 +930,6 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     }
     const days = events.map((e) => e.day).filter((d): d is number => d !== null);
     return days.length > 0 ? Math.max(...days) : 1;
-  }
-
-  /**
-   * Middleware: 构建行动摘要
-   *
-   * 从历史消息中提取所有 tool calls，生成人类可读的行动摘要
-   */
-  private async buildActionSummary(threadId: string): Promise<string> {
-    const history = await this.loadHistory(threadId);
-
-    const actions: string[] = [];
-
-    for (const msg of history) {
-      if (AIMessage.isInstance(msg)) {
-        const aiMsg = msg as any;
-        if (aiMsg.tool_calls && aiMsg.tool_calls.length > 0) {
-          for (const toolCall of aiMsg.tool_calls) {
-            const summary = this.formatToolCallSummary(toolCall);
-            if (summary) actions.push(summary);
-          }
-        }
-      }
-    }
-
-    if (actions.length === 0) return '';
-
-    const result = `## 你的历史行动\n${actions.join('\n')}`;
-    return result;
-  }
-
-  /**
-   * 格式化 tool call 为人类可读的摘要
-   */
-  private formatToolCallSummary(toolCall: any): string | null {
-    const { name, args } = toolCall;
-
-    switch (name) {
-      case 'use_antidote':
-        return `- 使用了解药救治 ${args.targetSeatNo}号位`;
-      case 'use_poison':
-        return `- 使用了毒药毒杀 ${args.targetSeatNo}号位`;
-      case 'skip_action':
-        return `- 选择不使用任何药物`;
-      case 'propose_kill':
-        return `- 提议刀 ${args.targetSeatNo}号位`;
-      case 'check_identity':
-        return `- 查验了 ${args.targetSeatNo}号位`;
-      case 'cast_vote':
-        return `- 投票给 ${args.targetSeatNo}号位`;
-      case 'make_speech':
-        // 发言内容太长，只记录动作
-        return `- 发表了发言`;
-      default:
-        return null;
-    }
   }
 
   /**

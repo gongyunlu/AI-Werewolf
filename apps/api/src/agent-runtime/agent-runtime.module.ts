@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AgentRuntimeService } from './agent-runtime.service';
-import { AgentRuntimeController } from './agent-runtime.controller';
 import { AgentToolsFactory } from './tools/agent-tools.factory';
 import { RoleToolsInitializer } from './tools/role-tools-initializer.provider';
 import { AbortControllerManager } from './abort-controller.manager';
@@ -20,7 +19,6 @@ import { ObservabilityModule } from '../observability/observability.module';
     SpeechSummarizerModule,
     ObservabilityModule,
   ],
-  controllers: [AgentRuntimeController],
   providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer, AbortControllerManager],
   exports: [AgentRuntimeService, AgentToolsFactory, AbortControllerManager],
 })
