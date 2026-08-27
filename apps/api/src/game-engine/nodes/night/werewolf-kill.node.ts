@@ -10,6 +10,7 @@ import {
   wolfVoting,
   selectTargetFromVotes,
 } from './werewolf-collaboration';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 狼人刀人节点（两阶段版本）
@@ -47,6 +48,9 @@ export class WerewolfKillNode {
           targetPlayerId = selectTargetFromVotes(votes, state);
         }
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[狼人刀人] 协作流程异常，降级为随机落刀: ${error instanceof Error ? error.message : String(error)}`,
         );

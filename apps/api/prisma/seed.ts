@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client';
 import { RulesetDefinitionSchema, type RulesetDefinition } from '../src/games/ruleset-definition';
@@ -66,6 +67,22 @@ const defaultAgents: Array<{
 type PersonaItem = { type: 'persona' | 'strategy'; title: string; content: string };
 const PERSONA_IMPORTANCE = 1.0;
 const STRATEGY_IMPORTANCE = 0.6;
+
+/**
+ * 为 seed 管理的记忆生成稳定 UUID。标题改变会生成新记录，旧记录仅归档，避免破坏历史溯源。
+ * UUID v8 允许使用应用自定义的确定性 payload。
+ */
+function seededMemoryId(agentName: string, item: PersonaItem): string {
+  const hex = createHash('sha256')
+    .update(`ai-werewolf:personality-memory:${agentName}:${item.type}:${item.title}`)
+    .digest('hex')
+    .slice(0, 32)
+    .split('');
+  hex[12] = '8';
+  hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  const value = hex.join('');
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
 
 const personalityMemories: Array<{
   agentName: string;
@@ -291,9 +308,8 @@ async function main() {
       });
     }
 
-    // 灌入每个 Agent 的初始人设 Memory（persona + strategy 分层）
-    // 策略：先删该 Agent 所有 source=manual 的记忆（相当于把 manual 层重置到 seed 声明的状态），再全量 create
-    // 这样 seed 里改人设文案后重新跑，DB 会同步；auto/reflection 类记忆不受影响
+    // 灌入每个 Agent 的初始人设 Memory（persona + strategy 分层）。
+    // seed 记录使用稳定 ID 幂等更新；移除或改名的条目只归档，避免破坏历史溯源。
     for (const preset of personalityMemories) {
       const agent = await prisma.agent.findUnique({ where: { name: preset.agentName } });
       if (!agent) {
@@ -302,29 +318,49 @@ async function main() {
         );
       }
 
-      await prisma.memory.deleteMany({
-        where: { agentId: agent.id, label: agent.memoryLabel, source: 'manual' },
-      });
+      const desiredIds = preset.items.map((item) => seededMemoryId(preset.agentName, item));
 
-      await prisma.memory.createMany({
-        data: preset.items.map((item) => ({
+      await prisma.memory.updateMany({
+        where: {
           agentId: agent.id,
           label: agent.memoryLabel,
-          type: item.type,
-          title: item.title,
-          content: item.content,
-          importance: item.type === 'persona' ? PERSONA_IMPORTANCE : STRATEGY_IMPORTANCE,
-          confidence: 1.0,
-          source: 'manual',
-          isActive: true,
-        })),
+          source: 'seed',
+          id: { notIn: desiredIds },
+        },
+        data: { isActive: false },
       });
-    }
 
-    // ========== 清理历史遗留的 rule/skill 死数据 ==========
-    // 早期版本曾把规则/角色玩法误写进 memories 表（type 不在 MEMORY_TYPES 枚举内）。
-    // 这类内容已迁移到 skills 系统，这里幂等清理 DB 遗留，保证重跑 seed 也能清除。
-    await prisma.memory.deleteMany({ where: { type: { in: ['rule', 'skill'] } } });
+      for (const item of preset.items) {
+        const id = seededMemoryId(preset.agentName, item);
+
+        await prisma.memory.upsert({
+          where: { id },
+          create: {
+            id,
+            agentId: agent.id,
+            label: agent.memoryLabel,
+            type: item.type,
+            title: item.title,
+            content: item.content,
+            importance: item.type === 'persona' ? PERSONA_IMPORTANCE : STRATEGY_IMPORTANCE,
+            confidence: 1.0,
+            source: 'seed',
+            isActive: true,
+          },
+          update: {
+            agentId: agent.id,
+            label: agent.memoryLabel,
+            type: item.type,
+            title: item.title,
+            content: item.content,
+            importance: item.type === 'persona' ? PERSONA_IMPORTANCE : STRATEGY_IMPORTANCE,
+            confidence: 1.0,
+            source: 'seed',
+            isActive: true,
+          },
+        });
+      }
+    }
 
     // ========== 测试游戏数据 ==========
 

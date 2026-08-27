@@ -648,13 +648,6 @@ export class SpeechSummarizerService {
   }
 
   /**
-   * 格式化历史判断（已废弃，保留用于兼容）
-   */
-  private formatHistoryJudgments(judgments: AgentJudgment[]): string {
-    return this.formatRecentJudgments(judgments);
-  }
-
-  /**
    * 格式化最近判断（完整格式，用于最近2天）
    */
   private formatRecentJudgments(judgments: AgentJudgment[]): string {

@@ -5,6 +5,7 @@ import type { NodeContext } from '../node.types';
 import { getWolfTeamThreadId } from '@/agent-runtime/thread-id.utils';
 import { PROMPT_NAMES } from '@/observability/prompt-templates';
 import { gameLogger } from '../../utils/game-logger';
+import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
 
 /**
  * 狼人刀人决策 Schema
@@ -63,7 +64,7 @@ export async function singleWolfDecision(
     const reasoning = await context.agentRuntime.streamReasoning(
       contextData,
       wolfThreadId,
-      undefined,
+      context.signal,
       (_token) => {
         // 可选：SSE 推送推理过程
       },
@@ -74,7 +75,7 @@ export async function singleWolfDecision(
       contextData,
       reasoning,
       ProposeKillDecisionSchema,
-      undefined,
+      context.signal,
       wolfThreadId,
     );
 
@@ -91,6 +92,9 @@ export async function singleWolfDecision(
     gameLogger.warn(`[单狼决策] ${wolf.seatNo}号位未做出决策`);
     return null;
   } catch (error) {
+    if (isAbortError(error, context.signal)) {
+      throw error;
+    }
     gameLogger.error(
       `[单狼决策] ${wolf.seatNo}号位决策失败: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -137,6 +141,7 @@ async function shouldContinueDiscussion(
     });
 
     const response = await model.invoke(coordinationPrompt.text, {
+      signal: context.signal,
       ...context.langfuse.trace({
         runName: 'wolf-coordination',
         gameId: state.gameId,
@@ -151,6 +156,9 @@ async function shouldContinueDiscussion(
 
     return decision === 'YES';
   } catch (error) {
+    if (isAbortError(error, context.signal)) {
+      throw error;
+    }
     gameLogger.error(`[狼人讨论] 协调判断失败:`, error);
     return currentRound < maxRounds;
   }
@@ -174,6 +182,7 @@ export async function wolfDiscussion(
     const shuffled = [...werewolves].toSorted(() => Math.random() - 0.5);
 
     for (const wolf of shuffled) {
+      throwIfAborted(context.signal);
       const currentSpeechCount = speechCount.get(wolf.id) || 0;
 
       if (currentSpeechCount >= maxSpeechPerWolf) {
@@ -190,8 +199,12 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
 
       const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
+      const sceneId = `wolf-discussion-${state.gameId}-${state.currentDay}-${round}-${wolf.id}`;
+      let sceneOpened = false;
+      let thinkingDurationMs = 0;
+      let contentDurationMs = 0;
+
       try {
-        const sceneId = `wolf-discussion-${state.gameId}-${state.currentDay}-${round}-${wolf.id}`;
         context.broadcaster?.emit(state.gameId, {
           type: 'scene.open',
           sceneId,
@@ -199,6 +212,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           visibility: 'wolf',
           actorId: wolf.id,
         });
+        sceneOpened = true;
 
         const contextData = await context.agentRuntime.prepareContextPublic(
           state.gameId,
@@ -208,32 +222,29 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
         );
 
         // 流式输出：思考 + 讨论发言正文
-        const { thinking, content, thinkingDurationMs, contentDurationMs } =
-          await context.agentRuntime.streamSpeech(contextData, wolfThreadId, {
-            onThinking: (token) => {
-              context.broadcaster?.emit(state.gameId, {
-                type: 'scene.append',
-                sceneId,
-                token,
-                contentType: 'thinking',
-              });
-            },
-            onContent: (token) => {
-              context.broadcaster?.emit(state.gameId, {
-                type: 'scene.append',
-                sceneId,
-                token,
-                contentType: 'content',
-              });
-            },
-          });
-
-        context.broadcaster?.emit(state.gameId, {
-          type: 'scene.close',
-          sceneId,
-          thinkingDurationMs,
-          contentDurationMs,
+        const result = await context.agentRuntime.streamSpeech(contextData, wolfThreadId, {
+          signal: context.signal,
+          onThinking: (token) => {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token,
+              contentType: 'thinking',
+            });
+          },
+          onContent: (token) => {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.append',
+              sceneId,
+              token,
+              contentType: 'content',
+            });
+          },
         });
+
+        const { thinking, content } = result;
+        thinkingDurationMs = result.thinkingDurationMs;
+        contentDurationMs = result.contentDurationMs;
 
         if (content) {
           discussionHistory.push({
@@ -255,9 +266,21 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           });
         }
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[狼人讨论] ${wolf.seatNo}号位发言失败: ${error instanceof Error ? error.message : String(error)}`,
         );
+      } finally {
+        if (sceneOpened) {
+          context.broadcaster?.emit(state.gameId, {
+            type: 'scene.close',
+            sceneId,
+            thinkingDurationMs,
+            contentDurationMs,
+          });
+        }
       }
     }
 
@@ -309,7 +332,7 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
       const reasoning = await context.agentRuntime.streamReasoning(
         contextData,
         wolfThreadId,
-        undefined,
+        context.signal,
       );
 
       // 阶段2：生成投票决策
@@ -317,7 +340,7 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
         contextData,
         reasoning,
         ProposeKillDecisionSchema,
-        undefined,
+        context.signal,
         wolfThreadId,
       );
 
@@ -332,6 +355,9 @@ ${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
         gameLogger.warn(`[狼人投票] ${wolf.seatNo}号位未投票`);
       }
     } catch (error) {
+      if (isAbortError(error, context.signal)) {
+        throw error;
+      }
       gameLogger.error(
         `[狼人投票] ${wolf.seatNo}号位投票失败: ${error instanceof Error ? error.message : String(error)}`,
       );

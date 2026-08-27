@@ -6,7 +6,6 @@ import type { NodeContext } from '../nodes/node.types';
 import type { GamePreset } from '../presets/game-presets';
 import { DEFAULT_PRESET } from '../presets/game-presets';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EventWriterService } from '../events/event-writer.service';
 import { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
@@ -38,7 +37,6 @@ export class GameEngine {
 
   constructor(
     private readonly agentRuntime: AgentRuntimeService,
-    private readonly toolsFactory: AgentToolsFactory,
     private readonly prisma: PrismaService,
     private readonly eventWriter: EventWriterService,
     private readonly broadcaster: SseBroadcasterService,
@@ -51,7 +49,6 @@ export class GameEngine {
   ) {
     this.nodeContext = {
       agentRuntime,
-      toolsFactory,
       prisma,
       eventWriter,
       broadcaster,
@@ -78,6 +75,8 @@ export class GameEngine {
     let state = initialState;
 
     try {
+      state = await this.executeNode('init', state);
+
       // 主循环
       while (!state.isGameOver) {
         // 检查暂停/取消
@@ -253,10 +252,12 @@ export class GameEngine {
       }
     }
 
-    // 白天正常结束（非狼人自爆中断、非游戏结束），统一生成摘要与判断
-    if (!currentState.isGameOver) {
-      await this.generateDaySummaries(currentState.gameId, currentState.currentDay);
+    if (currentState.isGameOver) {
+      return { ...currentState, nextIsDay: false };
     }
+
+    // 白天正常结束（非狼人自爆中断、非游戏结束），统一生成摘要与判断
+    await this.generateDaySummaries(currentState.gameId, currentState.currentDay);
 
     // 白天结束，天数 +1，标记下一阶段是夜晚
     return {

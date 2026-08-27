@@ -1,5 +1,5 @@
 import { useCallback, useReducer, useRef } from 'react';
-import type { SceneType, SceneVisibility, SseMessage } from '@/types/sse';
+import type { SceneSnapshot, SceneType, SceneVisibility, SseMessage } from '@/types/sse';
 
 export interface ClosedScene {
   sceneId: string;
@@ -23,7 +23,7 @@ export interface ActiveScene {
   metadata?: Record<string, unknown>;
 }
 
-interface SceneState {
+export interface SceneState {
   closedScenes: ClosedScene[];
   activeScene: ActiveScene | null;
   gameOver: boolean;
@@ -31,13 +31,16 @@ interface SceneState {
 }
 
 type Action =
+  | { type: 'HYDRATE'; state: SceneState }
   | { type: 'SCENE_OPEN'; scene: ActiveScene }
   | { type: 'APPEND'; sceneId: string; token: string; contentType: 'thinking' | 'content' }
   | { type: 'SCENE_CLOSE'; closed: ClosedScene }
   | { type: 'GAME_OVER'; winner: string };
 
-function reducer(state: SceneState, action: Action): SceneState {
+export function sceneReducer(state: SceneState, action: Action): SceneState {
   switch (action.type) {
+    case 'HYDRATE':
+      return action.state;
     case 'SCENE_OPEN':
       return { ...state, activeScene: action.scene };
     case 'APPEND': {
@@ -83,7 +86,7 @@ const HOLD_UNTIL_MS: Record<string, number> = {
 };
 
 export function useSceneEngine(perspective: string) {
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  const [state, dispatch] = useReducer(sceneReducer, INITIAL_STATE);
   const activeSceneRef = useRef<ActiveScene | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCloseRef = useRef<ClosedScene | null>(null);
@@ -102,7 +105,29 @@ export function useSceneEngine(perspective: string) {
 
   const handleMessage = useCallback(
     (msg: SseMessage) => {
-      if (msg.type === 'scene.open') {
+      if (msg.type === 'connection.ready') {
+        flushPendingClose();
+
+        const visibleSnapshots = msg.snapshot.filter(
+          (scene) => perspective !== 'villager' || scene.visibility === 'public',
+        );
+        const closedScenes = visibleSnapshots
+          .filter((scene) => scene.status === 'closed')
+          .map(snapshotToClosedScene);
+        const activeSnapshot = visibleSnapshots.findLast((scene) => scene.status === 'active');
+        const activeScene = activeSnapshot ? snapshotToActiveScene(activeSnapshot) : null;
+
+        activeSceneRef.current = activeScene;
+        dispatch({
+          type: 'HYDRATE',
+          state: {
+            closedScenes,
+            activeScene,
+            gameOver: !!msg.gameFinished,
+            winner: msg.gameFinished?.winner,
+          },
+        });
+      } else if (msg.type === 'scene.open') {
         // 如果有上一个 scene 的延迟关闭尚未完成，立即收尾
         flushPendingClose();
 
@@ -140,7 +165,7 @@ export function useSceneEngine(perspective: string) {
         }
       } else if (msg.type === 'scene.close') {
         const scene = activeSceneRef.current;
-        if (!scene) return;
+        if (!scene || scene.sceneId !== msg.sceneId) return;
 
         const holdMs = HOLD_UNTIL_MS[scene.sceneType] ?? 0;
         const closed: ClosedScene = {
@@ -170,4 +195,24 @@ export function useSceneEngine(perspective: string) {
   );
 
   return { state, handleMessage };
+}
+
+function snapshotToActiveScene(snapshot: SceneSnapshot): ActiveScene {
+  return {
+    sceneId: snapshot.sceneId,
+    sceneType: snapshot.sceneType,
+    visibility: snapshot.visibility,
+    actorId: snapshot.actorId,
+    thinking: snapshot.thinking,
+    content: snapshot.content,
+    metadata: snapshot.metadata,
+  };
+}
+
+function snapshotToClosedScene(snapshot: SceneSnapshot): ClosedScene {
+  return {
+    ...snapshotToActiveScene(snapshot),
+    thinkingDurationMs: snapshot.thinkingDurationMs,
+    contentDurationMs: snapshot.contentDurationMs,
+  };
 }

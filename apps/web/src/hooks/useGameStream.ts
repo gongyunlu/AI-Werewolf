@@ -20,6 +20,7 @@ export function useGameStream(
   const esRef = useRef<EventSource | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endedRef = useRef(false);
+  const lastSequenceRef = useRef(0);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
@@ -32,31 +33,37 @@ export function useGameStream(
       return;
     }
 
-    // sessionStorage 在隐私模式/配额满时会抛异常，忽略并回退到 0
-    let lastSequence = 0;
-    try {
-      lastSequence = Number(sessionStorage.getItem(`sse-seq-${gameId}`) ?? '0');
-    } catch {
-      // 忽略读取失败
-    }
-
-    const es = apiClient.createSSEConnection(gameId, { lastSequence, perspective });
+    const es = apiClient.createSSEConnection(gameId, { perspective });
     esRef.current = es;
 
     // 记录期望的下一个序列号
-    let expectedSequence = lastSequence;
+    let expectedSequence = lastSequenceRef.current;
 
     es.addEventListener('message', (e: MessageEvent) => {
-      const msg = JSON.parse(e.data as string) as SseMessage;
-      retryCount.current = 0;
+      let msg: SseMessage;
+      try {
+        msg = JSON.parse(e.data as string) as SseMessage;
+      } catch (error) {
+        console.error('忽略无法解析的 SSE 消息', error);
+        return;
+      }
 
-      // 跳过不带序列号的消息（connection.ready, game.finished）
+      if (msg.type === 'connection.ready') {
+        expectedSequence = msg.lastSequence;
+        lastSequenceRef.current = msg.lastSequence;
+        onMessage(msg);
+        if (msg.gameFinished) {
+          endedRef.current = true;
+          es.close();
+        }
+        return;
+      }
+
       const sequence = (msg as { sequence?: number }).sequence;
 
-      if (msg.type === 'game.finished') {
-        endedRef.current = true;
-        es.close();
-      } else if (sequence !== undefined) {
+      if (sequence !== undefined) {
+        if (sequence <= expectedSequence) return;
+
         // 检测漏帧：序列号跳号
         if (sequence > expectedSequence + 1) {
           console.warn(
@@ -68,13 +75,13 @@ export function useGameStream(
           return;
         }
         expectedSequence = sequence;
+        lastSequenceRef.current = sequence;
+        retryCount.current = 0;
+      }
 
-        // 保存最新序列号
-        try {
-          sessionStorage.setItem(`sse-seq-${gameId}`, String(sequence));
-        } catch {
-          // 忽略写入失败，仅影响断线续传
-        }
+      if (msg.type === 'game.finished') {
+        endedRef.current = true;
+        es.close();
       }
 
       onMessage(msg);
@@ -83,12 +90,16 @@ export function useGameStream(
     es.addEventListener('error', () => {
       es.close();
       // 对局已正常结束导致的服务端关闭，无需重连
-      if (endedRef.current) return;
+      if (endedRef.current || !enabledRef.current) return;
       const delay = RETRY_DELAYS[Math.min(retryCount.current, RETRY_DELAYS.length - 1)];
       retryCount.current += 1;
       retryTimerRef.current = setTimeout(connect, delay);
     });
   }, [gameId, perspective, onMessage]);
+
+  useEffect(() => {
+    lastSequenceRef.current = 0;
+  }, [gameId]);
 
   useEffect(() => {
     if (!enabled) return;

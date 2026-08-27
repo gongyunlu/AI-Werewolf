@@ -12,6 +12,7 @@
     "prisma:reset": "prisma migrate reset",
     "prisma:studio": "prisma studio",
     "prisma:check": "prisma migrate diff --from-schema prisma/schema.prisma --to-config-datasource --exit-code",
+    "memory:backfill-embeddings": "node --import tsx src/memory/backfill-memory-embeddings.ts",
     "start:prod": "pnpm -w run docker:up && node dist/main",
     "preview": "pnpm run start:prod",
     "lint": "oxlint",
@@ -21,7 +22,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json"
   },
   "dependencies": {
     "@ai-werewolf/shared": "workspace:*",
@@ -100,6 +101,7 @@
     "testEnvironment": "node",
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/$1",
+      "^langfuse-langchain$": "<rootDir>/testing/mocks/langfuse-langchain.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     }
   }

@@ -6,6 +6,7 @@ import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { resolveVotes } from '../../rules/vote-resolution';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 function buildVoteSchema(legalSeatNos: number[]) {
   return z.object({
@@ -121,7 +122,7 @@ export class VoteNode {
       const reasoning = await this.agentRuntime.streamReasoning(
         contextData,
         threadId,
-        undefined,
+        context.signal,
         (_token) => {
           // 投票推理不对外广播
         },
@@ -132,7 +133,7 @@ export class VoteNode {
         contextData,
         reasoning,
         buildVoteSchema(legalSeatNos),
-        undefined,
+        context.signal,
         threadId,
       );
 
@@ -179,9 +180,21 @@ export class VoteNode {
         };
       }
     } catch (error) {
+      if (isAbortError(error, context.signal)) {
+        throw error;
+      }
       gameLogger.error(
         `[投票阶段] ${voter.seatNo}号位投票出错，降级为弃权: ${error instanceof Error ? error.message : String(error)}`,
       );
+
+      const event = await context.eventWriter.writePlayerVoteEvent({
+        gameId: state.gameId,
+        day: state.currentDay,
+        actorId: voter.id,
+        voterSeatNo: voter.seatNo,
+        targetSeatNo: 0,
+      });
+      await context.eventBus?.publish(event);
 
       return {
         voterId: voter.id,

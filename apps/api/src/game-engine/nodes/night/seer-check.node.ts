@@ -7,6 +7,7 @@ import { checkSeerResult } from '../../rules/seer-check';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建预言家查验决策 Schema（值域动态收敛到合法候选）
@@ -83,7 +84,7 @@ export class SeerCheckNode {
         const reasoning = await this.agentRuntime.streamReasoning(
           contextData,
           threadId,
-          undefined,
+          context.signal,
           (_token) => {
             // 可选：SSE 推送推理过程
           },
@@ -94,7 +95,7 @@ export class SeerCheckNode {
           contextData,
           reasoning,
           buildSeerCheckSchema(legalSeatNos),
-          undefined,
+          context.signal,
           threadId,
         );
 
@@ -136,6 +137,9 @@ export class SeerCheckNode {
           return this.fallbackToRandom(state, seer, context, checkedSeatNos);
         }
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[预言家查验] 执行异常，降级为随机查验: ${error instanceof Error ? error.message : String(error)}`,
         );

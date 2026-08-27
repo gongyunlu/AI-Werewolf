@@ -4,6 +4,18 @@
   "testEnvironment": "node",
   "testRegex": ".e2e-spec.ts$",
   "transform": {
-    "^.+\\.(t|j)s$": "ts-jest"
+    "^.+\\.(t|j)s$": [
+      "ts-jest",
+      {
+        "tsconfig": {
+          "rootDir": ".."
+        }
+      }
+    ]
+  },
+  "moduleNameMapper": {
+    "^@/(.*)$": "<rootDir>/../src/$1",
+    "^langfuse-langchain$": "<rootDir>/../src/testing/mocks/langfuse-langchain.ts",
+    "^(\\.{1,2}/.*)\\.js$": "$1"
   }
 }

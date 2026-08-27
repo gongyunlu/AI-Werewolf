@@ -8,8 +8,22 @@ export interface SceneSnapshot {
   sceneType: SceneType;
   visibility: SceneVisibility;
   actorId?: string;
-  fullContent: string;
+  thinking: string;
+  content: string;
+  status: 'active' | 'closed';
+  thinkingDurationMs: number;
+  contentDurationMs: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface PlayerDeathSnapshot {
+  playerId: string;
+  deathDay: number;
+  deathCause: string;
+}
+
+export interface GameFinishedSnapshot {
+  winner: string;
 }
 
 export interface ConnectionReadyEvent {
@@ -17,6 +31,8 @@ export interface ConnectionReadyEvent {
   gameId: string;
   lastSequence: number;
   snapshot: SceneSnapshot[];
+  playerDeaths: PlayerDeathSnapshot[];
+  gameFinished?: GameFinishedSnapshot;
 }
 
 export interface SceneOpenEvent {
@@ -51,7 +67,7 @@ export interface SceneCloseEvent {
 
 export interface GameFinishedEvent {
   type: 'game.finished';
-  sequence: number;
+  sequence?: number;
   winner: string;
 }
 

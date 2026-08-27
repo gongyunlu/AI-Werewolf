@@ -5,6 +5,7 @@ import type { NodeContext, GameNode } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
 
 /**
  * 被放逐者遗言节点（流式版本）
@@ -27,6 +28,12 @@ export class ExileLastWordsNode {
           return {};
         }
 
+        throwIfAborted(context.signal);
+        const sceneId = `exile-last-words-${state.gameId}-${state.currentDay}-${exiledPlayer.id}`;
+        let sceneOpened = false;
+        let thinkingDurationMs = 0;
+        let contentDurationMs = 0;
+
         try {
           const contextData = await this.agentRuntime.prepareContextPublic(
             state.gameId,
@@ -37,7 +44,6 @@ export class ExileLastWordsNode {
 
           const threadId = getPlayerThreadId(state.gameId, exiledPlayer.id);
 
-          const sceneId = `exile-last-words-${state.gameId}-${state.currentDay}-${exiledPlayer.id}`;
           context.broadcaster?.emit(state.gameId, {
             type: 'scene.open',
             sceneId,
@@ -45,34 +51,32 @@ export class ExileLastWordsNode {
             visibility: 'public',
             actorId: exiledPlayer.id,
           });
+          sceneOpened = true;
 
           // 流式输出：思考 + 遗言正文
-          const { thinking, content, thinkingDurationMs, contentDurationMs } =
-            await this.agentRuntime.streamSpeech(contextData, threadId, {
-              onThinking: (token) => {
-                context.broadcaster?.emit(state.gameId, {
-                  type: 'scene.append',
-                  sceneId,
-                  token,
-                  contentType: 'thinking',
-                });
-              },
-              onContent: (token) => {
-                context.broadcaster?.emit(state.gameId, {
-                  type: 'scene.append',
-                  sceneId,
-                  token,
-                  contentType: 'content',
-                });
-              },
-            });
-
-          context.broadcaster?.emit(state.gameId, {
-            type: 'scene.close',
-            sceneId,
-            thinkingDurationMs,
-            contentDurationMs,
+          const result = await this.agentRuntime.streamSpeech(contextData, threadId, {
+            signal: context.signal,
+            onThinking: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'thinking',
+              });
+            },
+            onContent: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'content',
+              });
+            },
           });
+
+          const { thinking, content } = result;
+          thinkingDurationMs = result.thinkingDurationMs;
+          contentDurationMs = result.contentDurationMs;
 
           await context.eventWriter.writePlayerSpeechEvent({
             gameId: state.gameId,
@@ -83,9 +87,21 @@ export class ExileLastWordsNode {
             thinking,
           });
         } catch (error) {
+          if (isAbortError(error, context.signal)) {
+            throw error;
+          }
           gameLogger.error(
             `[被放逐者遗言] ${exiledPlayer.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,
           );
+        } finally {
+          if (sceneOpened) {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.close',
+              sceneId,
+              thinkingDurationMs,
+              contentDurationMs,
+            });
+          }
         }
 
         return {};

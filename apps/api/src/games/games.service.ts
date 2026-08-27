@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  NotImplementedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateGameDto } from './dto/create-game.dto';
 import type { QueryGamesDto } from './dto/query-games.dto';
@@ -281,6 +287,12 @@ export class GamesService {
       const agentIds = game.players.map((p) => p.agent.id);
       const assignments = assignRolesAndSeats(parsed.data.roles, agentIds);
       await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.game.updateMany({
+          where: { id: gameId, status: GAME_STATUSES.CREATED },
+          data: { status: GAME_STATUSES.INITIALIZED },
+        });
+        if (claimed.count === 0) return;
+
         await Promise.all(
           assignments.map((assignment) => {
             const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
@@ -294,30 +306,41 @@ export class GamesService {
             });
           }),
         );
-        await tx.game.update({
-          where: { id: gameId },
-          data: { status: GAME_STATUSES.INITIALIZED },
-        });
       });
     }
 
-    // 3. 校验状态（经过初始化后应为 initialized）
-    const refreshed = await this.prisma.game.findUnique({ where: { id: gameId } });
-    if (refreshed?.status !== GAME_STATUSES.INITIALIZED) {
-      throw new BadRequestException(`Game ${gameId} 状态为 ${refreshed?.status}，无法开始对局`);
+    // 3. 原子抢占 initialized -> running，避免并发 start 相互覆盖或重复入队
+    const started = await this.prisma.game.updateMany({
+      where: { id: gameId, status: GAME_STATUSES.INITIALIZED },
+      data: { status: GAME_STATUSES.RUNNING },
+    });
+    if (started.count !== 1) {
+      const current = await this.prisma.game.findUnique({
+        where: { id: gameId },
+        select: { status: true },
+      });
+      throw new BadRequestException(`Game ${gameId} 状态为 ${current?.status}，无法开始对局`);
     }
 
     // 4. 初始化 SSE 广播流
     this.broadcaster.getOrCreate(gameId);
 
-    // 5. 更新状态为 running
-    return this.prisma.game.update({
+    // 5. 返回启动后的完整对局
+    return this.prisma.game.findUniqueOrThrow({
       where: { id: gameId },
-      data: { status: GAME_STATUSES.RUNNING },
       include: {
         players: { orderBy: { seatNo: 'asc' }, include: { agent: true } },
       },
     });
+  }
+
+  /** 入队失败时撤销 running 状态，使已初始化对局可以安全重试启动。 */
+  async rollbackFailedStart(gameId: string): Promise<void> {
+    await this.prisma.game.updateMany({
+      where: { id: gameId, status: GAME_STATUSES.RUNNING },
+      data: { status: GAME_STATUSES.INITIALIZED },
+    });
+    this.broadcaster.complete(gameId);
   }
 
   /**
@@ -339,20 +362,7 @@ export class GamesService {
    * 暂停对局
    */
   async pauseGame(gameId: string) {
-    const game = await this.getGameById(gameId);
-
-    if (game.status !== GAME_STATUSES.RUNNING) {
-      throw new BadRequestException(`只能暂停 running 状态的对局，当前状态: ${game.status}`);
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.game.update({
-        where: { id: gameId },
-        data: { status: GAME_STATUSES.PAUSED },
-      });
-    });
-    this.gameExecutor.abortGame(gameId);
-    return this.prisma.game.findUnique({ where: { id: gameId } });
+    throw new NotImplementedException(`对局 ${gameId} 暂不支持暂停`);
   }
 
   /**
@@ -369,16 +379,7 @@ export class GamesService {
    * 继续对局
    */
   async resumeGame(gameId: string) {
-    const game = await this.getGameById(gameId);
-
-    if (game.status !== GAME_STATUSES.PAUSED) {
-      throw new BadRequestException(`只能继续 paused 状态的对局，当前状态: ${game.status}`);
-    }
-
-    return this.prisma.game.update({
-      where: { id: gameId },
-      data: { status: GAME_STATUSES.RUNNING },
-    });
+    throw new NotImplementedException(`对局 ${gameId} 暂不支持恢复执行`);
   }
 
   /**
@@ -402,6 +403,8 @@ export class GamesService {
     });
 
     this.gameExecutor.abortGame(gameId);
+    this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });
+    this.broadcaster.complete(gameId);
 
     return true;
   }

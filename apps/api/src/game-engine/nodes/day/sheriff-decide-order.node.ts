@@ -10,6 +10,7 @@ import {
 import type { TypedRuleset } from '@/prisma/typed-models';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 const SheriffDecideOrderSchema = z.object({
   direction: z.enum(['left', 'right']).describe('发言方向：left=逆时针，right=顺时针'),
@@ -69,7 +70,7 @@ export class SheriffDecideOrderNode {
         const reasoning = await this.agentRuntime.streamReasoning(
           contextData,
           threadId,
-          undefined,
+          context.signal,
           (_token) => {
             // 警长决定发言顺序不推送推理过程
           },
@@ -80,7 +81,7 @@ export class SheriffDecideOrderNode {
           contextData,
           reasoning,
           SheriffDecideOrderSchema,
-          undefined,
+          context.signal,
           threadId,
         );
 
@@ -97,6 +98,9 @@ export class SheriffDecideOrderNode {
         });
         await context.eventBus?.publish(event);
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
         );

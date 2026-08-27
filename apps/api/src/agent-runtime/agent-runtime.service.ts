@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
@@ -11,10 +11,8 @@ import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.
 import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
 import { PromptService } from '../observability/prompt.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
-import { PostgresChatMessageHistory } from '@langchain/community/stores/message/postgres';
 import type { Env } from '../config/env.validation';
 import { Prisma } from '../generated/prisma/client';
-import { Pool } from 'pg';
 import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
 import {
   ACTION_TYPES,
@@ -25,6 +23,9 @@ import {
   VISIBILITY_TYPES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
+import { isAbortError, throwIfAborted } from './abort.utils';
+import { formatMemorySection } from './memory-prompt.utils';
+import { ChatHistoryService } from './chat-history.service';
 
 /**
  * 需走 functionCalling 的模型名前缀。
@@ -77,9 +78,8 @@ interface AgentContext {
  * 5. generateDecision - 阶段2：生成结构化决策
  */
 @Injectable()
-export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
+export class AgentRuntimeService {
   private readonly logger = new Logger(AgentRuntimeService.name);
-  private pool: Pool | null = null;
 
   constructor(
     private readonly configService: ConfigService<Env, true>,
@@ -89,26 +89,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly langfuse: LangfuseService,
     private readonly promptService: PromptService,
+    private readonly chatHistory: ChatHistoryService,
   ) {}
-
-  /**
-   * 模块初始化时创建连接池
-   */
-  async onModuleInit() {
-    const databaseUrl = this.configService.get('DATABASE_URL');
-    if (databaseUrl) {
-      this.pool = new Pool({ connectionString: databaseUrl });
-    }
-  }
-
-  /**
-   * 模块销毁时关闭连接池
-   */
-  async onModuleDestroy() {
-    if (this.pool) {
-      await this.pool.end();
-    }
-  }
 
   /**
    * 阶段1：流式输出角色推理过程（纯文本思考）
@@ -127,6 +109,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     onStreamToken?: (token: string) => void,
     onStreamComplete?: (fullContent: string) => void,
   ): Promise<string> {
+    throwIfAborted(signal);
     const modelName = context.player.modelName;
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -169,9 +152,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       const stream = await model.stream(messages, { signal, ...trace });
 
       for await (const chunk of stream) {
-        if (signal?.aborted) {
-          throw new Error('LLM generation aborted');
-        }
+        throwIfAborted(signal);
 
         if (typeof chunk.content === 'string' && chunk.content) {
           fullContent += chunk.content;
@@ -189,6 +170,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
         onStreamComplete(fullContent);
       }
     } else {
+      throwIfAborted(signal);
       const response = await model.invoke(messages, { signal, ...trace });
 
       const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
@@ -223,9 +205,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const stream = await model.stream(messages, { signal, ...trace });
 
     for await (const chunk of stream) {
-      if (signal?.aborted) {
-        throw new Error('LLM generation aborted');
-      }
+      throwIfAborted(signal);
 
       if (typeof chunk.content === 'string' && chunk.content) {
         fullContent += chunk.content;
@@ -263,6 +243,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     contentDurationMs: number;
   }> {
     const { signal, onThinking, onContent } = options;
+    throwIfAborted(signal);
     const startTime = Date.now();
     const modelName = context.player.modelName;
 
@@ -305,6 +286,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       thinkingTrace,
     );
 
+    throwIfAborted(signal);
     const contentStartTime = Date.now();
     const contentPrompt = await this.promptService.render(PROMPT_NAMES.agentSpeechContent, {
       thinking,
@@ -354,6 +336,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     signal?: AbortSignal,
     threadId?: string,
   ): Promise<T> {
+    throwIfAborted(signal);
     const modelName = context.player.modelName;
     const baseModel = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -399,6 +382,9 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     try {
       decision = await model.invoke(baseMessages, { signal, ...trace });
     } catch (error) {
+      if (isAbortError(error, signal)) {
+        throw error;
+      }
       this.logger.warn(
         `[决策] ${modelName} 结构化输出失败，触发单次重试: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -447,7 +433,10 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       role: player.role,
       isAlive: !player.deathDay, // deathDay 为 null 表示存活
       hasUsedAntidote: events.some(
-        (e) => e.actionType === ACTION_TYPES.WITCH_SAVE && e.actorId === player.id,
+        (e) =>
+          e.actionType === ACTION_TYPES.WITCH_SAVE &&
+          e.actorId === player.id &&
+          (e.content as { saved?: boolean } | null)?.saved === true,
       ),
     });
   }
@@ -469,6 +458,28 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       scenario,
       additionalContext,
     });
+  }
+
+  async validateRequiredSkills(options: {
+    rulesetId: string;
+    skillVersion: string;
+    roles: string[];
+  }): Promise<void> {
+    const scenarioSkillIds = [
+      'scenarios/night-action',
+      'scenarios/day-speech',
+      'scenarios/vote',
+      'scenarios/last-words',
+      'scenarios/sheriff-decide-order',
+    ];
+    const roleSkillIds = [...new Set(options.roles)].map((role) => `roles/${role}`);
+    const skillIds = [`rulesets/${options.rulesetId}`, ...scenarioSkillIds, ...roleSkillIds];
+
+    await Promise.all(
+      skillIds.map((skillId) =>
+        this.skillLoader.loadRequiredSkill(skillId, options.skillVersion || 'v1'),
+      ),
+    );
   }
 
   /**
@@ -536,6 +547,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const memories = await this.memoryService.retrieveActiveMemories(
       player.agentId,
       player.memoryLabelSnapshot,
+      { types: ['persona', 'strategy'] },
     );
 
     // 4. 构建分层上下文
@@ -754,11 +766,11 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     const skillVersion = player.game.skillVersion || 'v1';
 
     // 当前板子规则（按 rulesetId 加载，例如 rulesets/standard6p）
-    const rulesetSkill = await this.skillLoader.loadSkill(
+    const rulesetSkill = await this.skillLoader.loadRequiredSkill(
       `rulesets/${player.game.rulesetId}`,
       skillVersion,
     );
-    const rulesetRules = rulesetSkill?.content || '';
+    const rulesetRules = rulesetSkill.content;
 
     // 场景指令（根据当前 scenario 加载）
     const scenarioMap: Record<AgentScenario, string> = {
@@ -769,12 +781,15 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       [AGENT_SCENARIOS.SHERIFF_DECIDE_ORDER]: 'scenarios/sheriff-decide-order',
     };
     const scenarioSkillId = scenarioMap[scenario];
-    const scenarioSkill = await this.skillLoader.loadSkill(scenarioSkillId, skillVersion);
-    const scenarioPrompt = scenarioSkill?.content || '';
+    const scenarioSkill = await this.skillLoader.loadRequiredSkill(scenarioSkillId, skillVersion);
+    const scenarioPrompt = scenarioSkill.content;
 
     // 角色玩法正文（按 player.role 条件加载，例如 roles/werewolf）
-    const roleSkill = await this.skillLoader.loadSkill(`roles/${player.role}`, skillVersion);
-    const roleSkillContent = roleSkill?.content || '';
+    const roleSkill = await this.skillLoader.loadRequiredSkill(
+      `roles/${player.role}`,
+      skillVersion,
+    );
+    const roleSkillContent = roleSkill.content;
 
     // 基础角色信息（只告诉玩家自己的身份）
     const roleView = `
@@ -804,8 +819,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
     }
 
     // 提取人设和策略记忆
-    const personaMemory = memories.find((m) => m.type === 'persona');
-    const strategyMemory = memories.find((m) => m.type === 'strategy');
+    const personaMemory = formatMemorySection(memories, 'persona');
+    const strategyMemory = formatMemorySection(memories, 'strategy');
 
     // 角色特定历史信息
     let roleSpecificInfo = '';
@@ -826,8 +841,8 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
       roleSkill: roleSkillContent,
       additionalContext: additionalContext ? `\n${additionalContext}\n` : '',
       rulesetRules,
-      persona: personaMemory?.content || '暂无',
-      strategy: strategyMemory?.content || '暂无',
+      persona: personaMemory || '暂无',
+      strategy: strategyMemory || '暂无',
       roleSpecificInfo,
       critical: context.critical,
       recent: context.recent,
@@ -868,17 +883,12 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 加载会话历史
    */
   private async loadHistory(threadId: string): Promise<BaseMessage[]> {
-    if (!this.pool) {
-      return [];
-    }
-
     try {
-      const history = new PostgresChatMessageHistory({
-        sessionId: threadId,
-        pool: this.pool,
-      });
-      return await history.getMessages();
-    } catch {
+      return await this.chatHistory.load(threadId);
+    } catch (error) {
+      this.logger.warn(
+        `加载会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return [];
     }
   }
@@ -887,16 +897,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
    * 保存会话历史
    */
   private async saveHistory(threadId: string, messages: BaseMessage[]): Promise<void> {
-    if (!this.pool) {
-      return;
-    }
-
     try {
-      const history = new PostgresChatMessageHistory({
-        sessionId: threadId,
-        pool: this.pool,
-      });
-
       // 滑动窗口：只保留最近 N 条消息，避免跨轮记忆无限增长
       const HISTORY_WINDOW = 20;
       const trimmed =
@@ -904,11 +905,7 @@ export class AgentRuntimeService implements OnModuleInit, OnModuleDestroy {
           ? messages.slice(messages.length - HISTORY_WINDOW)
           : messages;
 
-      // 清空现有历史并添加新消息
-      await history.clear();
-      for (const message of trimmed) {
-        await history.addMessage(message);
-      }
+      await this.chatHistory.replace(threadId, trimmed);
     } catch (error) {
       this.logger.warn(
         `保存会话历史失败: ${error instanceof Error ? error.message : String(error)}`,

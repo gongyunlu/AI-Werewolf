@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GamesService } from '../games/games.service';
-import { GameQueueService } from '../game-queue/game-queue.service';
+import { GameLaunchService } from '../games/game-launch.service';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import type { BatchRunDto } from './dto/batch-run.dto';
 
@@ -25,7 +25,7 @@ export class BatchService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly gamesService: GamesService,
-    private readonly gameQueue: GameQueueService,
+    private readonly gameLaunch: GameLaunchService,
   ) {}
 
   async runBatch(dto: BatchRunDto) {
@@ -52,8 +52,7 @@ export class BatchService {
         ? sampleN(pool, ruleset.playerCount)
         : pool.slice(0, ruleset.playerCount);
       const game = await this.gamesService.createGame({ rulesetId: dto.rulesetId, agentIds });
-      await this.gamesService.startGame(game.id);
-      await this.gameQueue.addGameJob(game.id);
+      await this.gameLaunch.start(game.id);
       gameIds.push(game.id);
     }
 

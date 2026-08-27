@@ -102,17 +102,17 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
   [PROMPT_NAMES.judgeSystem]:
     '你是一名狼人杀决策质量评估员。请站在玩家做出决策的那一刻、仅凭其当时可见的有限信息，评估该决策是否合理（而非事后以上帝视角倒推）。综合考虑信息利用率、目标选择合理性、与阵营目标的契合度，给出三档结论与 0-100 分。',
 
-  [PROMPT_NAMES.judgeUser]: `
-    【玩家身份】
-    {{identity}}
-
-    【决策时点可见信息】
-    {{contextLines}}
-
-    【待评估决策】
-    {{decisionText}}
-    {{thinking}}
-  `,
+  [PROMPT_NAMES.judgeUser]: [
+    '【玩家身份】',
+    '{{identity}}',
+    '',
+    '【决策时点可见信息】',
+    '{{contextLines}}',
+    '',
+    '【待评估决策】',
+    '{{decisionText}}',
+    '{{thinking}}',
+  ].join('\n'),
 
   [PROMPT_NAMES.summarizerGlobalSummary]: `
     你是狼人杀对局的记录员。

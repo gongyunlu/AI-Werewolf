@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
-import { AgentToolsFactory } from '../agent-runtime/tools/agent-tools.factory';
 import { EventWriterService } from '../game-engine/events/event-writer.service';
 import { GameEngine } from '../game-engine/core/game-engine';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
@@ -37,7 +36,6 @@ export class GameExecutorService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRuntime: AgentRuntimeService,
-    private readonly toolsFactory: AgentToolsFactory,
     private readonly eventWriter: EventWriterService,
     private readonly configService: ConfigService<Env, true>,
     private readonly broadcaster: SseBroadcasterService,
@@ -57,11 +55,6 @@ export class GameExecutorService {
    * @returns 游戏最终状态
    */
   async executeGame(gameId: string): Promise<GameGraphState> {
-    // 校验必需的依赖
-    if (!this.agentRuntime || !this.toolsFactory) {
-      throw new Error('AI 狼人杀项目必须配置 AgentRuntime 和 ToolsFactory');
-    }
-
     // 1. 查询对局数据
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
@@ -88,13 +81,18 @@ export class GameExecutorService {
       throw new Error(`ruleset ${game.ruleset.id} 不支持，请检查数据一致性`);
     }
 
+    await this.agentRuntime.validateRequiredSkills({
+      rulesetId: game.ruleset.id,
+      skillVersion: game.skillVersion,
+      roles: game.players.map((player) => player.role).filter((role): role is string => !!role),
+    });
+
     // 初始化 Redis sequence 计数器（处理 Redis 重启或游戏恢复场景）
     await this.eventWriter.initializeSequenceCounter(gameId);
 
     // 3. 创建游戏引擎
     const engine = new GameEngine(
       this.agentRuntime,
-      this.toolsFactory,
       this.prisma,
       this.eventWriter,
       this.broadcaster,
@@ -114,18 +112,7 @@ export class GameExecutorService {
     try {
       const finalState = await engine.run(initialState, preset, abortController.signal);
 
-      // 6. 更新游戏结束状态
-      await this.prisma.game.update({
-        where: { id: gameId },
-        data: {
-          status: GAME_STATUSES.FINISHED,
-          winnerFaction: finalState.winner ?? undefined,
-          totalDays: finalState.currentDay,
-          endedAt: new Date(),
-        },
-      });
-
-      // 7. 结算确定性指标 + 投递 LLM-as-judge 任务（失败不影响 FINISHED 落库，可手动补算/补评）
+      // 6. 结算确定性指标 + 投递 LLM-as-judge 任务（失败不影响 FINISHED 落库，可手动补算/补评）
       try {
         await this.settlementService.settleGame(gameId);
         const judged = await this.judgeQueueService.enqueueGame(gameId);

@@ -6,6 +6,7 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建女巫解药决策 Schema（值域收敛到刀口座位）
@@ -87,7 +88,7 @@ export class WitchAntidoteNode {
         const reasoning = await this.agentRuntime.streamReasoning(
           contextData,
           threadId,
-          undefined,
+          context.signal,
           (_token) => {
             // 可选：SSE 推送推理过程
           },
@@ -98,7 +99,7 @@ export class WitchAntidoteNode {
           contextData,
           reasoning,
           buildWitchAntidoteSchema([targetPlayer.seatNo]),
-          undefined,
+          context.signal,
           threadId,
         );
 
@@ -140,6 +141,9 @@ export class WitchAntidoteNode {
           return {};
         }
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
         );

@@ -127,12 +127,8 @@ class ApiClient {
   /**
    * 创建 SSE 连接
    */
-  createSSEConnection(
-    gameId: string,
-    opts: { lastSequence?: number; perspective?: string } = {},
-  ): EventSource {
+  createSSEConnection(gameId: string, opts: { perspective?: string } = {}): EventSource {
     const params = new URLSearchParams();
-    if (opts.lastSequence !== undefined) params.set('lastSequence', String(opts.lastSequence));
     if (opts.perspective) params.set('perspective', opts.perspective);
     const query = params.toString();
     return new EventSource(`${this.baseURL}/games/${gameId}/stream${query ? `?${query}` : ''}`);

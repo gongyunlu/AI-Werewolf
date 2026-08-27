@@ -2,6 +2,7 @@
   "extends": "@ai-werewolf/tsconfig/nest.json",
   "compilerOptions": {
     "outDir": "./dist",
+    "incremental": false,
     "types": ["node", "jest"],
     "ignoreDeprecations": "6.0",
     "baseUrl": "./src",

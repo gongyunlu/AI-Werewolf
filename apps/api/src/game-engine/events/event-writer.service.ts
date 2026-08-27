@@ -102,7 +102,7 @@ export class EventWriterService {
       actionType: ACTION_TYPES.WITCH_SAVE,
       visibility: VISIBILITY_TYPES.WITCH,
       actorId,
-      targetIds: [targetId],
+      targetIds: targetSeatNo !== 0 ? [targetId] : [],
       content: {
         targetSeatNo,
         saved: targetSeatNo !== 0,
@@ -132,7 +132,7 @@ export class EventWriterService {
       actionType: ACTION_TYPES.WITCH_POISON,
       visibility: VISIBILITY_TYPES.WITCH,
       actorId,
-      targetIds: [targetId],
+      targetIds: targetSeatNo !== 0 ? [targetId] : [],
       content: {
         targetSeatNo,
         used: targetSeatNo !== 0,

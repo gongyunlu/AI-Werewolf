@@ -6,6 +6,7 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { throwIfAborted } from '@/agent-runtime/abort.utils';
 
 /**
  * 狼人自爆决策 Schema
@@ -89,6 +90,7 @@ export class WolfExplodeNode {
 
       await Promise.allSettled(werewolves.map(decide));
       context.signal?.removeEventListener('abort', onGameAbort);
+      throwIfAborted(context.signal);
 
       if (!explodeWinner) {
         return {};

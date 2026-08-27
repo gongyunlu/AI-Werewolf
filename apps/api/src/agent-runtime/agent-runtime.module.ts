@@ -1,14 +1,13 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AgentRuntimeService } from './agent-runtime.service';
-import { AgentToolsFactory } from './tools/agent-tools.factory';
-import { RoleToolsInitializer } from './tools/role-tools-initializer.provider';
 import { AbortControllerManager } from './abort-controller.manager';
 import { MemoryModule } from '../memory/memory.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SkillLoaderModule } from '../skills/skill-loader.module';
 import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.module';
 import { ObservabilityModule } from '../observability/observability.module';
+import { ChatHistoryService, chatHistoryPoolProvider } from './chat-history.service';
 
 @Module({
   imports: [
@@ -19,7 +18,12 @@ import { ObservabilityModule } from '../observability/observability.module';
     SpeechSummarizerModule,
     ObservabilityModule,
   ],
-  providers: [AgentRuntimeService, AgentToolsFactory, RoleToolsInitializer, AbortControllerManager],
-  exports: [AgentRuntimeService, AgentToolsFactory, AbortControllerManager],
+  providers: [
+    chatHistoryPoolProvider,
+    ChatHistoryService,
+    AgentRuntimeService,
+    AbortControllerManager,
+  ],
+  exports: [AgentRuntimeService, AbortControllerManager],
 })
 export class AgentRuntimeModule {}

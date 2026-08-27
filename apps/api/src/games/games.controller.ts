@@ -5,7 +5,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
-  BadRequestException,
+  NotImplementedException,
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -14,13 +14,14 @@ import { CreateGameDto } from './dto/create-game.dto';
 import { QueryGamesDto } from './dto/query-games.dto';
 import { GamesService } from './games.service';
 import { GameQueueService } from '../game-queue/game-queue.service';
-import { GAME_STATUSES } from '@ai-werewolf/shared';
+import { GameLaunchService } from './game-launch.service';
 
 @ApiTags('games')
 @Controller('games')
 export class GamesController {
   constructor(
     private readonly gamesService: GamesService,
+    private readonly gameLaunch: GameLaunchService,
     private readonly gameQueue: GameQueueService,
     private readonly logger: PinoLogger,
   ) {
@@ -50,10 +51,7 @@ export class GamesController {
   @Post(':id/start')
   @ApiOperation({ summary: '开始对局（投递到队列异步执行）' })
   async start(@Param('id', new ParseUUIDPipe()) id: string) {
-    // 先更新状态为 running，再投递任务
-    // 避免 worker 在状态更新前处理任务导致跳过执行
-    const game = await this.gamesService.startGame(id);
-    await this.gameQueue.addGameJob(id);
+    const game = await this.gameLaunch.start(id);
     this.logger.info({ gameId: id }, '对局已投递到队列');
 
     return game;
@@ -83,24 +81,13 @@ export class GamesController {
   @Post(':id/pause')
   @ApiOperation({ summary: '暂停对局' })
   async pause(@Param('id', new ParseUUIDPipe()) id: string) {
-    const removedFromQueue = await this.gameQueue.cancelJob(id);
-    await this.gamesService.pauseGame(id);
-    return { success: true, message: '对局已暂停', removedFromQueue };
+    throw new NotImplementedException(`对局 ${id} 暂不支持暂停`);
   }
 
   @Post(':id/resume')
   @ApiOperation({ summary: '继续对局' })
   async resume(@Param('id', new ParseUUIDPipe()) id: string) {
-    const game = await this.gamesService.getGameById(id);
-    if (game.status !== GAME_STATUSES.PAUSED) {
-      throw new BadRequestException(
-        `只能继续 ${GAME_STATUSES.PAUSED} 状态的对局，当前状态: ${game.status}`,
-      );
-    }
-    await this.gameQueue.addGameJob(id);
-    await this.gamesService.resumeGame(id);
-
-    return { success: true, message: '对局已继续' };
+    throw new NotImplementedException(`对局 ${id} 暂不支持恢复执行`);
   }
 
   // ========== 管理端点 ==========
@@ -116,34 +103,13 @@ export class GamesController {
   @Post('admin/recover-games')
   @ApiOperation({ summary: '批量恢复所有待恢复状态的对局' })
   async recoverAllGames() {
-    const games = await this.gamesService.getPendingRecoveryGames();
-    for (const game of games) {
-      await this.gamesService.updateGameStatus(game.id, GAME_STATUSES.RUNNING);
-      await this.gameQueue.addGameJob(game.id);
-    }
-    return {
-      message: `已恢复 ${games.length} 个对局`,
-      games: games.map((g) => ({ id: g.id, startedAt: g.startedAt })),
-    };
+    throw new NotImplementedException('暂不支持恢复中断的对局');
   }
 
   @Post('admin/recover-game/:id')
   @ApiOperation({ summary: '恢复单个对局' })
   async recoverSingleGame(@Param('id', new ParseUUIDPipe()) id: string) {
-    const game = await this.gamesService.getGameById(id);
-
-    if (game.status !== GAME_STATUSES.PENDING_RECOVERY) {
-      throw new BadRequestException(
-        `对局状态为 ${game.status}，只能恢复 ${GAME_STATUSES.PENDING_RECOVERY} 状态的对局`,
-      );
-    }
-    await this.gamesService.updateGameStatus(id, GAME_STATUSES.RUNNING);
-    await this.gameQueue.addGameJob(id);
-
-    return {
-      message: `对局 ${id} 已重新投递到队列`,
-      gameId: id,
-    };
+    throw new NotImplementedException(`对局 ${id} 暂不支持恢复执行`);
   }
 
   @Post('admin/clear-pending-recovery')

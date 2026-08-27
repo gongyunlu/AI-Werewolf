@@ -1,15 +1,24 @@
 import { Injectable } from '@nestjs/common';
-import { Subject, Observable, concat, from } from 'rxjs';
-import type { SseMessage, SseSceneMessage, SseEmitPayload } from './sse-event.types';
+import { Subject, Observable } from 'rxjs';
+import type {
+  ConnectionReadyEvent,
+  GameFinishedSnapshot,
+  PlayerDeathSnapshot,
+  SceneSnapshot,
+  SseMessage,
+  SseSceneMessage,
+  SseEmitPayload,
+} from './sse-event.types';
 
 /** 每局重放缓冲上限，防止异常中断的对局让内存无限增长 */
 const MAX_HISTORY_PER_GAME = 10000;
+type SequencedSseMessage = SseSceneMessage & { sequence: number };
 
 @Injectable()
 export class SseBroadcasterService {
   private readonly subjects = new Map<string, Subject<SseMessage>>();
   private readonly sequences = new Map<string, number>();
-  private readonly histories = new Map<string, SseSceneMessage[]>();
+  private readonly histories = new Map<string, SequencedSseMessage[]>();
 
   /** 获取或创建游戏的 Subject，调用方负责 complete */
   getOrCreate(gameId: string): Subject<SseMessage> {
@@ -27,7 +36,7 @@ export class SseBroadcasterService {
     if (!subject) return;
     const seq = this.sequences.get(gameId)! + 1;
     this.sequences.set(gameId, seq);
-    const msg = { ...message, sequence: seq } as SseSceneMessage;
+    const msg = { ...message, sequence: seq } as SequencedSseMessage;
     const history = this.histories.get(gameId);
     if (history) {
       history.push(msg);
@@ -43,16 +52,118 @@ export class SseBroadcasterService {
     return this.subjects.has(gameId);
   }
 
-  /**
-   * SSE 控制器用于订阅。
-   * 先重放 lastSequence 之后的历史事件（断线重连/晚订阅场景），再订阅实时流。
-   * 注意：调用时 gameId 应已存在（通过 exists() 校验），
-   * 否则会隐式创建孤儿 Subject。
-   */
-  getStream(gameId: string, lastSequence = 0): Observable<SseMessage> {
-    const history = this.histories.get(gameId) ?? [];
-    const replay = history.filter((m) => m.sequence > lastSequence);
-    return concat(from(replay), this.getOrCreate(gameId).asObservable());
+  /** 建立无漏帧的恢复快照 + 实时流。 */
+  getRecoveryStream(gameId: string): Observable<SseMessage> {
+    return new Observable<SseMessage>((subscriber) => {
+      const subject = this.subjects.get(gameId);
+      if (!subject) {
+        subscriber.complete();
+        return undefined;
+      }
+
+      const pending: SequencedSseMessage[] = [];
+      let readySent = false;
+      let completedBeforeReady = false;
+      let errorBeforeReady: unknown;
+
+      const liveSubscription = subject.subscribe({
+        next: (message) => {
+          if (readySent) subscriber.next(message);
+          else pending.push(message as SequencedSseMessage);
+        },
+        error: (error: unknown) => {
+          if (readySent) subscriber.error(error);
+          else errorBeforeReady = error;
+        },
+        complete: () => {
+          if (readySent) subscriber.complete();
+          else completedBeforeReady = true;
+        },
+      });
+
+      const watermark = this.sequences.get(gameId) ?? 0;
+      const history = (this.histories.get(gameId) ?? []).filter(
+        (message) => message.sequence <= watermark,
+      );
+      subscriber.next(this.buildReadyEvent(gameId, watermark, history));
+      readySent = true;
+
+      for (const message of pending) {
+        if (message.sequence > watermark) subscriber.next(message);
+      }
+
+      if (errorBeforeReady) subscriber.error(errorBeforeReady);
+      else if (completedBeforeReady) subscriber.complete();
+
+      return () => liveSubscription.unsubscribe();
+    });
+  }
+
+  private buildReadyEvent(
+    gameId: string,
+    lastSequence: number,
+    history: SequencedSseMessage[],
+  ): ConnectionReadyEvent {
+    const scenes: SceneSnapshot[] = [];
+    const scenesById = new Map<string, SceneSnapshot>();
+    const deathsByPlayer = new Map<string, PlayerDeathSnapshot>();
+    let gameFinished: GameFinishedSnapshot | undefined;
+
+    for (const message of history) {
+      switch (message.type) {
+        case 'scene.open': {
+          const scene: SceneSnapshot = {
+            sceneId: message.sceneId,
+            sceneType: message.sceneType,
+            visibility: message.visibility,
+            actorId: message.actorId,
+            thinking: '',
+            content: message.initialContent ?? '',
+            status: 'active',
+            thinkingDurationMs: 0,
+            contentDurationMs: 0,
+            metadata: message.metadata,
+          };
+          scenes.push(scene);
+          scenesById.set(scene.sceneId, scene);
+          break;
+        }
+        case 'scene.append': {
+          const scene = scenesById.get(message.sceneId);
+          if (!scene) break;
+          if (message.contentType === 'thinking') scene.thinking += message.token;
+          else scene.content += message.token;
+          break;
+        }
+        case 'scene.close': {
+          const scene = scenesById.get(message.sceneId);
+          if (!scene) break;
+          scene.status = 'closed';
+          scene.thinkingDurationMs = message.thinkingDurationMs;
+          scene.contentDurationMs = message.contentDurationMs;
+          break;
+        }
+        case 'player.died':
+          deathsByPlayer.set(message.playerId, {
+            playerId: message.playerId,
+            deathDay: message.deathDay,
+            deathCause: message.deathCause,
+          });
+          break;
+        case 'game.finished':
+          gameFinished = { winner: message.winner };
+          break;
+      }
+    }
+
+    return {
+      type: 'connection.ready',
+      gameId,
+      lastSequence,
+      snapshot: scenes,
+      playerDeaths: [...deathsByPlayer.values()],
+      gameFinished,
+    };
   }
 
   /** 游戏结束后清理 */

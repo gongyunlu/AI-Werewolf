@@ -44,11 +44,9 @@ export class GameQueueService {
       { gameId },
       {
         jobId: gameId,
-        attempts: 3, // 失败后重试 3 次
-        backoff: {
-          type: 'exponential',
-          delay: 5000,
-        },
+        // 对局执行会持续写入事件和玩家状态；在没有断点恢复前，
+        // 不能用同一 gameId 从初始状态自动重跑。
+        attempts: 1,
         removeOnComplete: {
           age: 3600, // 完成后 1 小时自动清理
           count: 100, // 最多保留 100 条完成记录

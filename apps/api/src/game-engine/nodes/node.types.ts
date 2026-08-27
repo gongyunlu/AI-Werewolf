@@ -1,7 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
 import type { GameGraphState } from '../core/types';
 import type { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import type { AgentToolsFactory } from '@/agent-runtime/tools/agent-tools.factory';
 import type { PrismaService } from '@/prisma/prisma.service';
 import type { EventWriterService } from '../events/event-writer.service';
 import type { GamePreset } from '../presets/game-presets';
@@ -21,7 +20,6 @@ export type GameNode = (state: GameGraphState) => Promise<Partial<GameGraphState
  */
 export interface NodeContext {
   agentRuntime: AgentRuntimeService;
-  toolsFactory: AgentToolsFactory;
   prisma: PrismaService;
   eventWriter: EventWriterService;
   configService: ConfigService<Env, true>;

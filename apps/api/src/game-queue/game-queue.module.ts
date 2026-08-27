@@ -8,6 +8,7 @@ import { GameExecutorModule } from '../game-executor/game-executor.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import type { Env } from '../config/env.validation';
+import { SseModule } from '../sse/sse.module';
 
 /**
  * 游戏队列模块
@@ -42,6 +43,7 @@ import type { Env } from '../config/env.validation';
     ConfigModule,
     PrismaModule,
     GameExecutorModule,
+    SseModule,
   ],
   providers: [GameQueueService, GameWorkerService],
   exports: [GameQueueService],

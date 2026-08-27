@@ -8,6 +8,7 @@ import type { GameJobData } from './game-queue.service';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GamePausedException } from '../game-engine/core/game-engine.exception';
 import type { Env } from '../config/env.validation';
+import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 
 /**
  * 游戏队列 Worker
@@ -30,6 +31,7 @@ export class GameWorkerService extends WorkerHost {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService<Env, true>,
     private readonly logger: PinoLogger,
+    private readonly broadcaster: SseBroadcasterService,
   ) {
     super();
     // 直接注入 PinoLogger 而非 @InjectPinoLogger：后者按类名注册具名 provider，
@@ -42,7 +44,7 @@ export class GameWorkerService extends WorkerHost {
   async process(job: Job<GameJobData>): Promise<void> {
     const { gameId } = job.data;
     const attempt = job.attemptsMade + 1;
-    const maxAttempts = job.opts.attempts ?? 3;
+    const maxAttempts = job.opts.attempts ?? 1;
     const startedAt = Date.now();
 
     const game = await this.prisma.game.findUnique({
@@ -92,6 +94,8 @@ export class GameWorkerService extends WorkerHost {
             endedAt: new Date(),
           },
         });
+        this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });
+        this.broadcaster.complete(gameId);
         this.logger.error(
           { gameId, jobId: job.id, attempt, maxAttempts, err: message },
           '对局任务已达最大重试次数，标记为 aborted',

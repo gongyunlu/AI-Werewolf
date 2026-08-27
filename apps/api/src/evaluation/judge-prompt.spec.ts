@@ -131,6 +131,35 @@ describe('buildJudgePrompt 视角还原', () => {
     expect(user).not.toContain('狼人刀了 3号位');
   });
 
+  it('女巫跳过解药后仍可看到后续刀口', () => {
+    const events: JudgeEventInput[] = [
+      ev({
+        sequence: 10,
+        actionType: ACTION_TYPES.WITCH_SAVE,
+        visibility: VISIBILITY_TYPES.WITCH,
+        actorId: 'p2',
+        content: { targetSeatNo: 0, saved: false },
+      }),
+      ev({
+        sequence: 15,
+        actionType: ACTION_TYPES.WOLF_KILL,
+        visibility: VISIBILITY_TYPES.WOLF_KILL,
+        content: { targetSeatNo: 3 },
+      }),
+    ];
+
+    const { user } = buildJudgePrompt({
+      ...baseInput,
+      playerRole: ROLES.WITCH,
+      playerFaction: FACTIONS.VILLAGER,
+      teammates: [],
+      decision: { sequence: 20, actionType: ACTION_TYPES.WITCH_SAVE, day: 2, targetSeatNo: 3 },
+      events,
+    });
+
+    expect(user).toContain('狼人刀了 3号位');
+  });
+
   it('超过 20 条可见事件时只保留最近 20 条', () => {
     const events: JudgeEventInput[] = Array.from({ length: 25 }, (_, i) =>
       ev({

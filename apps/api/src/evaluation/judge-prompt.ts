@@ -132,7 +132,8 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
     (e) =>
       e.sequence < decision.sequence &&
       e.actionType === ACTION_TYPES.WITCH_SAVE &&
-      e.actorId === playerId,
+      e.actorId === playerId &&
+      e.content.saved === true,
   );
 
   const visible = getVisibleVisibilitiesForRole({

@@ -11,7 +11,7 @@ import { useSceneEngine } from '@/hooks/useSceneEngine';
 import { useNightActionState } from '@/hooks/useNightActionState';
 import { apiClient } from '@/lib/api-client';
 import type { GameListItem } from '@/types/game';
-import type { SseMessage } from '@/types/sse';
+import type { PlayerDeathSnapshot, SseMessage } from '@/types/sse';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { Play } from 'lucide-react';
 
@@ -34,6 +34,7 @@ export default function GameWatchPage() {
   const [game, setGame] = useState<GameListItem | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const playerDeathsRef = useRef(new Map<string, PlayerDeathSnapshot>());
 
   const { state, handleMessage } = useSceneEngine(perspective);
   const nightActionState = useNightActionState(state.closedScenes);
@@ -41,8 +42,13 @@ export default function GameWatchPage() {
   const onMessage = useCallback(
     (msg: SseMessage) => {
       handleMessage(msg);
+      if (msg.type === 'connection.ready') {
+        playerDeathsRef.current = new Map(msg.playerDeaths.map((death) => [death.playerId, death]));
+        setGame((prev) => (prev ? applyPlayerDeaths(prev, playerDeathsRef.current) : prev));
+      }
       // 玩家出局：同步更新头像死亡状态（对局中 game 只拉取一次，需靠 SSE 事件驱动）
       if (msg.type === 'player.died') {
+        playerDeathsRef.current.set(msg.playerId, msg);
         setGame((prev) =>
           prev
             ? {
@@ -60,7 +66,12 @@ export default function GameWatchPage() {
     [handleMessage],
   );
 
-  const isRunning = game?.status === GAME_STATUSES.RUNNING;
+  useEffect(() => {
+    playerDeathsRef.current = new Map();
+    setGame(null);
+  }, [gameId]);
+
+  const isRunning = game?.id === gameId && game?.status === GAME_STATUSES.RUNNING;
 
   useGameStream(gameId ?? '', perspective, onMessage, { enabled: isRunning });
 
@@ -68,7 +79,7 @@ export default function GameWatchPage() {
     if (!gameId) return;
     apiClient
       .getGame(gameId)
-      .then(setGame)
+      .then((loadedGame) => setGame(applyPlayerDeaths(loadedGame, playerDeathsRef.current)))
       .catch(() => null);
   }, [gameId]);
 
@@ -237,4 +248,19 @@ export default function GameWatchPage() {
       )}
     </div>
   );
+}
+
+function applyPlayerDeaths(
+  game: GameListItem,
+  deaths: Map<string, PlayerDeathSnapshot>,
+): GameListItem {
+  if (deaths.size === 0) return game;
+
+  return {
+    ...game,
+    players: game.players.map((player) => {
+      const death = deaths.get(player.id);
+      return death ? { ...player, deathDay: death.deathDay, deathCause: death.deathCause } : player;
+    }),
+  };
 }

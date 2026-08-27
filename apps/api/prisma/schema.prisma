@@ -124,10 +124,10 @@ model Event {
   content    Json     @db.JsonB // 事件负载，结构随 actionType 变化（发言文本、投票详情、夜间行动结果等）
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz // 记录写入时间，不可修改
 
-  game       Game            @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  actor      Player?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  memories   Memory[]
-  judgments  AgentJudgment[]
+  game              Game               @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  actor             Player?            @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  memories          Memory[]
+  judgments         AgentJudgment[]
   decisionJudgments DecisionJudgment[]
 
   @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
@@ -137,31 +137,36 @@ model Event {
 // Agent 长期记忆表，跨对局持久化，用于自我进化。
 // 每条记忆属于特定玩家，可关联到产生它的对局和事件，也可由多局提炼生成。
 model Memory {
-  id              String                       @id @default(uuid()) @db.Uuid
-  agentId         String                       @map("agent_id") @db.Uuid // 所属 Agent，跨对局持久化
-  label           String                       @db.VarChar(128) // 记忆集标签，配合 Agent.memoryLabel 实现"切换记忆版本"（如 "张三" → "张三super"）
-  gameId          String?                      @map("game_id") @db.Uuid // 产生该记忆的对局（多局提炼时为 NULL）
-  eventId         String?                      @map("event_id") @db.Uuid // 触发事件（可选）
-  type            String                       @db.VarChar(32) // 类型，取值口径见 packages/shared 的 MEMORY_TYPES
-  title           String                       @db.VarChar(256) // 简短标题
-  content         String                       @db.Text // 详细内容，自然语言或结构化 JSON
-  importance      Float                        @default(0.5) @db.Real // 重要性评分 0.0~1.0
-  confidence      Float                        @default(0.5) @db.Real // 置信度评分 0.0~1.0
-  retrievalCount  Int                          @default(0) @map("retrieval_count") // 被检索使用次数
-  lastRetrievedAt DateTime?                    @map("last_retrieved_at") @db.Timestamptz // 最近一次被检索时间
-  isActive        Boolean                      @default(true) @map("is_active") // 是否活跃（可归档）
-  source          String?                      @db.VarChar(32) // 来源：auto/manual/refined
-  metadata        Json?                        @db.JsonB // 扩展元数据（如自定义标签、外部引用等）
-  // 语义检索用嵌入向量，维度对齐火山方舟 doubao-embedding-text-240715 (2560)。
-  // 不建 HNSW/IVFFlat 索引：pgvector 单精度索引维度上限 2000，2560 只能顺序扫描。
-  // TODO: 接入 embedding 生成服务后填充
-  embedding       Unsupported("vector(2560)")?
-  createdAt       DateTime                     @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt       DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  id                   String                       @id @default(uuid()) @db.Uuid
+  agentId              String                       @map("agent_id") @db.Uuid // 所属 Agent，跨对局持久化
+  label                String                       @db.VarChar(128) // 记忆集标签，配合 Agent.memoryLabel 实现"切换记忆版本"（如 "张三" → "张三super"）
+  gameId               String?                      @map("game_id") @db.Uuid // 产生该记忆的对局（多局提炼时为 NULL）
+  eventId              String?                      @map("event_id") @db.Uuid // 触发事件（可选）
+  type                 String                       @db.VarChar(32) // 类型，取值口径见 packages/shared 的 MEMORY_TYPES
+  title                String                       @db.VarChar(256) // 简短标题
+  content              String                       @db.Text // 详细内容，自然语言或结构化 JSON
+  importance           Float                        @default(0.5) @db.Real // 重要性评分 0.0~1.0
+  confidence           Float                        @default(0.5) @db.Real // 置信度评分 0.0~1.0
+  retrievalCount       Int                          @default(0) @map("retrieval_count") // 被检索使用次数
+  lastRetrievedAt      DateTime?                    @map("last_retrieved_at") @db.Timestamptz // 最近一次被检索时间
+  isActive             Boolean                      @default(true) @map("is_active") // 是否活跃（可归档）
+  source               String?                      @db.VarChar(32) // 来源：auto/manual/seed/refined
+  metadata             Json?                        @db.JsonB // 扩展元数据（如自定义标签、外部引用等）
+  // 语义检索用嵌入向量，维度对齐火山方舟 doubao-embedding-vision (2048)。
+  // 当前数据规模使用精确检索；规模增长后可评估 halfvec(2048) 表达式 HNSW 索引。
+  embedding            Unsupported("vector(2048)")?
+  embeddingModel       String?                      @map("embedding_model") @db.VarChar(128)
+  embeddingDimension   Int?                         @map("embedding_dimension")
+  embeddingContentHash String?                      @map("embedding_content_hash") @db.Char(64)
+  embeddedAt           DateTime?                    @map("embedded_at") @db.Timestamptz
+  createdAt            DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
 
-  agent Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  game  Game?  @relation(fields: [gameId], references: [id], onDelete: SetNull)
-  event Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  agent            Agent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  game             Game?              @relation(fields: [gameId], references: [id], onDelete: SetNull)
+  event            Event?             @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  sourceRelations  MemoryDerivation[] @relation("MemoryDerivationDerived")
+  derivedRelations MemoryDerivation[] @relation("MemoryDerivationSource")
 
   @@index([agentId, label])
   @@index([agentId, type])
@@ -170,23 +175,41 @@ model Memory {
   @@map("memories")
 }
 
+// 记忆提炼的显式溯源关系。固化记忆仍可保持 isActive=true，来源关系与检索状态互不耦合。
+model MemoryDerivation {
+  derivedMemoryId String   @map("derived_memory_id") @db.Uuid
+  sourceMemoryId  String   @map("source_memory_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  derivedMemory Memory @relation("MemoryDerivationDerived", fields: [derivedMemoryId], references: [id], onDelete: Cascade)
+  sourceMemory  Memory @relation("MemoryDerivationSource", fields: [sourceMemoryId], references: [id], onDelete: Cascade)
+
+  @@id([derivedMemoryId, sourceMemoryId])
+  @@index([sourceMemoryId])
+  @@map("memory_derivations")
+}
+
 // 全局共享记忆表，存储跨对局、跨玩家的通用知识和统计规律。
 model GlobalMemory {
-  id              String                       @id @default(uuid()) @db.Uuid
-  type            String                       @db.VarChar(32) // 类型，取值口径见 packages/shared 的 GLOBAL_MEMORY_TYPES
-  title           String                       @db.VarChar(256) // 简短标题
-  content         String                       @db.Text // 详细内容
-  importance      Float                        @default(0.5) @db.Real
-  confidence      Float                        @default(0.5) @db.Real
-  source          String?                      @db.VarChar(32) // 来源：auto_stats/manual/aggregated
-  retrievalCount  Int                          @default(0) @map("retrieval_count")
-  lastRetrievedAt DateTime?                    @map("last_retrieved_at") @db.Timestamptz
-  isActive        Boolean                      @default(true) @map("is_active")
-  tags            Json?                        @db.JsonB // 标签，如 ["wolf","night1","kill"]
+  id                   String                       @id @default(uuid()) @db.Uuid
+  type                 String                       @db.VarChar(32) // 类型，取值口径见 packages/shared 的 GLOBAL_MEMORY_TYPES
+  title                String                       @db.VarChar(256) // 简短标题
+  content              String                       @db.Text // 详细内容
+  importance           Float                        @default(0.5) @db.Real
+  confidence           Float                        @default(0.5) @db.Real
+  source               String?                      @db.VarChar(32) // 来源：auto_stats/manual/aggregated
+  retrievalCount       Int                          @default(0) @map("retrieval_count")
+  lastRetrievedAt      DateTime?                    @map("last_retrieved_at") @db.Timestamptz
+  isActive             Boolean                      @default(true) @map("is_active")
+  tags                 Json?                        @db.JsonB // 标签，如 ["wolf","night1","kill"]
   // 语义检索用嵌入向量，口径同 Memory.embedding。
-  embedding       Unsupported("vector(2560)")?
-  createdAt       DateTime                     @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt       DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  embedding            Unsupported("vector(2048)")?
+  embeddingModel       String?                      @map("embedding_model") @db.VarChar(128)
+  embeddingDimension   Int?                         @map("embedding_dimension")
+  embeddingContentHash String?                      @map("embedding_content_hash") @db.Char(64)
+  embeddedAt           DateTime?                    @map("embedded_at") @db.Timestamptz
+  createdAt            DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
 
   @@index([type])
   @@index([importance])

@@ -6,6 +6,7 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建女巫毒药决策 Schema（值域动态收敛到存活玩家）
@@ -84,7 +85,7 @@ export class WitchPoisonNode {
         const reasoning = await this.agentRuntime.streamReasoning(
           contextData,
           threadId,
-          undefined,
+          context.signal,
           (_token) => {
             // 可选：SSE 推送推理过程
           },
@@ -95,7 +96,7 @@ export class WitchPoisonNode {
           contextData,
           reasoning,
           buildWitchPoisonSchema(legalSeatNos),
-          undefined,
+          context.signal,
           threadId,
         );
 
@@ -105,6 +106,15 @@ export class WitchPoisonNode {
             gameLogger.warn(
               `[女巫毒药] 目标座位号 ${decision.targetSeatNo} 非法，降级为不使用毒药`,
             );
+            const skipEvent = await context.eventWriter.writeWitchPoisonEvent({
+              gameId: state.gameId,
+              day: state.currentDay,
+              actorId: witch.id,
+              targetId: witch.id,
+              targetSeatNo: 0,
+              thinking: reasoning,
+            });
+            await context.eventBus?.publish(skipEvent);
             return {};
           }
 
@@ -138,10 +148,22 @@ export class WitchPoisonNode {
           return {};
         }
       } catch (error) {
+        if (isAbortError(error, context.signal)) {
+          throw error;
+        }
         gameLogger.error(
           `[女巫毒药] Agent 执行异常，降级为不使用: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+
+      const fallbackEvent = await context.eventWriter.writeWitchPoisonEvent({
+        gameId: state.gameId,
+        day: state.currentDay,
+        actorId: witch.id,
+        targetId: witch.id,
+        targetSeatNo: 0,
+      });
+      await context.eventBus?.publish(fallbackEvent);
 
       // 降级策略：不使用毒药
       return {};

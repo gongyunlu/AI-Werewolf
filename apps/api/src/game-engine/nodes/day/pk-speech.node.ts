@@ -4,6 +4,7 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
 
 /**
  * PK 发言节点（流式版本）
@@ -25,6 +26,12 @@ export class PkSpeechNode {
       pkPlayers.sort((a, b) => a.seatNo! - b.seatNo!);
 
       for (const player of pkPlayers) {
+        throwIfAborted(context.signal);
+        const sceneId = `pk-speech-${state.gameId}-${state.currentDay}-${player.id}`;
+        let sceneOpened = false;
+        let thinkingDurationMs = 0;
+        let contentDurationMs = 0;
+
         try {
           const extraInfo = `你正在进行PK发言。这是第${state.pkRound}轮PK，你需要为自己辩护，说服其他玩家不要投你。`;
 
@@ -37,7 +44,6 @@ export class PkSpeechNode {
 
           const threadId = getPlayerThreadId(state.gameId, player.id);
 
-          const sceneId = `pk-speech-${state.gameId}-${state.currentDay}-${player.id}`;
           context.broadcaster?.emit(state.gameId, {
             type: 'scene.open',
             sceneId,
@@ -45,34 +51,32 @@ export class PkSpeechNode {
             visibility: 'public',
             actorId: player.id,
           });
+          sceneOpened = true;
 
           // 流式输出：思考 + 发言正文
-          const { thinking, content, thinkingDurationMs, contentDurationMs } =
-            await this.agentRuntime.streamSpeech(contextData, threadId, {
-              onThinking: (token) => {
-                context.broadcaster?.emit(state.gameId, {
-                  type: 'scene.append',
-                  sceneId,
-                  token,
-                  contentType: 'thinking',
-                });
-              },
-              onContent: (token) => {
-                context.broadcaster?.emit(state.gameId, {
-                  type: 'scene.append',
-                  sceneId,
-                  token,
-                  contentType: 'content',
-                });
-              },
-            });
-
-          context.broadcaster?.emit(state.gameId, {
-            type: 'scene.close',
-            sceneId,
-            thinkingDurationMs,
-            contentDurationMs,
+          const result = await this.agentRuntime.streamSpeech(contextData, threadId, {
+            signal: context.signal,
+            onThinking: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'thinking',
+              });
+            },
+            onContent: (token) => {
+              context.broadcaster?.emit(state.gameId, {
+                type: 'scene.append',
+                sceneId,
+                token,
+                contentType: 'content',
+              });
+            },
           });
+
+          const { thinking, content } = result;
+          thinkingDurationMs = result.thinkingDurationMs;
+          contentDurationMs = result.contentDurationMs;
 
           await context.eventWriter.writePlayerSpeechEvent({
             gameId: state.gameId,
@@ -83,9 +87,21 @@ export class PkSpeechNode {
             thinking,
           });
         } catch (error) {
+          if (isAbortError(error, context.signal)) {
+            throw error;
+          }
           gameLogger.error(
             `[PK发言] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,
           );
+        } finally {
+          if (sceneOpened) {
+            context.broadcaster?.emit(state.gameId, {
+              type: 'scene.close',
+              sceneId,
+              thinkingDurationMs,
+              contentDurationMs,
+            });
+          }
         }
       }
 

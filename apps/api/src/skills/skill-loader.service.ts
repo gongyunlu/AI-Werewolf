@@ -42,14 +42,9 @@ export interface Skill extends SkillMetadata {
 @Injectable()
 export class SkillLoaderService {
   private readonly logger = new Logger(SkillLoaderService.name);
-  private readonly skillsDir: string;
   private readonly cache = new Map<string, Skill>();
 
-  constructor(private readonly configService: ConfigService<Env, true>) {
-    const envSkillsDir = this.configService.get('SKILLS_DIR', { infer: true });
-    // 当前只支持 v1
-    this.skillsDir = envSkillsDir || path.join(__dirname, 'v1');
-  }
+  constructor(private readonly configService: ConfigService<Env, true>) {}
 
   /**
    * 加载完整 Skill（正文）
@@ -59,6 +54,7 @@ export class SkillLoaderService {
    * @returns 完整的 Skill 对象，包含内容
    */
   async loadSkill(skillId: string, version: string = 'v1'): Promise<Skill | null> {
+    this.assertSafePath(skillId, version);
     const cacheKey = `${version}:${skillId}`;
 
     // 检查缓存
@@ -70,7 +66,11 @@ export class SkillLoaderService {
       // 构建版本化的路径
       const skillsBaseDir =
         this.configService.get('SKILLS_DIR') || path.join(__dirname, '../skills');
-      const versionedPath = path.join(skillsBaseDir, version, skillId, 'SKILL.md');
+      const versionRoot = path.resolve(skillsBaseDir, version);
+      const versionedPath = path.resolve(versionRoot, skillId, 'SKILL.md');
+      if (!versionedPath.startsWith(`${versionRoot}${path.sep}`)) {
+        throw new Error(`非法 Skill 路径: ${version}:${skillId}`);
+      }
 
       const content = await fs.readFile(versionedPath, 'utf-8');
       const { data, content: markdown } = matter(content);
@@ -87,35 +87,27 @@ export class SkillLoaderService {
       // 缓存
       this.cache.set(cacheKey, skill);
       return skill;
-    } catch {
-      // SKILL.md 不存在，尝试向后兼容
-      return this.loadLegacySkill(skillId);
+    } catch (error) {
+      this.logger.debug(
+        `版本化 Skill 加载失败 ${version}:${skillId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 
-  /**
-   * 向后兼容：加载旧格式的 Skill
-   */
-  private async loadLegacySkill(skillId: string): Promise<Skill | null> {
-    try {
-      const [category, skillName] = skillId.split('/');
-      const legacyPath = path.join(this.skillsDir, category, `${skillName}.md`);
+  async loadRequiredSkill(skillId: string, version: string = 'v1'): Promise<Skill> {
+    const skill = await this.loadSkill(skillId, version);
+    if (!skill) {
+      throw new Error(`必需 Skill 不存在或无法读取: ${version}:${skillId}`);
+    }
+    return skill;
+  }
 
-      const content = await fs.readFile(legacyPath, 'utf-8');
-
-      const skill: Skill = {
-        id: skillId,
-        name: skillName,
-        description: `${skillName} 技能`,
-        tags: [category],
-        content: content.trim(),
-      };
-
-      // 缓存
-      this.cache.set(skillId, skill);
-      return skill;
-    } catch {
-      return null;
+  private assertSafePath(skillId: string, version: string): void {
+    const validSkillId = /^[a-z0-9][a-z0-9_-]*(\/[a-z0-9][a-z0-9_-]*)+$/.test(skillId);
+    const validVersion = /^v[0-9]+$/.test(version);
+    if (!validSkillId || !validVersion) {
+      throw new Error(`非法 Skill 标识: ${version}:${skillId}`);
     }
   }
 
