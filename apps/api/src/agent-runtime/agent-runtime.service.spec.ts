@@ -1,8 +1,9 @@
 import type { ConfigService } from '@nestjs/config';
-import { AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
+import { ACTION_TYPES, AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
 import type { Env } from '../config/env.validation';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { MemoryService } from '../memory/memory.service';
+import type { GlobalMemoryService } from '../memory/global-memory.service';
 import type { SkillLoaderService } from '../skills/skill-loader.service';
 import type { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import type { LangfuseService } from '../observability/langfuse.service';
@@ -30,7 +31,7 @@ type TestableAgentRuntime = {
 };
 
 describe('AgentRuntimeService memory retrieval', () => {
-  it('准备上下文时只检索 Prompt 会消费的 persona 和 strategy', async () => {
+  it('先暂存经验注入，等真实行为事件落库后再精确记录', async () => {
     const player = {
       id: 'player-1',
       gameId: 'game-1',
@@ -42,13 +43,26 @@ describe('AgentRuntimeService memory retrieval', () => {
     const prisma = {
       player: {
         findUnique: jest.fn().mockResolvedValue(player),
-        findMany: jest.fn().mockResolvedValue([]),
+        findMany: jest.fn().mockResolvedValue([{ agentId: 'agent-2', seatNo: 2 }]),
       },
       event: { findMany: jest.fn().mockResolvedValue([]) },
     } as unknown as PrismaService;
     const memoryService = {
       retrieveActiveMemories: jest.fn().mockResolvedValue([]),
+      retrieveExperience: jest.fn().mockResolvedValue({
+        lessons: [
+          { id: 'm1', type: 'lesson', title: 't', content: 'c', importance: 0.8, similarity: 0.9 },
+          { id: 'm3', type: 'lesson', title: 't', content: 'c', importance: 0.7, similarity: 0.3 },
+        ],
+        playerModels: [
+          { id: 'm2', type: 'player_model', title: 't', content: 'c', importance: 0.5 },
+        ],
+      }),
+      recordUsages: jest.fn().mockResolvedValue(undefined),
     } as unknown as MemoryService;
+    const globalMemoryService = {
+      retrieveActivePatterns: jest.fn().mockResolvedValue([]),
+    } as unknown as GlobalMemoryService;
     const speechSummarizer = {
       summarizeForAgent: jest.fn().mockResolvedValue({
         recentSpeeches: [],
@@ -61,6 +75,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       {} as ConfigService<Env, true>,
       prisma,
       memoryService,
+      globalMemoryService,
       {} as SkillLoaderService,
       speechSummarizer,
       {} as LangfuseService,
@@ -77,14 +92,50 @@ describe('AgentRuntimeService memory retrieval', () => {
     runtime.getCurrentRound = jest.fn().mockResolvedValue(1);
     runtime.assembleSystemPrompt = jest.fn().mockResolvedValue('system prompt');
 
-    await runtime.prepareContext({
-      gameId: 'game-1',
-      playerId: 'player-1',
-      scenario: AGENT_SCENARIOS.NIGHT_ACTION,
-    });
+    const contextData = await service.prepareContextPublic(
+      'game-1',
+      'player-1',
+      AGENT_SCENARIOS.VOTE,
+    );
 
     expect(memoryService.retrieveActiveMemories).toHaveBeenCalledWith('agent-1', 'default', {
       types: ['persona', 'strategy'],
     });
+    expect(memoryService.retrieveExperience).toHaveBeenCalledWith({
+      agentId: 'agent-1',
+      label: 'default',
+      opponentAgentIds: ['agent-2'],
+      query: expect.stringContaining('投票'),
+      role: ROLES.VILLAGER,
+      scenario: AGENT_SCENARIOS.VOTE,
+    });
+    expect(memoryService.recordUsages).not.toHaveBeenCalled();
+
+    await service.recordExperienceUsages(contextData, {
+      id: 'event-1',
+      gameId: 'game-1',
+      actorId: 'player-1',
+      actionType: ACTION_TYPES.VOTE,
+      day: 1,
+    });
+
+    expect(memoryService.recordUsages).toHaveBeenCalledWith([
+      expect.objectContaining({
+        memoryId: 'm1',
+        eventId: 'event-1',
+        gameId: 'game-1',
+        actionType: 'vote',
+        day: 1,
+        triggerMatched: true,
+      }),
+      expect.objectContaining({
+        memoryId: 'm3',
+        gameId: 'game-1',
+        actionType: 'vote',
+        day: 1,
+        triggerMatched: false,
+      }),
+      expect.objectContaining({ memoryId: 'm2', triggerMatched: true }),
+    ]);
   });
 });

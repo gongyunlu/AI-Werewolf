@@ -6,7 +6,7 @@ import { EventsModule } from '../game-engine/events/events.module';
 import { SseModule } from '../sse/sse.module';
 import { EventBusModule } from '../event-bus/event-bus.module';
 import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.module';
-import { EvaluationModule } from '../evaluation/evaluation.module';
+import { ReflectionModule } from '../reflection/reflection.module';
 
 /**
  * 游戏执行器模块
@@ -19,7 +19,7 @@ import { EvaluationModule } from '../evaluation/evaluation.module';
     SseModule,
     EventBusModule,
     SpeechSummarizerModule,
-    EvaluationModule,
+    ReflectionModule,
   ],
   providers: [GameExecutorService],
   exports: [GameExecutorService],

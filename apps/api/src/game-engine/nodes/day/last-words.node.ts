@@ -84,7 +84,7 @@ export class LastWordsNode {
             contentDurationMs = result.contentDurationMs;
 
             if (player.seatNo !== null) {
-              await context.eventWriter.writePlayerSpeechEvent({
+              const event = await context.eventWriter.writePlayerSpeechEvent({
                 gameId: state.gameId,
                 day: state.currentDay,
                 actorId: player.id,
@@ -92,6 +92,7 @@ export class LastWordsNode {
                 content,
                 thinking,
               });
+              await this.agentRuntime.recordExperienceUsages(contextData, event);
             }
           } catch (error) {
             if (isAbortError(error, context.signal)) {

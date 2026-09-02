@@ -5,13 +5,15 @@ import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages
 import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
-import { MemoryService, type ActiveMemory } from '../memory/memory.service';
+import { MemoryService, type ActiveMemory, type SimilarMemory } from '../memory/memory.service';
+import { GlobalMemoryService, type ActivePattern } from '../memory/global-memory.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
 import { PromptService } from '../observability/prompt.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
+import { resolveStructuredOutputMethod } from '../observability/structured-output-method';
 import { Prisma } from '../generated/prisma/client';
 import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
 import {
@@ -25,21 +27,15 @@ import {
 } from '@ai-werewolf/shared';
 import { isAbortError, throwIfAborted } from './abort.utils';
 import { formatMemorySection } from './memory-prompt.utils';
+import { buildScenarioQuery } from './scenario-query';
 import { ChatHistoryService } from './chat-history.service';
 
 /**
- * 需走 functionCalling 的模型名前缀。
- *
- * GLM 系列不支持 response_format: json_schema（只支持 json_object），
- * 只能通过 tool call 结构化；其余（deepseek/doubao/kimi）默认 jsonSchema。
+ * lesson 场景匹配阈值：与当前局面的余弦相似度不低于此值，才把注入记为 trigger 命中。
+ * 质量分 lift 只统计命中样本，避免「注入了不相关经验」被算作该行为的收益。
+ * 初值待跑出真实相似度分布后校准。
  */
-const FUNCTION_CALLING_MODEL_PREFIXES = ['glm'] as const;
-
-function resolveStructuredOutputMethod(modelName: string): 'functionCalling' | 'jsonSchema' {
-  return FUNCTION_CALLING_MODEL_PREFIXES.some((prefix) => modelName.startsWith(prefix))
-    ? 'functionCalling'
-    : 'jsonSchema';
-}
+const LESSON_TRIGGER_MATCH_SIMILARITY = 0.5;
 
 type PlayerWithGame = Prisma.PlayerGetPayload<{
   include: { game: true };
@@ -65,7 +61,9 @@ interface AgentContext {
   player: PlayerWithGame;
   game: Prisma.GameGetPayload<Record<string, never>>;
   /** 当前场景 */
-  scenario?: AgentScenario;
+  scenario: AgentScenario;
+  /** 已注入 Prompt、待行为 Event 成功落库后确认的记忆使用关系 */
+  pendingMemoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
 }
 
 /**
@@ -85,6 +83,7 @@ export class AgentRuntimeService {
     private readonly configService: ConfigService<Env, true>,
     private readonly prisma: PrismaService,
     private readonly memoryService: MemoryService,
+    private readonly globalMemoryService: GlobalMemoryService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly langfuse: LangfuseService,
@@ -460,6 +459,48 @@ export class AgentRuntimeService {
     });
   }
 
+  /**
+   * 行为 Event 成功写入后确认本次真正使用的经验。
+   *
+   * 同一个 Event 可能因节点/队列重试重复确认，数据库的 (memoryId, eventId) 唯一约束负责幂等。
+   * actor/game 不匹配说明调用方把上下文绑到了别人的事件上，宁可丢弃观测数据也不能错记 reward。
+   */
+  async recordExperienceUsages(
+    context: AgentContext,
+    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
+  ): Promise<void> {
+    if (context.pendingMemoryUsages.length === 0) return;
+    if (
+      event.gameId !== context.game.id ||
+      event.actorId !== context.player.id ||
+      event.day === null
+    ) {
+      this.logger.warn(
+        {
+          eventId: event.id,
+          eventGameId: event.gameId,
+          eventActorId: event.actorId,
+          contextGameId: context.game.id,
+          contextPlayerId: context.player.id,
+        },
+        '记忆使用关系与行为事件不匹配，已跳过记录',
+      );
+      return;
+    }
+
+    await this.memoryService.recordUsages(
+      context.pendingMemoryUsages.map((usage) => ({
+        ...usage,
+        eventId: event.id,
+        gameId: event.gameId,
+        playerId: context.player.id,
+        scenario: context.scenario,
+        actionType: event.actionType,
+        day: event.day!,
+      })),
+    );
+  }
+
   async validateRequiredSkills(options: {
     rulesetId: string;
     skillVersion: string;
@@ -559,15 +600,40 @@ export class AgentRuntimeService {
     // 5. 生成个性化发言摘要（所有场景）
     let speechSummary = '';
     const currentDay = await this.getCurrentRound(gameId, events);
-    const alivePlayers = await this.prisma.player.findMany({
+    // 发言可见性由 visibility 决定（public 发言含遗言对存活玩家依然可见），
+    // 不能按「发言者是否存活」过滤，否则已出局玩家的遗言会被整段丢弃。
+    const otherPlayers = await this.prisma.player.findMany({
       where: {
         gameId,
-        deathDay: null,
         id: { not: playerId }, // 排除自己
       },
       select: { seatNo: true },
     });
-    const visiblePlayerSeats = alivePlayers
+
+    // 3.1 检索历史经验（独立于 persona/strategy，见 MemoryService.retrieveExperience）
+    const opponents = await this.prisma.player.findMany({
+      where: { gameId, id: { not: playerId } },
+      select: { agentId: true },
+    });
+    const experience = await this.memoryService.retrieveExperience({
+      agentId: player.agentId,
+      label: player.memoryLabelSnapshot,
+      opponentAgentIds: opponents.map((o) => o.agentId),
+      query: buildScenarioQuery({
+        role: player.role,
+        scenario,
+        day: currentDay,
+        events,
+      }),
+      role: player.role,
+      scenario,
+    });
+    const pendingMemoryUsages = this.buildPendingMemoryUsages(experience);
+
+    // 全局板子规律：跨对局晋升验证，与身份无关，全量注入所有玩家
+    const globalPatterns = await this.globalMemoryService.retrieveActivePatterns();
+
+    const visiblePlayerSeats = otherPlayers
       .map((p) => p.seatNo)
       .filter((seatNo): seatNo is number => seatNo !== null);
 
@@ -592,6 +658,8 @@ export class AgentRuntimeService {
       scenario,
       player,
       memories,
+      experience,
+      globalPatterns,
       context: layeredContext,
       additionalContext: [speechSummary, wolfDiscussionContext, additionalContext]
         .filter(Boolean)
@@ -603,7 +671,27 @@ export class AgentRuntimeService {
       player,
       game: player.game,
       scenario,
+      pendingMemoryUsages,
     };
+  }
+
+  /** 把已注入的经验暂存在上下文；只有真实行为 Event 落库后才会确认成 MemoryUsage。 */
+  private buildPendingMemoryUsages(experience: {
+    lessons: SimilarMemory[];
+    playerModels: ActiveMemory[];
+  }): Array<{ memoryId: string; triggerMatched: boolean }> {
+    return [
+      ...experience.lessons.map((m) => ({
+        memoryId: m.id,
+        // lesson 按场景语义匹配注入，相似度达阈值才算 trigger 命中
+        triggerMatched: m.similarity >= LESSON_TRIGGER_MATCH_SIMILARITY,
+      })),
+      ...experience.playerModels.map((m) => ({
+        memoryId: m.id,
+        // 对手建模已按本局同桌过滤，命中即是场景匹配
+        triggerMatched: true,
+      })),
+    ];
   }
 
   /**
@@ -757,10 +845,13 @@ export class AgentRuntimeService {
     scenario: AgentScenario;
     player: PlayerWithGame;
     memories: ActiveMemory[];
+    experience: { lessons: ActiveMemory[]; playerModels: ActiveMemory[] };
+    globalPatterns: ActivePattern[];
     context: LayeredContext;
     additionalContext?: string;
   }): Promise<string> {
-    const { scenario, player, memories, context, additionalContext } = options;
+    const { scenario, player, memories, experience, globalPatterns, context, additionalContext } =
+      options;
 
     // 获取游戏的技能版本
     const skillVersion = player.game.skillVersion || 'v1';
@@ -822,6 +913,19 @@ export class AgentRuntimeService {
     const personaMemory = formatMemorySection(memories, 'persona');
     const strategyMemory = formatMemorySection(memories, 'strategy');
 
+    // 往期对局沉淀的经验：教训在前（指导本次决策），对手建模在后（识人参考）
+    const experienceSection = [
+      formatMemorySection(experience.lessons, 'lesson'),
+      formatMemorySection(experience.playerModels, 'player_model'),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    // 跨对局晋升的全局板子规律，渲染格式与经验一致
+    const globalPatternSection = globalPatterns
+      .map((p) => `### ${p.title}\n${p.content}`)
+      .join('\n\n');
+
     // 角色特定历史信息
     let roleSpecificInfo = '';
 
@@ -843,6 +947,8 @@ export class AgentRuntimeService {
       rulesetRules,
       persona: personaMemory || '暂无',
       strategy: strategyMemory || '暂无',
+      globalPattern: globalPatternSection || '暂无',
+      experience: experienceSection || '暂无',
       roleSpecificInfo,
       critical: context.critical,
       recent: context.recent,

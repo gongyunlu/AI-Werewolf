@@ -43,6 +43,19 @@ interface VoteRecord {
 }
 
 /**
+ * 狼队夜间协作的场景锚定。
+ *
+ * 狼队商议与预言家查验、女巫用药共用 night_action 场景，但前者是「多人协作、产出刀人目标」，
+ * 后者是「单人技能使用」。弱模型在 night_action 的通用指令下会把商议混淆成白天发言
+ * （输出悍跳稿而非讨论刀谁），故在 additionalContext 里补一段锚定，区分夜间私下交流
+ * 与白天公开发言。
+ */
+const WOLF_NIGHT_ANCHOR = `## 当前阶段：狼队夜间行动
+你现在和狼队友在夜间私下交流（这段内容仅狼队可见）。本阶段核心是确定今晚刀谁，
+其次是安排明天白天的战术分工。注意：这是夜间私下商议，不是白天公开发言，
+不要在这里输出白天的发言稿。`;
+
+/**
  * 单狼决策（两阶段版本）
  */
 export async function singleWolfDecision(
@@ -191,11 +204,8 @@ export async function wolfDiscussion(
 
       const previousDiscussion =
         discussionHistory.length > 0
-          ? `
-## 队友的发言
-${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
-`.trim()
-          : '';
+          ? `${WOLF_NIGHT_ANCHOR}\n\n## 队友的发言\n${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}`
+          : WOLF_NIGHT_ANCHOR;
 
       const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
@@ -255,7 +265,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
           });
           speechCount.set(wolf.id, currentSpeechCount + 1);
 
-          await context.eventWriter.writeWolfDiscussionEvent({
+          const event = await context.eventWriter.writeWolfDiscussionEvent({
             gameId: state.gameId,
             day: state.currentDay,
             actorId: wolf.id,
@@ -264,6 +274,7 @@ ${discussionHistory.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('
             round: round + 1,
             thinking,
           });
+          await context.agentRuntime.recordExperienceUsages(contextData, event);
         }
       } catch (error) {
         if (isAbortError(error, context.signal)) {
@@ -311,11 +322,8 @@ export async function wolfVoting(
 ): Promise<VoteRecord[]> {
   const discussionSummary =
     discussion.length > 0
-      ? `
-## 刚才的讨论内容
-${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}
-`.trim()
-      : '';
+      ? `${WOLF_NIGHT_ANCHOR}\n\n## 刚才的讨论内容\n${discussion.map((msg) => `- ${msg.seatNo}号位: ${msg.content}`).join('\n')}`
+      : WOLF_NIGHT_ANCHOR;
 
   const votePromises = werewolves.map(async (wolf): Promise<VoteRecord | null> => {
     const wolfThreadId = getWolfTeamThreadId(state.gameId);

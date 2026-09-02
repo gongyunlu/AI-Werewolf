@@ -91,6 +91,7 @@ export class PkVoteNode {
               voterSeatNo: player.seatNo,
               targetSeatNo: 0,
             });
+            await this.agentRuntime.recordExperienceUsages(contextData, event);
             await context.eventBus?.publish(event);
             return null;
           }
@@ -102,6 +103,7 @@ export class PkVoteNode {
             voterSeatNo: player.seatNo!,
             targetSeatNo: decision.targetSeatNo,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, event);
           await context.eventBus?.publish(event);
 
           return {

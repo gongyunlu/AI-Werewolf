@@ -1,7 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { PinoLogger } from 'nestjs-pino';
-import { Job } from 'bullmq';
+import { Job, UnrecoverableError } from 'bullmq';
 import { GameExecutorService } from '../game-executor/game-executor.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { GameJobData } from './game-queue.service';
@@ -9,6 +9,7 @@ import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GamePausedException } from '../game-engine/core/game-engine.exception';
 import type { Env } from '../config/env.validation';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
+import { PostGameAnalysisError } from '../game-executor/game-executor.exception';
 
 /**
  * 游戏队列 Worker
@@ -57,6 +58,30 @@ export class GameWorkerService extends WorkerHost {
       return;
     }
 
+    if (game.status === GAME_STATUSES.FINISHED) {
+      this.logger.info({ gameId, jobId: job.id, attempt, maxAttempts }, '对局已结束，补投赛后分析');
+      try {
+        await this.gameExecutor.analyzeFinishedGame(gameId);
+        this.logger.info(
+          { gameId, jobId: job.id, attempt, durationMs: Date.now() - startedAt },
+          '赛后分析补投完成',
+        );
+        return;
+      } catch (error) {
+        this.logger.warn(
+          {
+            gameId,
+            jobId: job.id,
+            attempt,
+            maxAttempts,
+            err: error instanceof Error ? error.message : String(error),
+          },
+          '赛后分析补投失败，保持 FINISHED 并交由队列重试',
+        );
+        throw error;
+      }
+    }
+
     if (game.status !== GAME_STATUSES.RUNNING) {
       this.logger.info(
         { gameId, jobId: job.id, status: game.status },
@@ -85,29 +110,89 @@ export class GameWorkerService extends WorkerHost {
 
       const message = error instanceof Error ? error.message : String(error);
 
-      // 如果是最后一次尝试，标记为 aborted
-      if (attempt >= maxAttempts) {
-        await this.prisma.game.update({
-          where: { id: gameId },
+      // 只有 GameExecutor 在 engine.run 已完整返回后包装出的错误可以安全重试。
+      // 下一 attempt 会从顶部 FINISHED 分支进入，只补投分析，不重放引擎。
+      if (error instanceof PostGameAnalysisError) {
+        this.logger.warn(
+          { gameId, jobId: job.id, attempt, maxAttempts, err: message },
+          '对局已完成但赛后分析失败，保持 FINISHED',
+        );
+        throw error;
+      }
+
+      // 任何引擎阶段未知错误都不可自动重放。即使清理数据库或 SSE 自身失败，
+      // 最终也必须抛 UnrecoverableError，避免下一 attempt 从 RUNNING 初始状态再执行一遍事件。
+      let cleanupError: unknown;
+      let markedAborted = false;
+      let persistedStatus: string | null | undefined;
+      try {
+        const cleanup = await this.prisma.game.updateMany({
+          // 终局事务可能已经提交、只是客户端收到不确定失败；绝不能把 FINISHED 覆盖成 ABORTED。
+          where: { id: gameId, status: GAME_STATUSES.RUNNING },
           data: {
             status: GAME_STATUSES.ABORTED,
             endedAt: new Date(),
           },
         });
-        this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });
-        this.broadcaster.complete(gameId);
-        this.logger.error(
-          { gameId, jobId: job.id, attempt, maxAttempts, err: message },
-          '对局任务已达最大重试次数，标记为 aborted',
-        );
-      } else {
+        markedAborted = cleanup.count > 0;
+      } catch (cleanupFailure) {
+        cleanupError = cleanupFailure;
+      }
+
+      if (!markedAborted && !cleanupError) {
+        try {
+          const persisted = await this.prisma.game.findUnique({
+            where: { id: gameId },
+            select: { status: true },
+          });
+          persistedStatus = persisted?.status;
+        } catch (statusReadFailure) {
+          cleanupError = statusReadFailure;
+        }
+      }
+
+      // game-end 的数据库事务可能已经提交，只是客户端在收到成功响应前断线。
+      // 此时重放引擎仍然危险，但下一 attempt 从 FINISHED 分支只会补投分析，因而是安全的。
+      if (persistedStatus === GAME_STATUSES.FINISHED) {
         this.logger.warn(
           { gameId, jobId: job.id, attempt, maxAttempts, err: message },
-          '对局执行失败，将由队列重试',
+          '终局事务已提交但执行响应不确定，下一次仅补投赛后分析',
         );
+        throw new PostGameAnalysisError(gameId, error);
       }
-      // 重新抛出，触发 BullMQ 重试机制
-      throw error;
+
+      if (markedAborted) {
+        try {
+          this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });
+          this.broadcaster.complete(gameId);
+        } catch (broadcastFailure) {
+          cleanupError ??= broadcastFailure;
+        }
+      }
+
+      this.logger.error(
+        {
+          gameId,
+          jobId: job.id,
+          attempt,
+          maxAttempts,
+          err: message,
+          cleanupErr:
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : cleanupError
+                ? String(cleanupError)
+                : undefined,
+          markedAborted,
+          persistedStatus,
+        },
+        cleanupError
+          ? '对局引擎失败且清理未完整完成，已阻止自动重放'
+          : markedAborted
+            ? '对局引擎失败且不可安全重放，标记为 aborted'
+            : '对局引擎失败，但终局状态已由其他事务提交，未覆盖其状态',
+      );
+      throw new UnrecoverableError(message);
     }
   }
 }

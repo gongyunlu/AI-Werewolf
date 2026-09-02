@@ -147,6 +147,7 @@ export class VoteNode {
             voterSeatNo: voter.seatNo,
             targetSeatNo: 0,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, event);
           await context.eventBus?.publish(event);
           return { voterId: voter.id, targetId: null };
         }
@@ -158,6 +159,7 @@ export class VoteNode {
           voterSeatNo: voter.seatNo,
           targetSeatNo: decision.targetSeatNo,
         });
+        await this.agentRuntime.recordExperienceUsages(contextData, event);
         await context.eventBus?.publish(event);
 
         return {
@@ -172,6 +174,7 @@ export class VoteNode {
           voterSeatNo: voter.seatNo,
           targetSeatNo: 0,
         });
+        await this.agentRuntime.recordExperienceUsages(contextData, event);
         await context.eventBus?.publish(event);
 
         return {

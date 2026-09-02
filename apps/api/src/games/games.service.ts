@@ -69,8 +69,16 @@ export class GamesService {
       this.prisma.game.count({ where }),
     ]);
 
+    // 复盘正文非空即视为已分析。单独查而非 include：narrative 是整段 JSON，
+    // 挂进每一行会把列表响应撑大，而列表只需要一个布尔值
+    const analyzed = await this.prisma.gameSummary.findMany({
+      where: { gameId: { in: items.map((game) => game.id) }, narrative: { not: null } },
+      select: { gameId: true },
+    });
+    const analyzedIds = new Set(analyzed.map((row) => row.gameId));
+
     return {
-      items,
+      items: items.map((game) => Object.assign(game, { analyzed: analyzedIds.has(game.id) })),
       total,
       page,
       pageSize,

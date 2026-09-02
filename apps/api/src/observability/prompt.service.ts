@@ -2,7 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Langfuse } from 'langfuse-langchain';
 import type { Env } from '../config/env.validation';
-import { FALLBACK_TEMPLATES, renderTemplate, type PromptName } from './prompt-templates';
+import {
+  extractPromptVariables,
+  FALLBACK_TEMPLATES,
+  REQUIRED_PROMPT_VARIABLES,
+  renderTemplate,
+  type PromptName,
+} from './prompt-templates';
 
 // prompt 渲染结果
 export interface RenderedPrompt {
@@ -55,10 +61,19 @@ export class PromptService {
         label: 'production',
         cacheTtlSeconds: CACHE_TTL_SECONDS,
       });
+
+      const onlineVariables = new Set(extractPromptVariables(client.prompt));
+      const missingVariables = REQUIRED_PROMPT_VARIABLES[name].filter(
+        (variable) => !onlineVariables.has(variable),
+      );
+      if (missingVariables.length > 0) {
+        throw new Error(`production 版本缺少必需变量: ${missingVariables.join(', ')}`);
+      }
+
       return { text: client.compile(variables), name, version: client.version };
     } catch (error) {
       this.logger.warn(
-        `prompt "${name}" 拉取失败，降级本地默认模板: ${error instanceof Error ? error.message : String(error)}`,
+        `prompt "${name}" 拉取或校验失败，降级本地默认模板: ${error instanceof Error ? error.message : String(error)}`,
       );
       return { text: renderTemplate(fallback, variables), name, version: null };
     }

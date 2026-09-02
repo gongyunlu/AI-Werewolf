@@ -21,6 +21,7 @@ describe('SpeechNode', () => {
         thinkingDurationMs: 10,
         contentDurationMs: 20,
       }),
+      recordExperienceUsages: jest.fn().mockResolvedValue(undefined),
     };
     const context = createContext(controller.signal);
     const node = new SpeechNode(agentRuntime as never).create()(context);
@@ -32,6 +33,7 @@ describe('SpeechNode', () => {
     await node(state);
 
     expect(agentRuntime.streamSpeech.mock.calls[0][2].signal).toBe(controller.signal);
+    expect(agentRuntime.recordExperienceUsages).toHaveBeenCalledTimes(1);
   });
 
   it('发言失败时仍关闭已打开的场景', async () => {

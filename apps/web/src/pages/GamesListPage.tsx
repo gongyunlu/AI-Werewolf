@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { type MouseEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styles from './GamesListPage.module.css';
 import { apiClient } from '@/lib/api-client';
 import type { GameListItem } from '@/types/game';
 import { AppHeader } from '@/components/AppHeader';
 import { CreateGameDialog } from '@/components/CreateGameDialog';
+import { AnalysisDialog } from '@/components/AnalysisDialog';
 import { PerspectiveDialog } from '@/components/game-watch/PerspectiveDialog';
 import { Button } from '@/components/ui/button';
 import { GAME_STATUSES, FACTIONS } from '@ai-werewolf/shared';
@@ -58,9 +59,11 @@ export default function GamesListPage() {
   const navigate = useNavigate();
   const [games, setGames] = useState<GameListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [pendingGameId, setPendingGameId] = useState<string | null>(null);
+  const [analysisGameId, setAnalysisGameId] = useState<string | null>(null);
 
-  const fetchGames = async () => {
+  const fetchGames = useCallback(async () => {
     try {
       setLoading(true);
       const response = await apiClient.getGames({
@@ -69,41 +72,65 @@ export default function GamesListPage() {
         sortOrder: 'desc',
       });
       setGames(response.items);
+      setError('');
     } catch (err) {
-      console.error('加载对局列表失败:', err);
-      setGames([]);
+      // 请求失败不能清空列表：空数组会被渲染成「暂无对局」，与真的没有对局无法区分
+      setError(err instanceof Error ? err.message : '加载对局列表失败');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void fetchGames();
+  }, [fetchGames]);
+
+  const handleCreated = useCallback((gameId: string) => {
+    setPendingGameId(gameId);
   }, []);
 
-  const handleCreated = (gameId: string) => {
-    setPendingGameId(gameId);
-  };
-
   // 列表页点击"观战"时，配合 PerspectiveDialog 选择视角后进入页面
-  const handleWatch = (gameId: string) => {
-    setPendingGameId(gameId);
-  };
+  const handleWatch = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    const gameId = event.currentTarget.dataset.gameId;
+    if (gameId) setPendingGameId(gameId);
+  }, []);
 
-  const handleSelectPerspective = (perspective: string) => {
-    if (!pendingGameId) return;
-    sessionStorage.setItem(`perspective-${pendingGameId}`, perspective);
-    const id = pendingGameId;
-    setPendingGameId(null);
-    void fetchGames();
-    navigate(`/games/${id}`);
-  };
+  const handleAnalyze = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    const gameId = event.currentTarget.dataset.gameId;
+    if (gameId) setAnalysisGameId(gameId);
+  }, []);
 
-  const handleDialogClose = (open: boolean) => {
+  const handleSelectPerspective = useCallback(
+    (perspective: string) => {
+      if (!pendingGameId) return;
+      sessionStorage.setItem(`perspective-${pendingGameId}`, perspective);
+      const id = pendingGameId;
+      setPendingGameId(null);
+      void fetchGames();
+      navigate(`/games/${id}`);
+    },
+    [fetchGames, navigate, pendingGameId],
+  );
+
+  const handleDialogClose = useCallback((open: boolean) => {
     if (!open) {
       setPendingGameId(null);
     }
-  };
+  }, []);
+
+  const handleAnalysisClose = useCallback(
+    (open: boolean) => {
+      if (!open) {
+        setAnalysisGameId(null);
+        void fetchGames();
+      }
+    },
+    [fetchGames],
+  );
+
+  const handleRetry = useCallback(() => {
+    void fetchGames();
+  }, [fetchGames]);
 
   return (
     <div className={styles.page}>
@@ -113,6 +140,7 @@ export default function GamesListPage() {
         onOpenChange={handleDialogClose}
         onSelect={handleSelectPerspective}
       />
+      <AnalysisDialog gameId={analysisGameId} onOpenChange={handleAnalysisClose} />
 
       <div className={styles.body}>
         <div className={styles.container}>
@@ -127,6 +155,14 @@ export default function GamesListPage() {
           {loading ? (
             <div className={styles.loading}>
               <div className={styles.loadingText}>加载中...</div>
+            </div>
+          ) : error ? (
+            // 请求失败必须与「真的没有对局」区分开，否则后端挂掉会被看成数据为空
+            <div className={styles.empty} role="alert">
+              <p className={styles.errorText}>{error}</p>
+              <Button variant="outline" size="sm" onClick={handleRetry}>
+                重试
+              </Button>
             </div>
           ) : games.length === 0 ? (
             <div className={styles.empty}>
@@ -168,14 +204,28 @@ export default function GamesListPage() {
                           <span>{new Date(game.startedAt).toLocaleString('zh-CN')}</span>
                         </div>
                       </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className={styles.watchButton}
-                        onClick={() => handleWatch(game.id)}
-                      >
-                        观战
-                      </Button>
+                      <div className={styles.cardActions}>
+                        {game.status === GAME_STATUSES.FINISHED && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className={styles.watchButton}
+                            data-game-id={game.id}
+                            onClick={handleAnalyze}
+                          >
+                            {game.analyzed ? '已分析' : '分析'}
+                          </Button>
+                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className={styles.watchButton}
+                          data-game-id={game.id}
+                          onClick={handleWatch}
+                        >
+                          观战
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 );

@@ -114,6 +114,7 @@ export class WitchPoisonNode {
               targetSeatNo: 0,
               thinking: reasoning,
             });
+            await this.agentRuntime.recordExperienceUsages(contextData, skipEvent);
             await context.eventBus?.publish(skipEvent);
             return {};
           }
@@ -126,6 +127,7 @@ export class WitchPoisonNode {
             targetSeatNo: targetPlayer.seatNo,
             thinking: reasoning,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, poisonEvent);
           await context.eventBus?.publish(poisonEvent);
 
           return {
@@ -143,6 +145,7 @@ export class WitchPoisonNode {
             targetSeatNo: 0,
             thinking: reasoning,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, poisonEvent);
           await context.eventBus?.publish(poisonEvent);
 
           return {};

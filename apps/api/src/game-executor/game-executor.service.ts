@@ -16,10 +16,10 @@ import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import { EventBusService } from '../event-bus/event-bus.service';
 import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
-import { SettlementService } from '../evaluation/settlement.service';
-import { JudgeQueueService } from '../evaluation/judge-queue.service';
+import { GameAnalysisService } from '../reflection/game-analysis.service';
 import { LangfuseService } from '../observability/langfuse.service';
 import { PromptService } from '../observability/prompt.service';
+import { PostGameAnalysisError } from './game-executor.exception';
 
 /**
  * 游戏执行服务
@@ -42,8 +42,7 @@ export class GameExecutorService {
     private readonly nodeRegistrar: NodeRegistrar,
     private readonly eventBus: EventBusService,
     private readonly speechSummarizer: SpeechSummarizerService,
-    private readonly settlementService: SettlementService,
-    private readonly judgeQueueService: JudgeQueueService,
+    private readonly gameAnalysisService: GameAnalysisService,
     private readonly langfuse: LangfuseService,
     private readonly promptService: PromptService,
   ) {}
@@ -112,15 +111,12 @@ export class GameExecutorService {
     try {
       const finalState = await engine.run(initialState, preset, abortController.signal);
 
-      // 6. 结算确定性指标 + 投递 LLM-as-judge 任务（失败不影响 FINISHED 落库，可手动补算/补评）
+      // 6. 投递赛后分析。用显式错误类型告诉 Worker「引擎已完整返回，只需重试分析」，
+      // 不能再靠数据库恰好已是 FINISHED 来猜测错误发生在哪个阶段。
       try {
-        await this.settlementService.settleGame(gameId);
-        const judged = await this.judgeQueueService.enqueueGame(gameId);
-        this.logger.log({ gameId, judged }, '已投递决策质量评估任务');
+        await this.analyzeFinishedGame(gameId);
       } catch (error) {
-        this.logger.error(
-          `结算/评估投递失败 gameId=${gameId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new PostGameAnalysisError(gameId, error);
       }
 
       return finalState;
@@ -135,6 +131,19 @@ export class GameExecutorService {
       throw error;
     } finally {
       this.abortControllers.delete(gameId);
+    }
+  }
+
+  /** 为已经 FINISHED 的对局执行幂等结算并投递分析，供正常结束与队列重试共用。 */
+  async analyzeFinishedGame(gameId: string): Promise<void> {
+    try {
+      const { judged, reflectPlanned } = await this.gameAnalysisService.analyzeGame(gameId);
+      this.logger.log({ gameId, judged, reflectPlanned }, '已投递赛后分析任务');
+    } catch (error) {
+      this.logger.error(
+        `结算/评估投递失败 gameId=${gameId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
     }
   }
 

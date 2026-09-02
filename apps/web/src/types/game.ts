@@ -66,6 +66,8 @@ export interface GameListItem {
   endedAt: string | null;
   winnerFaction: string | null;
   totalDays: number | null;
+  /** 赛后分析是否已产出复盘（列表页 getGames 返回，getGame 详情不含此字段） */
+  analyzed?: boolean;
   ruleset: {
     id: string;
     name: string;

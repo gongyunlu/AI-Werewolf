@@ -96,6 +96,7 @@ export class SheriffDecideOrderNode {
           sheriffSeatNo: sheriff.seatNo!,
           direction: decision.direction,
         });
+        await this.agentRuntime.recordExperienceUsages(contextData, event);
         await context.eventBus?.publish(event);
       } catch (error) {
         if (isAbortError(error, context.signal)) {

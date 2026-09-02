@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { SettlementService } from './settlement.service';
 import { JudgeService } from './judge.service';
-import { JudgeQueueService } from './judge-queue.service';
+import { JudgeQueueService, JUDGE_FLOW_PRODUCER, JUDGE_QUEUE_NAME } from './judge-queue.service';
 import { JudgeWorkerService } from './judge.worker';
 import { StatisticsService } from './statistics.service';
 import { EvaluationController } from './evaluation.controller';
@@ -11,7 +11,10 @@ import { EvaluationController } from './evaluation.controller';
  * 评估模块：对局结算+ 决策质量评估+ 统计
  */
 @Module({
-  imports: [BullModule.registerQueue({ name: 'judge-queue' })],
+  imports: [
+    BullModule.registerQueue({ name: JUDGE_QUEUE_NAME }),
+    BullModule.registerFlowProducer({ name: JUDGE_FLOW_PRODUCER }),
+  ],
   controllers: [EvaluationController],
   providers: [
     SettlementService,
@@ -20,6 +23,6 @@ import { EvaluationController } from './evaluation.controller';
     JudgeWorkerService,
     StatisticsService,
   ],
-  exports: [SettlementService, JudgeQueueService],
+  exports: [SettlementService, JudgeService, JudgeQueueService],
 })
 export class EvaluationModule {}

@@ -44,9 +44,12 @@ export class GameQueueService {
       { gameId },
       {
         jobId: gameId,
-        // 对局执行会持续写入事件和玩家状态；在没有断点恢复前，
-        // 不能用同一 gameId 从初始状态自动重跑。
-        attempts: 1,
+        // 正常引擎错误由 Worker 转成 UnrecoverableError，绝不从初始状态重放事件；
+        // attempts 只用于引擎已经落成 FINISHED 后，幂等重试结算/分析投递。
+        // 6 次尝试的指数窗口会越过 30s 调度锁 TTL；持锁进程硬崩溃时，至少还有一次
+        // attempt 能在孤儿锁过期后重新确认并投递分析。正常持锁期间会每 10s 自动续租。
+        attempts: 6,
+        backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: {
           age: 3600, // 完成后 1 小时自动清理
           count: 100, // 最多保留 100 条完成记录

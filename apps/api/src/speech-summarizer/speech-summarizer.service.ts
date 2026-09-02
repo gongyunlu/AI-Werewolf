@@ -265,42 +265,55 @@ export class SpeechSummarizerService {
 
     const allAliveSeats = alivePlayers.map((p) => p.seatNo).filter((s): s is number => s !== null);
 
-    const results = await Promise.allSettled(
-      alivePlayers.map(async (player) => {
-        if (player.seatNo === null || player.role === null) return;
-        const { id, agentId, seatNo, role, modelName } = player;
+    // 逐玩家判断各自调用不同模型，全并发会瞬间打满 ARK 网关并发配额触发限流、
+    // 整批 183s 超时。分批执行（每批 2 个）控制峰值并发。
+    const CONCURRENCY = 2;
+    const results: PromiseSettledResult<void>[] = [];
+    for (let i = 0; i < alivePlayers.length; i += CONCURRENCY) {
+      const batch = alivePlayers.slice(i, i + CONCURRENCY);
+      results.push(
+        ...(await Promise.allSettled(
+          batch.map(async (player) => {
+            if (player.seatNo === null || player.role === null) return;
+            const { id, agentId, seatNo, role, modelName } = player;
 
-        // 当天已判断的发言，跳过已判断
-        const existing = await this.agentJudgmentService.getJudgmentsByDay(agentId, gameId, day);
-        const judgedIds = new Set(existing.map((j) => j.speechId));
-        const newSpeeches = todaySpeeches.filter((s) => !judgedIds.has(s.id));
-        if (newSpeeches.length === 0) return;
+            // 当天已判断的发言，跳过已判断
+            const existing = await this.agentJudgmentService.getJudgmentsByDay(
+              agentId,
+              gameId,
+              day,
+            );
+            const judgedIds = new Set(existing.map((j) => j.speechId));
+            const newSpeeches = todaySpeeches.filter((s) => !judgedIds.has(s.id));
+            if (newSpeeches.length === 0) return;
 
-        const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
-          agentId,
-          gameId,
-          day,
-        );
+            const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
+              agentId,
+              gameId,
+              day,
+            );
 
-        const privateInfo = await this.buildPrivateInfo({ gameId, id, seatNo, role });
+            const privateInfo = await this.buildPrivateInfo({ gameId, id, seatNo, role });
 
-        const { judgments } = await this.callLLMWithRolePerspective(
-          gameId,
-          id,
-          newSpeeches,
-          role,
-          privateInfo,
-          [...recentJudgments, ...existing], // 最近2天 + 当天已有
-          olderJudgments, // 更早的（压缩格式）
-          allAliveSeats.filter((s) => s !== seatNo), // 排除自己
-          modelName,
-        );
+            const { judgments } = await this.callLLMWithRolePerspective(
+              gameId,
+              id,
+              newSpeeches,
+              role,
+              privateInfo,
+              [...recentJudgments, ...existing], // 最近2天 + 当天已有
+              olderJudgments, // 更早的（压缩格式）
+              allAliveSeats.filter((s) => s !== seatNo), // 排除自己
+              modelName,
+            );
 
-        if (judgments.length > 0) {
-          await this.agentJudgmentService.saveJudgments(agentId, gameId, day, judgments);
-        }
-      }),
-    );
+            if (judgments.length > 0) {
+              await this.agentJudgmentService.saveJudgments(agentId, gameId, day, judgments);
+            }
+          }),
+        )),
+      );
+    }
 
     results.forEach((result, i) => {
       if (result.status === 'rejected') {
@@ -370,7 +383,8 @@ export class SpeechSummarizerService {
       model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3, // 保持一定创造性，但不过度随机
-      maxRetries: 2,
+      // 关 SDK 重试：hang 时 60s 快速失败而非连试 3 次 180s，避免整批判断被占死（对齐 StructuredLlmService）
+      maxRetries: 0,
       timeout: 60000,
     });
 
@@ -475,7 +489,8 @@ export class SpeechSummarizerService {
       model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3,
-      maxRetries: 2,
+      // 关 SDK 重试：hang 时 60s 快速失败而非连试 3 次 180s，避免整批判断被占死（对齐 StructuredLlmService）
+      maxRetries: 0,
       timeout: 60000,
     });
 

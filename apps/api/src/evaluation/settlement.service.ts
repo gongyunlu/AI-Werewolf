@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GAME_STATUSES, ACTION_TYPES, FACTIONS } from '@ai-werewolf/shared';
 import type { Prisma } from '../generated/prisma/client';
@@ -31,8 +31,9 @@ export class SettlementService {
       return;
     }
     if (game.winnerFaction === null || game.totalDays === null) {
-      this.logger.warn({ gameId }, '对局缺少胜负/天数数据，跳过结算');
-      return;
+      // FINISHED 对局缺胜负/天数即违反数据不变量，必须抛错让调用方同步感知，
+      // 否则结算静默跳过、GameSummary 不写，复盘会在后台队列稍后才失败。
+      throw new ConflictException(`对局 ${gameId} 缺少胜负/天数数据，无法结算`);
     }
 
     const [players, events] = await Promise.all([

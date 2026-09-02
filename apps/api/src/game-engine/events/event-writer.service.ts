@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { type Prisma, type Event } from '@/generated/prisma/client';
-import { ACTION_TYPES, VISIBILITY_TYPES, PHASES, type SeerCheckResult } from '@ai-werewolf/shared';
+import {
+  ACTION_TYPES,
+  GAME_STATUSES,
+  VISIBILITY_TYPES,
+  PHASES,
+  type SeerCheckResult,
+} from '@ai-werewolf/shared';
 import { RedisService } from '@/redis/redis.service';
 
 /** 判断是否为 Prisma 唯一约束冲突（P2002） */
@@ -413,17 +419,65 @@ export class EventWriterService {
     });
   }
 
-  /** 游戏结束系统事件 */
-  async writeGameEndEvent(params: { gameId: string; winner: string }): Promise<Event> {
-    return this.createEventWithSequence(params.gameId, {
-      day: 0,
-      phase: PHASES.SYSTEM,
-      actionType: ACTION_TYPES.GAME_ENDED,
-      visibility: VISIBILITY_TYPES.PUBLIC,
-      actorId: null,
-      targetIds: [],
-      content: { winner: params.winner },
-    });
+  /**
+   * 原子持久化游戏结束事件与 FINISHED 状态。
+   *
+   * 两项终局事实必须在同一事务提交：既不能出现 FINISHED 却缺结束事件，也不能留下
+   * GAME_ENDED 事件但对局随后被当成引擎失败标记为 ABORTED。Redis sequence 只负责分配
+   * 序号；事务回滚产生的序号空洞是允许的。
+   */
+  async writeGameEndEvent(params: {
+    gameId: string;
+    winner: string;
+    winnerFaction: string | null;
+    totalDays: number;
+    endedAt?: Date;
+  }): Promise<Event> {
+    const key = `game:${params.gameId}:event_seq`;
+    const persist = (sequence: number) =>
+      this.prisma.$transaction(async (tx) => {
+        const event = await tx.event.create({
+          data: {
+            gameId: params.gameId,
+            sequence,
+            day: 0,
+            phase: PHASES.SYSTEM,
+            actionType: ACTION_TYPES.GAME_ENDED,
+            visibility: VISIBILITY_TYPES.PUBLIC,
+            actorId: null,
+            targetIds: [],
+            content: { winner: params.winner },
+          },
+        });
+
+        await tx.game.update({
+          where: { id: params.gameId },
+          data: {
+            status: GAME_STATUSES.FINISHED,
+            winnerFaction: params.winnerFaction ?? undefined,
+            totalDays: params.totalDays,
+            endedAt: params.endedAt ?? new Date(),
+          },
+        });
+
+        return event;
+      });
+
+    const sequence = await this.redis.incr(key);
+    try {
+      return await persist(sequence);
+    } catch (error) {
+      // 事务已整体回滚，因而可以在事务外重建 Redis 计数器并安全地重试整笔终局写入。
+      if (!isUniqueConstraintViolation(error)) throw error;
+
+      const lastEvent = await this.prisma.event.findFirst({
+        where: { gameId: params.gameId },
+        orderBy: { sequence: 'desc' },
+        select: { sequence: true },
+      });
+      await this.redis.set(key, lastEvent?.sequence || 0);
+      return persist(await this.redis.incr(key));
+    }
   }
 
   /** 法官播报事件（公开） */

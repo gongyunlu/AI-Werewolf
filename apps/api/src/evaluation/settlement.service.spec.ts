@@ -78,15 +78,14 @@ describe('SettlementService', () => {
     expect(prisma.gameSummary.upsert).not.toHaveBeenCalled();
   });
 
-  it('缺少胜负/天数数据时跳过结算', async () => {
+  it('缺少胜负/天数数据时抛错，不写任何记录', async () => {
     (prisma.game.findUnique as jest.Mock).mockResolvedValue({
       status: GAME_STATUSES.FINISHED,
       winnerFaction: null,
       totalDays: null,
     });
 
-    await service.settleGame('g1');
-
+    await expect(service.settleGame('g1')).rejects.toThrow('缺少胜负/天数');
     expect(prisma.agentPerformance.upsert).not.toHaveBeenCalled();
     expect(prisma.gameSummary.upsert).not.toHaveBeenCalled();
   });

@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MemoryType } from '@ai-werewolf/shared';
 import { Prisma } from '../generated/prisma/client';
 import { EmbeddingService } from './embedding.service';
+import { computeLessonCandidateScore, computeLessonRank, type LessonHit } from './lesson-rank';
 
 export type ActiveMemory = Prisma.MemoryGetPayload<{
   select: {
@@ -15,10 +16,49 @@ export type ActiveMemory = Prisma.MemoryGetPayload<{
   };
 }>;
 
+/** 语义检索结果：在 ActiveMemory 基础上附带与 query 的余弦相似度 */
+export type SimilarMemory = ActiveMemory & { similarity: number };
+
+export type RetrieveSimilarOptions = {
+  /** 指定类型集合，缺省不过滤 */
+  types?: MemoryType[];
+  /** 每次取多少条，默认 20 */
+  limit?: number;
+  /** 是否累加 retrievalCount，默认 true；注入路径传 false */
+  trackRetrieval?: boolean;
+  /** 适用角色硬过滤：只返回 metadata.role 等于该值或 any 的记忆（缺省不过滤） */
+  role?: string;
+  /** 适用场景硬过滤：只返回 metadata.scenario 等于该值或 any 的记忆（缺省不过滤） */
+  scenario?: string;
+};
+
 export type RetrieveActiveMemoriesOptions = {
   types?: MemoryType[]; // 指定类型集合，缺省不过滤
   limit?: number; // 每次取多少条，默认 20
+  /**
+   * 是否累加 retrievalCount，默认 true。
+   * 局内注入路径传 false：单局有数十次注入，计数会退化成「决策次数」而非「记忆被用过几次」。
+   */
+  trackRetrieval?: boolean;
 };
+
+/** 新建记忆的入参 */
+export type CreateMemoryInput = {
+  agentId: string;
+  label: string;
+  type: MemoryType;
+  title: string;
+  content: string;
+  gameId?: string | null;
+  eventId?: string | null;
+  importance?: number;
+  confidence?: number;
+  source?: string;
+  metadata?: Prisma.InputJsonValue;
+};
+
+/** 已落库、待补向量的记忆 */
+export type CreatedMemory = { id: string; content: string };
 
 export type BackfillEmbeddingsOptions = {
   /** 每次从数据库领取的最大记录数；EmbeddingService 内部仍按供应商上限拆批。 */
@@ -27,12 +67,30 @@ export type BackfillEmbeddingsOptions = {
   limit?: number;
 };
 
-function hashMemoryContent(content: string): string {
+export function hashMemoryContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+function toActiveMemory(row: {
+  id: string;
+  type: string;
+  title: string;
+  content: string;
+  importance: number;
+}): ActiveMemory {
+  return {
+    id: row.id,
+    type: row.type as MemoryType,
+    title: row.title,
+    content: row.content,
+    importance: row.importance,
+  };
 }
 
 @Injectable()
 export class MemoryService {
+  private readonly logger = new Logger(MemoryService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly embeddingService: EmbeddingService,
@@ -69,7 +127,7 @@ export class MemoryService {
     });
 
     // 热度追踪：被检索到的记忆累加 retrievalCount 并刷新 lastRetrievedAt
-    if (rows.length > 0) {
+    if (rows.length > 0 && opts.trackRetrieval !== false) {
       await this.prisma.memory.updateMany({
         where: { id: { in: rows.map((r) => r.id) } },
         data: { retrievalCount: { increment: 1 }, lastRetrievedAt: new Date() },
@@ -86,20 +144,317 @@ export class MemoryService {
   }
 
   /**
-   * 语义检索：基于 query 的 embedding 与记忆 embedding 的余弦距离排序。
-   * 当前仅作为能力提供，未被 agent-runtime 调用（留待数据积累后切换）。
+   * 检索可注入决策的经验记忆。
+   *
+   * 不与 persona/strategy 合并成一次检索：那是按 importance 全局混排的，
+   * 经验积累起来会把人设与策略挤出窗口。两类记忆的注入策略也不同——
+   * lesson 无界增长只取 topK，player_model 每个对手至多一条、按同桌过滤后全注入。
+   *
+   * 走注入路径，不累加 retrievalCount。
+   */
+  async retrieveExperience(options: {
+    agentId: string;
+    label: string;
+    /** 本局同桌对手的 agentId，用于过滤对手建模 */
+    opponentAgentIds: string[];
+    /** 当前局面描述，与 lesson 的 trigger 做语义匹配 */
+    query: string;
+    /** 当前角色，硬过滤掉不适用的 lesson；null 时跳过角色过滤（防御性，正常玩家必有角色） */
+    role: string | null;
+    /** 当前场景，硬过滤掉不适用的 lesson */
+    scenario: string;
+    lessonLimit?: number;
+  }): Promise<{ lessons: SimilarMemory[]; playerModels: ActiveMemory[] }> {
+    const { agentId, label, opponentAgentIds, query, role, scenario } = options;
+    const select = {
+      id: true,
+      type: true,
+      title: true,
+      content: true,
+      importance: true,
+      metadata: true,
+    };
+    const lessonLimit = options.lessonLimit ?? 3;
+
+    const playerModelsPromise =
+      opponentAgentIds.length > 0
+        ? this.prisma.memory.findMany({
+            where: {
+              agentId,
+              label,
+              isActive: true,
+              type: 'player_model',
+              OR: opponentAgentIds.map((id) => ({
+                metadata: { path: ['targetAgentId'], equals: id },
+              })),
+            },
+            orderBy: { createdAt: 'desc' },
+            select,
+          })
+        : Promise.resolve([]);
+
+    // lesson 的向量化服务属于学习增强能力，故障时必须降级为空，不能让玩家跳过发言或被迫弃票。
+    // player_model 只走数据库查询，与向量服务解耦，仍应正常注入。
+    const lessonsPromise = (async (): Promise<SimilarMemory[]> => {
+      try {
+        // 语义检索取候选（扩到 20 供质量分重排），再按 similarity × rank 收敛到 lessonLimit
+        const candidates = await this.retrieveBySimilarity(agentId, label, query, {
+          types: ['lesson'],
+          limit: 20,
+          // 注入路径不累加热度：单局数十次检索会让 retrievalCount 退化成「决策次数」
+          trackRetrieval: false,
+          role: role ?? undefined,
+          scenario,
+        });
+        return await this.rankLessons(candidates, agentId, lessonLimit);
+      } catch (error) {
+        this.logger.warn(
+          {
+            agentId,
+            scenario,
+            err: error instanceof Error ? error.message : String(error),
+          },
+          '经验 lesson 检索失败，已降级为空经验',
+        );
+        return [];
+      }
+    })();
+
+    const [lessons, playerModelRows] = await Promise.all([lessonsPromise, playerModelsPromise]);
+
+    // createdAt desc 已把最新记录放在前面；即使历史并发曾留下多条 active 建模，
+    // 注入端也按 targetAgentId 只取一条，避免重复内容挤占上下文。
+    const seenTargets = new Set<string>();
+    const playerModels = playerModelRows.filter((row) => {
+      const metadata = (row.metadata as Record<string, unknown> | null) ?? {};
+      const targetAgentId =
+        typeof metadata.targetAgentId === 'string' ? metadata.targetAgentId : row.id;
+      if (seenTargets.has(targetAgentId)) return false;
+      seenTargets.add(targetAgentId);
+      return true;
+    });
+
+    return { lessons, playerModels: playerModels.map(toActiveMemory) };
+  }
+
+  /**
+   * 质量分重排：候选 lesson 按 similarity × rank 排序取 topK。
+   *
+   * rank 由命中样本相对同 actionType 基线的 lift 经贝叶斯收缩 + UCB 探索算出；
+   * 无命中样本的冷启动 lesson 退回 importance 先验。候选为空时直接返回空，省掉聚合查询。
+   */
+  private async rankLessons(
+    candidates: SimilarMemory[],
+    agentId: string,
+    topK: number,
+  ): Promise<SimilarMemory[]> {
+    if (candidates.length === 0) return [];
+
+    const candidateIds = candidates.map((m) => m.id);
+
+    // 命中样本 + 全局基线 + 该 agent 命中总数，一次并行取回
+    const [hits, baselineRows, totalHitsRow] = await Promise.all([
+      this.prisma.memoryUsage.findMany({
+        where: { memoryId: { in: candidateIds }, triggerMatched: true, rewardScore: { not: null } },
+        select: { memoryId: true, actionType: true, rewardScore: true },
+      }),
+      this.prisma.decisionJudgment.groupBy({
+        by: ['actionType'],
+        _avg: { score: true },
+      }),
+      this.prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM memory_usages u
+        JOIN memories m ON m.id = u.memory_id
+        WHERE m.agent_id = ${agentId}::uuid
+          AND m.type = 'lesson'
+          AND u.trigger_matched = true
+          AND u.reward_score IS NOT NULL
+      `,
+    ]);
+
+    // 各 actionType 基线；未登记行为用各基线的算术平均兜底
+    const baselineByActionType = new Map<string, number>();
+    for (const row of baselineRows) {
+      const avg = row._avg.score;
+      if (avg == null) continue;
+      baselineByActionType.set(row.actionType, avg);
+    }
+    const baselines = [...baselineByActionType.values()];
+    const defaultBaseline =
+      baselines.length > 0 ? baselines.reduce((a, b) => a + b, 0) / baselines.length : 50;
+
+    // 命中样本按 lesson 分组
+    const hitsByMemory = new Map<string, LessonHit[]>();
+    for (const h of hits) {
+      if (h.rewardScore == null) continue;
+      const list = hitsByMemory.get(h.memoryId);
+      const hit = { actionType: h.actionType, reward: h.rewardScore };
+      if (list) list.push(hit);
+      else hitsByMemory.set(h.memoryId, [hit]);
+    }
+
+    const totalHits = totalHitsRow[0]?.count ?? 0;
+
+    return (
+      candidates
+        .map((m) => ({
+          memory: m,
+          score: computeLessonCandidateScore(
+            m.similarity,
+            computeLessonRank({
+              hits: hitsByMemory.get(m.id) ?? [],
+              baselineByActionType,
+              defaultBaseline,
+              totalHits,
+              importance: m.importance,
+            }),
+          ),
+        }))
+        // 非正相似度由 computeLessonCandidateScore 标成 -Infinity；必须在 slice 前剔除，
+        // 否则有效候选不足 topK 时仍会把完全不相关的 lesson 补进上下文。
+        .filter(({ score }) => Number.isFinite(score))
+        .toSorted((a, b) => b.score - a.score)
+        .slice(0, topK)
+        .map(({ memory }) => memory)
+    );
+  }
+
+  /**
+   * 批量写入记忆正文。
+   *
+   * 只写正文，5 个 embedding 列保持 NULL（满足表上「同 NULL 或同非 NULL」的 CHECK 约束）；
+   * 向量由调用方在事务外用 {@link embedMemories} 补写，失败不回滚正文，
+   * `pnpm memory:backfill-embeddings` 会捞起补。
+   */
+  async createMemories(
+    inputs: CreateMemoryInput[],
+    tx?: Prisma.TransactionClient,
+  ): Promise<CreatedMemory[]> {
+    const client = tx ?? this.prisma;
+    const created: CreatedMemory[] = [];
+
+    for (const input of inputs) {
+      const row = await client.memory.create({
+        data: {
+          agentId: input.agentId,
+          label: input.label,
+          gameId: input.gameId ?? null,
+          eventId: input.eventId ?? null,
+          type: input.type,
+          title: input.title,
+          content: input.content,
+          ...(input.importance !== undefined ? { importance: input.importance } : {}),
+          ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
+          ...(input.source !== undefined ? { source: input.source } : {}),
+          ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        },
+        select: { id: true, content: true },
+      });
+      created.push(row);
+    }
+
+    return created;
+  }
+
+  /** 为刚写入的记忆补 embedding；整批失败只记日志，不抛出（正文已落库，可由回填命令补） */
+  async embedMemories(memories: CreatedMemory[]): Promise<number> {
+    if (memories.length === 0) return 0;
+
+    try {
+      const vectors = await this.embeddingService.embedTexts(memories.map((m) => m.content));
+      let done = 0;
+      for (let i = 0; i < memories.length; i++) {
+        await this.embedAndStore(memories[i].id, vectors[i], memories[i].content);
+        done += 1;
+      }
+      return done;
+    } catch (error) {
+      this.logger.warn(
+        { count: memories.length, err: error instanceof Error ? error.message : String(error) },
+        '记忆向量写入失败，正文已落库，可用回填命令补齐',
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * 记录一次注入用到了哪些记忆，供事后按行为评分做质量归因。
+   *
+   * 属于学习链路的观测数据，写失败只记日志不打断对局。
+   */
+  async recordUsages(
+    rows: Array<{
+      memoryId: string;
+      gameId: string;
+      playerId: string;
+      eventId: string;
+      scenario: string;
+      actionType: string;
+      day: number;
+      triggerMatched?: boolean;
+    }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+
+    try {
+      await this.prisma.memoryUsage.createMany({ data: rows, skipDuplicates: true });
+    } catch (error) {
+      this.logger.warn(
+        { count: rows.length, err: error instanceof Error ? error.message : String(error) },
+        '记忆注入记录写入失败',
+      );
+    }
+  }
+
+  /** 软删除某 agent 在某局产生的记忆，用于重跑反思时避免新旧并存 */
+  async deactivateGameMemories(
+    gameId: string,
+    agentId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<number> {
+    const client = tx ?? this.prisma;
+    const { count } = await client.memory.updateMany({
+      where: { gameId, agentId, isActive: true },
+      data: { isActive: false },
+    });
+    return count;
+  }
+
+  /**
+   * 语义检索：基于 query 的 embedding 与记忆 embedding 的余弦距离排序，返回余弦相似度。
    */
   async retrieveBySimilarity(
     agentId: string,
     label: string,
     query: string,
-    limit = 20,
-  ): Promise<ActiveMemory[]> {
+    options: RetrieveSimilarOptions = {},
+  ): Promise<SimilarMemory[]> {
+    const { types, limit = 20, trackRetrieval = true, role, scenario } = options;
     const queryVec = await this.embeddingService.embedText(query);
+    const typeFilter =
+      types && types.length > 0 ? Prisma.sql`AND type IN (${Prisma.join(types)})` : Prisma.empty;
+    // 硬过滤：角色/场景是 trigger 的可枚举硬条件，embedding 区分不了（「我是平民」vs「我是预言家」相似度仍高），
+    // 必须在 SQL 层精确匹配，否则平民会拿到神职专属 lesson。缺字段的旧数据在完成回填前不注入，
+    // 不能把「未知适用范围」静默扩大成 any。
+    const roleFilter = role
+      ? Prisma.sql`AND (metadata->>'role' = ${role} OR metadata->>'role' = 'any')`
+      : Prisma.empty;
+    const scenarioFilter = scenario
+      ? Prisma.sql`AND (metadata->>'scenario' = ${scenario} OR metadata->>'scenario' = 'any')`
+      : Prisma.empty;
     const rows = await this.prisma.$queryRaw<
-      Array<{ id: string; type: string; title: string; content: string; importance: number }>
+      Array<{
+        id: string;
+        type: string;
+        title: string;
+        content: string;
+        importance: number;
+        similarity: number;
+      }>
     >`
-      SELECT id, type, title, content, importance
+      SELECT id, type, title, content, importance,
+             1 - (embedding <=> ${JSON.stringify(queryVec)}::vector) AS similarity
       FROM memories
       WHERE agent_id = ${agentId}::uuid
         AND label = ${label}
@@ -107,11 +462,14 @@ export class MemoryService {
         AND embedding IS NOT NULL
         AND embedding_model = ${this.embeddingService.model}
         AND embedding_dimension = ${this.embeddingService.dimension}
+        ${typeFilter}
+        ${roleFilter}
+        ${scenarioFilter}
       ORDER BY embedding <=> ${JSON.stringify(queryVec)}::vector
       LIMIT ${limit}
     `;
 
-    if (rows.length > 0) {
+    if (rows.length > 0 && trackRetrieval) {
       await this.prisma.memory.updateMany({
         where: { id: { in: rows.map((r) => r.id) } },
         data: { retrievalCount: { increment: 1 }, lastRetrievedAt: new Date() },
@@ -124,6 +482,7 @@ export class MemoryService {
       title: r.title,
       content: r.content,
       importance: r.importance,
+      similarity: r.similarity,
     }));
   }
 

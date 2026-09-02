@@ -78,7 +78,7 @@ export class PkSpeechNode {
           thinkingDurationMs = result.thinkingDurationMs;
           contentDurationMs = result.contentDurationMs;
 
-          await context.eventWriter.writePlayerSpeechEvent({
+          const event = await context.eventWriter.writePlayerSpeechEvent({
             gameId: state.gameId,
             day: state.currentDay,
             actorId: player.id,
@@ -86,6 +86,7 @@ export class PkSpeechNode {
             content,
             thinking,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, event);
         } catch (error) {
           if (isAbortError(error, context.signal)) {
             throw error;

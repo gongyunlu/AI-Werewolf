@@ -11,6 +11,12 @@ export const PROMPT_NAMES = {
   agentDecisionUser: 'agent/decision-user',
   judgeSystem: 'judge/system',
   judgeUser: 'judge/user',
+  judgeSpeechSystem: 'judge/speech-system',
+  judgeSpeechUser: 'judge/speech-user',
+  gameReviewSystem: 'reflection/game-review-system',
+  gameReviewUser: 'reflection/game-review-user',
+  reflectionSystem: 'reflection/player-system',
+  reflectionUser: 'reflection/player-user',
   summarizerGlobalSummary: 'summarizer/global-summary',
   summarizerJudgmentHuman: 'summarizer/judgment-human',
   wolfCoordination: 'game/wolf-coordination',
@@ -58,6 +64,15 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
 
     ## 你的策略
     {{strategy}}
+
+    ## 全局板子规律
+    从多场对局中提炼、经跨对局语义聚类晋升验证的通用规律，对所有玩家可见，与具体身份无关。
+    {{globalPattern}}
+
+    ## 你的历史经验
+    往期对局沉淀下来的教训与对手认知。仅在当前局面符合其适用条件时采纳，
+    与本局实际观察冲突时以本局观察为准。
+    {{experience}}
     {{roleSpecificInfo}}
 
     ## 关键信息
@@ -114,6 +129,116 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     '{{thinking}}',
   ].join('\n'),
 
+  [PROMPT_NAMES.judgeSpeechSystem]: `
+    你是一名狼人杀发言质量评估员。下面给出某位玩家整局的可见时间线，其中标有 [发言#n] 的是他本人的发言。
+    请为每一条 [发言#n] 独立打分。
+
+    评估维度：
+    - 视角一致性：有没有说出以他的身份在当时不该知道的信息（泄漏即暴露身份，重罚）
+    - 信息增量：是否给出了可供他人判断的有效依据，而不是空话
+    - 逻辑自洽：与他本人此前的发言是否矛盾
+    - 阵营贡献：是否推进了本方目标（好人找狼 / 狼人藏身与带节奏）
+
+    硬性约束：
+    - 评估 [发言#n] 时只能使用时间线中位于它之前的信息，之后发生的事一律不得作为依据。
+      说得对不对要看当时的信息是否支持，不能用结果倒推。
+    - 前后矛盾归咎于后出现的那一条，不要因此扣前一条的分。
+    - 说服失败不等于发言差：信息已给足而他人不采信，仍应给高分。
+
+    对每条发言给出三档结论与 0-100 分，理由一句话。
+
+    输出要求：每条评分必须带 index，取值为该发言的 [发言#n] 序号。
+    评分与发言靠 index 对应，不靠输出顺序，因此漏标 index 的输出会被判为无效。
+  `,
+
+  [PROMPT_NAMES.judgeSpeechUser]: [
+    '【玩家身份】',
+    '{{identity}}',
+    '',
+    '【整局可见时间线】',
+    '{{timeline}}',
+    '',
+    '【任务】',
+    '共有 {{speechCount}} 条待评估发言（[发言#1] 至 [发言#{{speechCount}}]），请逐条评估。',
+    '每条评分都必须填写 index，与 [发言#n] 的序号一一对应，缺少 index 的输出无效。',
+  ].join('\n'),
+
+  [PROMPT_NAMES.gameReviewSystem]: `
+    你是狼人杀对局的复盘者，拥有上帝视角：下面给出的身份、夜间行动、狼队商议全部为真实信息。
+    请复盘这一局是怎么走到这个结果的。
+
+    产出三部分：
+    1. narrative：复盘正文，说清胜负的成因——哪一方的哪些动作起了决定作用，哪些误判是致命的。
+    2. turningPoints：改变了走向的关键节点，按天列出，不要把每天的常规流程都算进来。
+    3. patterns：这局暴露出的、可迁移到下一局的板子规律。
+
+    patterns 的硬性要求：
+    - 必须与具体座位号、具体玩家、这一局的偶然事件无关，下一局换座位后依然成立
+    - 必须是可据以行动的规律，而不是「要多思考」这类空话
+    - 宁缺毋滥：单场对局的样本量是 1，没有把握就少写或不写
+  `,
+
+  [PROMPT_NAMES.gameReviewUser]: [
+    '【结果】',
+    '{{outcome}}',
+    '',
+    '【全员真实身份】',
+    '{{roster}}',
+    '',
+    '【完整事件时间线（上帝视角）】',
+    '{{timeline}}',
+    '',
+    '【被评估为不佳的行为】',
+    '{{weakDecisions}}',
+  ].join('\n'),
+
+  [PROMPT_NAMES.reflectionSystem]: `
+    你正在以第一人称复盘自己刚打完的一局狼人杀。现在是赛后，你已经知道所有人的真实身份。
+
+    产出三部分：
+    1. summary：这局我做对了什么、错在哪，对着已经指出的失误讲，不要归咎于运气或队友。
+    2. lessons：可执行的教训，每条必须写清——
+       - trigger：什么局面下这条经验适用（下一局靠它匹配场景，必须是可复现的局面描述）
+       - action：该局面下具体怎么做
+       - evidence：本局支撑该结论的事实
+       - role：这条经验适用于哪个角色，填英文枚举（villager/seer/witch/hunter/guard/werewolf 等）；只有对任何身份都成立才填 any
+       - scenario：这条经验在哪个场景适用（vote=投票/day_speech=白天发言/night_action=夜间行动/last_words=遗言/sheriff_decide_order=警长定序）；跨场景才填 any
+    3. playerModels：对每个同桌对手的建模，覆盖此前的旧建模。
+
+    硬性要求：
+    - 座位号下一局会变，任何结论都不许写成「3号位是狼」这种绑定本局座位的断言
+    - trigger 必须是局面条件，不能是「我应该更谨慎」这类没有触发条件的空话
+    - role 角色专属的经验（「预言家带队」「女巫用药」）必须填具体角色，不能填 any，否则会错误注入给别的角色
+    - playerModels 里的 agentName 只能取自给出的同桌名单，写的是这个对手的稳定倾向（发言风格、悍跳习惯、投票偏好），不是他这一局拿了什么牌
+    - 没有把握的少写，写错的经验会持续污染后续对局
+  `,
+
+  [PROMPT_NAMES.reflectionUser]: [
+    '【我的身份与结果】',
+    '{{identity}}',
+    '',
+    '【同桌对手的真实身份】',
+    '{{opponents}}',
+    '',
+    '【本局复盘（上帝视角）】',
+    '{{review}}',
+    '',
+    '【我被评估为不佳的行为】',
+    '{{weakActions}}',
+    '',
+    '【我的识人偏差】',
+    '{{trustMisreads}}',
+    '',
+    '【我的发言与当时的思考】',
+    '{{mySpeeches}}',
+    '',
+    '【我的本局统计】',
+    '{{performance}}',
+    '',
+    '【我此前对这些对手的建模（请在此基础上修正）】',
+    '{{existingModels}}',
+  ].join('\n'),
+
   [PROMPT_NAMES.summarizerGlobalSummary]: `
     你是狼人杀对局的记录员。
     请为每位玩家当天的发言生成客观摘要，一句话概括核心内容（30字以内），不带主观评价。
@@ -168,3 +293,25 @@ export function renderTemplate(template: string, variables?: Record<string, stri
   if (!variables) return template;
   return template.replace(/\{\{(\w+)\}\}/g, (_match, key: string) => variables[key] ?? '');
 }
+
+/**
+ * 从模板提取 Mustache 变量名。
+ *
+ * 本地 fallback 是 prompt 的兼容性契约：新增上下文字段时，线上 production prompt
+ * 也必须显式包含对应占位符，否则会静默丢失调用方已经准备好的信息。
+ */
+export function extractPromptVariables(template: string): string[] {
+  return [
+    ...new Set(
+      Array.from(template.matchAll(/\{\{\s*(\w+)\s*\}\}/g), (match) => match[1] as string),
+    ),
+  ];
+}
+
+/** 各 prompt 必须保留的变量，由本地 fallback 自动生成以避免契约与模板漂移。 */
+export const REQUIRED_PROMPT_VARIABLES = Object.fromEntries(
+  Object.entries(FALLBACK_TEMPLATES).map(([name, template]) => [
+    name,
+    extractPromptVariables(template),
+  ]),
+) as unknown as Record<PromptName, readonly string[]>;

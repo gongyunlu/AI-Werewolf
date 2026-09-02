@@ -119,6 +119,7 @@ export class WitchAntidoteNode {
             targetSeatNo: target.seatNo,
             thinking: reasoning,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, antidoteEvent);
           await context.eventBus?.publish(antidoteEvent);
 
           return {
@@ -136,6 +137,7 @@ export class WitchAntidoteNode {
             targetSeatNo: 0,
             thinking: reasoning,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, antidoteEvent);
           await context.eventBus?.publish(antidoteEvent);
 
           return {};

@@ -181,3 +181,25 @@
 .watchButton {
   white-space: nowrap;
 }
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid var(--gl-red-400);
+  border-radius: 0.5rem;
+  background-color: var(--gl-bg-900);
+  padding: 3rem;
+  text-align: center;
+}
+
+.errorText {
+  color: var(--gl-red-400);
+}

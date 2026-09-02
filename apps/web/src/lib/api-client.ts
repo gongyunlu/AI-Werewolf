@@ -13,6 +13,22 @@ export interface Agent {
   isActive: boolean;
 }
 
+/** 赛后分析进度 */
+export interface AnalysisStatus {
+  judgedCount: number;
+  judgeableCount: number;
+  reflectedCount: number;
+  playerCount: number;
+  narrativeReady: boolean;
+}
+
+export interface AnalyzeGameOptions {
+  judge?: boolean;
+  reflect?: boolean;
+  playerId?: string;
+  force?: boolean;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 class ApiClient {
@@ -122,6 +138,39 @@ class ApiClient {
       method: 'POST',
     });
     if (!response.ok) throw new Error(`Failed to recover game: ${response.statusText}`);
+  }
+
+  /**
+   * 查询单局赛后分析进度
+   */
+  async getAnalysisStatus(gameId: string): Promise<AnalysisStatus> {
+    const response = await fetch(`${this.baseURL}/evaluation/games/${gameId}/analysis-status`);
+    if (!response.ok) throw new Error(`Failed to fetch analysis status: ${response.statusText}`);
+    return response.json();
+  }
+
+  /**
+   * 触发单局赛后分析（评分 / 复盘 / 反思）
+   */
+  async analyzeGame(
+    gameId: string,
+    options: AnalyzeGameOptions = {},
+  ): Promise<{
+    judged: number;
+    reflectPlanned: number;
+    /** 是否实际投递；false 表示因已有流程在运行/已完成等原因被跳过 */
+    skipped: boolean;
+  }> {
+    const response = await fetch(`${this.baseURL}/evaluation/games/${gameId}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || `Failed to analyze game: ${response.statusText}`);
+    }
+    return response.json();
   }
 
   /**

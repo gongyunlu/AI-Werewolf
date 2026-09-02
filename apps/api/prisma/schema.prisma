@@ -46,6 +46,8 @@ model Game {
   agentJudgments    AgentJudgment[]
   speechSummaries   SpeechSummary[]
   decisionJudgments DecisionJudgment[]
+  memoryUsages      MemoryUsage[]
+  patternCandidates PatternCandidate[]
 
   @@map("games")
 }
@@ -92,6 +94,7 @@ model Player {
   events            Event[]
   agentPerformances AgentPerformance[]
   decisionJudgments DecisionJudgment[]
+  memoryUsages      MemoryUsage[]
 
   @@unique([gameId, seatNo])
   @@unique([gameId, agentId]) // 同一 Agent 一局最多一个座位
@@ -127,6 +130,7 @@ model Event {
   game              Game               @relation(fields: [gameId], references: [id], onDelete: Cascade)
   actor             Player?            @relation(fields: [actorId], references: [id], onDelete: SetNull)
   memories          Memory[]
+  memoryUsages      MemoryUsage[]
   judgments         AgentJudgment[]
   decisionJudgments DecisionJudgment[]
 
@@ -167,12 +171,44 @@ model Memory {
   event            Event?             @relation(fields: [eventId], references: [id], onDelete: SetNull)
   sourceRelations  MemoryDerivation[] @relation("MemoryDerivationDerived")
   derivedRelations MemoryDerivation[] @relation("MemoryDerivationSource")
+  usages           MemoryUsage[]
 
   @@index([agentId, label])
   @@index([agentId, type])
   @@index([agentId, importance])
   @@index([agentId, lastRetrievedAt])
   @@map("memories")
+}
+
+// 记忆注入使用记录：某次已落库行为使用了哪些记忆。
+// 注入候选先暂存在 AgentContext，行为 Event 写入成功后才以 eventId 精确落库，
+// 避免同一玩家同一天多次同类行为无法区分，也避免失败/降级调用污染学习样本。
+model MemoryUsage {
+  id       String @id @default(uuid()) @db.Uuid
+  memoryId String @map("memory_id") @db.Uuid
+  gameId   String @map("game_id") @db.Uuid
+  playerId String @map("player_id") @db.Uuid
+  eventId  String? @map("event_id") @db.Uuid
+  // 注入场景，取值口径见 packages/shared 的 AGENT_SCENARIOS
+  scenario String @db.VarChar(32)
+  // 本次注入服务的行为类型，取值口径见 packages/shared 的 ACTION_TYPES。
+  // 单独存而非从 scenario 推导：女巫一夜内解药/毒药是两次独立注入，同属 night_action 场景
+  actionType     String   @map("action_type") @db.VarChar(64)
+  day            Int      @db.SmallInt
+  triggerMatched Boolean  @default(false) @map("trigger_matched") // 记忆的触发条件是否匹配当次场景，用于信用分配
+  rewardScore    Int?     @map("reward_score") @db.SmallInt // 关联行为的评分，尚未回填
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  event  Event? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId])
+  @@index([gameId, playerId])
+  @@index([eventId])
+  @@unique([memoryId, eventId])
+  @@map("memory_usages")
 }
 
 // 记忆提炼的显式溯源关系。固化记忆仍可保持 isActive=true，来源关系与检索状态互不耦合。
@@ -202,6 +238,7 @@ model GlobalMemory {
   lastRetrievedAt      DateTime?                    @map("last_retrieved_at") @db.Timestamptz
   isActive             Boolean                      @default(true) @map("is_active")
   tags                 Json?                        @db.JsonB // 标签，如 ["wolf","night1","kill"]
+  sourceGameIds        Json?                        @map("source_game_ids") @db.JsonB // 晋升溯源：来源对局 id 列表
   // 语义检索用嵌入向量，口径同 Memory.embedding。
   embedding            Unsupported("vector(2048)")?
   embeddingModel       String?                      @map("embedding_model") @db.VarChar(128)
@@ -215,6 +252,29 @@ model GlobalMemory {
   @@index([importance])
   @@index([lastRetrievedAt])
   @@map("global_memories")
+}
+
+// pattern 晋升的聚类中间态：对局级复盘产出的 pattern 候选，语义聚类后达门槛晋升为 GlobalMemory。
+model PatternCandidate {
+  id                   String                       @id @default(uuid()) @db.Uuid
+  gameId               String                       @map("game_id") @db.Uuid // 簇代表来源对局（最早出现）
+  title                String                       @db.VarChar(256)
+  content              String                       @db.Text
+  importance           Float                        @default(0.5) @db.Real
+  sourceGameIds        Json                         @map("source_game_ids") @db.JsonB // 该簇已出现的对局 id（去重）
+  promotedAt           DateTime?                    @map("promoted_at") @db.Timestamptz // 晋升时间，null=未晋升
+  // 聚类比对用嵌入向量，口径同 Memory.embedding。
+  embedding            Unsupported("vector(2048)")?
+  embeddingModel       String?                      @map("embedding_model") @db.VarChar(128)
+  embeddingDimension   Int?                         @map("embedding_dimension")
+  embeddingContentHash String?                      @map("embedding_content_hash") @db.Char(64)
+  embeddedAt           DateTime?                    @map("embedded_at") @db.Timestamptz
+  createdAt            DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([promotedAt])
+  @@map("pattern_candidates")
 }
 
 // 玩家单局表现度量，用于记忆进化和性能分析。
@@ -259,6 +319,9 @@ model GameSummary {
   keyEvents            Json?    @map("key_events") @db.JsonB // 关键事件摘要
   mvpPlayerId          String?  @map("mvp_player_id") @db.Uuid // 本局 MVP 玩家
   totalSpeechCount     Int      @map("total_speech_count") // 发言总数（从 Event 聚合）
+  // 上帝视角复盘，对局结束后由 LLM 生成，存 JSON（复盘正文 + 关键转折 + 板子规律）。
+  // 本表其余字段均为确定性统计且由结算服务写入，此列是唯一的 LLM 产物。
+  narrative            String?  @db.Text
   generatedAt          DateTime @default(now()) @map("generated_at") @db.Timestamptz
 
   game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)

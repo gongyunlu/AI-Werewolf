@@ -126,6 +126,7 @@ export class SeerCheckNode {
             result: checkResult,
             thinking: reasoning,
           });
+          await this.agentRuntime.recordExperienceUsages(contextData, seerCheckEvent);
           await context.eventBus?.publish(seerCheckEvent);
 
           return {
@@ -156,11 +157,7 @@ export class SeerCheckNode {
     playerId: string,
     _context: any,
     additionalContext?: string,
-  ): Promise<{
-    systemPrompt: string;
-    player: any;
-    game: any;
-  }> {
+  ) {
     // 复用 AgentRuntimeService 的 prepareContextPublic
     return this.agentRuntime.prepareContextPublic(
       state.gameId,
