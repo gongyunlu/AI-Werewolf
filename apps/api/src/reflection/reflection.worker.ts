@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { JudgeService } from '../evaluation/judge.service';
 import { GlobalMemoryService } from '../memory/global-memory.service';
+import { MemoryMaintenanceService } from '../memory-maintenance/memory-maintenance.service';
 import { GameReviewService } from './game-review.service';
 import { ReflectionService } from './reflection.service';
 import {
@@ -29,6 +30,7 @@ export class ReflectionWorkerService extends WorkerHost {
     private readonly gameReviewService: GameReviewService,
     private readonly reflectionService: ReflectionService,
     private readonly globalMemoryService: GlobalMemoryService,
+    private readonly maintenanceService: MemoryMaintenanceService,
     private readonly queueService: ReflectionQueueService,
   ) {
     super();
@@ -45,7 +47,11 @@ export class ReflectionWorkerService extends WorkerHost {
       }
 
       // player 子任务全部完成后触发的聚合父任务；依赖关系本身就是完成信号。
-      if (job.name === REFLECT_JOB_NAMES.complete) return;
+      if (job.name === REFLECT_JOB_NAMES.complete) {
+        // 全部玩家反思落库后，按局序触发记忆分层维护；幂等投递，重复调用复用已存在任务。
+        await this.maintenanceService.enqueueForGame(gameId);
+        return;
+      }
 
       if (job.name !== REFLECT_JOB_NAMES.fanout) {
         throw new Error(`未知反思任务类型: ${job.name}`);

@@ -20,6 +20,8 @@ export const PROMPT_NAMES = {
   summarizerGlobalSummary: 'summarizer/global-summary',
   summarizerJudgmentHuman: 'summarizer/judgment-human',
   wolfCoordination: 'game/wolf-coordination',
+  memoryConsolidationSystem: 'memory/consolidate-system',
+  memoryConsolidationUser: 'memory/consolidate-user',
 } as const;
 
 export type PromptName = (typeof PROMPT_NAMES)[keyof typeof PROMPT_NAMES];
@@ -284,6 +286,20 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
 
     只输出 YES 或 NO，不要解释。
   `,
+
+  [PROMPT_NAMES.memoryConsolidationSystem]: `
+    你正在把一位狼人杀玩家积累的多条跨角色通用经验教训，提炼成一条可长期使用的战术策略。
+
+    这些经验都标注为「任意身份都适用」，不绑定具体角色、座位或某局偶然事件。
+
+    要求：
+    1. 输出的策略是战术倾向——指导行动的长期原则，而不是「这局谁是什么身份」这类一次性结论。
+    2. 合并重复的经验，剔除与具体对局绑定的事实（座位号、具体玩家名、某局胜负）。
+    3. 策略要可执行：说清「在什么局面下倾向于怎么做」，而不是「要多思考」这类空话。
+    4. 宁缺毋滥：只输出一条，若经验之间无法收敛成一条一致策略，选择最普适的那条。
+  `,
+
+  [PROMPT_NAMES.memoryConsolidationUser]: ['【待提炼的经验教训】', '{{lessons}}'].join('\n'),
 };
 
 /**

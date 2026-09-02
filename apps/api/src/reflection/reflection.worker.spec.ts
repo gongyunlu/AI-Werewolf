@@ -4,6 +4,7 @@ import type { JudgeService } from '../evaluation/judge.service';
 import type { GameReviewService } from './game-review.service';
 import type { ReflectionService } from './reflection.service';
 import type { GlobalMemoryService } from '../memory/global-memory.service';
+import type { MemoryMaintenanceService } from '../memory-maintenance/memory-maintenance.service';
 import {
   REFLECT_JOB_NAMES,
   type ReflectJobData,
@@ -34,6 +35,7 @@ describe('ReflectionWorkerService', () => {
   const gameReview = { reviewGame: jest.fn(), loadReview: jest.fn() };
   const reflection = { reflect: jest.fn() };
   const globalMemory = { promotePatterns: jest.fn() };
+  const maintenance = { enqueueForGame: jest.fn() };
   const queue = { enqueuePlayers: jest.fn() };
 
   let worker: ReflectionWorkerService;
@@ -45,6 +47,7 @@ describe('ReflectionWorkerService', () => {
     gameReview.reviewGame.mockResolvedValue({});
     gameReview.loadReview.mockResolvedValue(null);
     globalMemory.promotePatterns.mockResolvedValue(0);
+    maintenance.enqueueForGame.mockResolvedValue(undefined);
     queue.enqueuePlayers.mockResolvedValue(playerIds.length);
 
     worker = new ReflectionWorkerService(
@@ -53,6 +56,7 @@ describe('ReflectionWorkerService', () => {
       gameReview as unknown as GameReviewService,
       reflection as unknown as ReflectionService,
       globalMemory as unknown as GlobalMemoryService,
+      maintenance as unknown as MemoryMaintenanceService,
       queue as unknown as ReflectionQueueService,
     );
   });
@@ -101,5 +105,16 @@ describe('ReflectionWorkerService', () => {
       force: undefined,
       suffix: undefined,
     });
+  });
+
+  it('complete 分支在全部玩家反思完成后投递记忆维护任务', async () => {
+    const job = {
+      id: 'complete-1',
+      name: REFLECT_JOB_NAMES.complete,
+      data: { gameId },
+    } as unknown as Job<ReflectJobData>;
+
+    await expect(worker.process(job)).resolves.toBeUndefined();
+    expect(maintenance.enqueueForGame).toHaveBeenCalledWith(gameId);
   });
 });

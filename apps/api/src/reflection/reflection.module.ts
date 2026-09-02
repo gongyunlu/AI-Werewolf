@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { EvaluationModule } from '../evaluation/evaluation.module';
 import { MemoryModule } from '../memory/memory.module';
+import { MemoryMaintenanceModule } from '../memory-maintenance/memory-maintenance.module';
 import { GameReviewService } from './game-review.service';
 import { ReflectionService } from './reflection.service';
 import {
@@ -24,6 +25,7 @@ import { AnalysisController } from './analysis.controller';
     BullModule.registerFlowProducer({ name: REFLECT_FLOW_PRODUCER }),
     EvaluationModule,
     MemoryModule,
+    MemoryMaintenanceModule,
   ],
   controllers: [AnalysisController],
   providers: [
