@@ -55,7 +55,7 @@ export class WolfExplodeNode {
             state.gameId,
             wolf.id,
             'night_action' as any,
-            '现在是天亮阶段。你可以选择自爆：公开你的狼人身份，立即结束白天进入黑夜，跳过发言与投票。',
+            '现在是天亮阶段。你可以选择自爆：公开你的狼人身份并立即出局（自己死亡退场），当天白天直接结束进入黑夜，跳过发言与投票。自爆是牺牲自己换取跳过白天，请审慎判断是否值得。',
           );
 
           const threadId = getPlayerThreadId(state.gameId, wolf.id);

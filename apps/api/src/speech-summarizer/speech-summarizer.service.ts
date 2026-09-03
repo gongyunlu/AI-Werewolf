@@ -307,8 +307,17 @@ export class SpeechSummarizerService {
               modelName,
             );
 
-            if (judgments.length > 0) {
-              await this.agentJudgmentService.saveJudgments(agentId, gameId, day, judgments);
+            // LLM 偶发编造/抄错事件ID，若带着脏 speechId 直接入库会触发 FK 击穿整批判断：
+            // 先按本日真实发言事件ID过滤，仅入库可信条目。
+            const validSpeechIds = new Set(newSpeeches.map((s) => s.id));
+            const validJudgments = judgments.filter((j) => validSpeechIds.has(j.speechId));
+            if (validJudgments.length !== judgments.length) {
+              this.logger.warn(
+                `[逐玩家判断] ${seatNo}号位 ${judgments.length - validJudgments.length} 条判断的事件ID不存在，已丢弃（保留${validJudgments.length}条）`,
+              );
+            }
+            if (validJudgments.length > 0) {
+              await this.agentJudgmentService.saveJudgments(agentId, gameId, day, validJudgments);
             }
           }),
         )),
@@ -383,9 +392,9 @@ export class SpeechSummarizerService {
       model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3, // 保持一定创造性，但不过度随机
-      // 关 SDK 重试：hang 时 60s 快速失败而非连试 3 次 180s，避免整批判断被占死（对齐 StructuredLlmService）
+      // 关 SDK 重试：单次最多等 180s，覆盖 ARK 思考模型 3 分钟内的真实长生成（实测慢调用可达此量级）
       maxRetries: 0,
-      timeout: 60000,
+      timeout: 180000,
     });
 
     const systemPrompt = this.loadSystemPromptTemplate(role, privateInfo);
@@ -489,9 +498,9 @@ export class SpeechSummarizerService {
       model: modelName,
       configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
       temperature: 0.3,
-      // 关 SDK 重试：hang 时 60s 快速失败而非连试 3 次 180s，避免整批判断被占死（对齐 StructuredLlmService）
+      // 关 SDK 重试：单次最多等 180s，覆盖 ARK 思考模型 3 分钟内的真实长生成（实测慢调用可达此量级）
       maxRetries: 0,
-      timeout: 60000,
+      timeout: 180000,
     });
 
     const systemPrompt = await this.promptService.render(PROMPT_NAMES.summarizerGlobalSummary);
