@@ -75,6 +75,11 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     往期对局沉淀下来的教训与对手认知。仅在当前局面符合其适用条件时采纳，
     与本局实际观察冲突时以本局观察为准。
     {{experience}}
+
+    ## 攻略战术参考
+    从玩家投稿攻略中检索到的通用对局战术。仅在其触发条件与当前局面相符时参考，
+    与本局实际观察冲突时以本局观察为准，不可因此违背身份视角。
+    {{knowledge}}
     {{roleSpecificInfo}}
 
     ## 关键信息

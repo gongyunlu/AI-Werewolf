@@ -46,6 +46,12 @@ interface LessonRow {
   content: string;
 }
 
+interface KnowledgeUsageRow {
+  eventId: string | null;
+  actionType: string;
+  rewardScore: number;
+}
+
 const SPEECH = 'speech';
 
 /** 判定为好人 = trustScore>=50 且未标记可疑；否则判定为狼人。 */
@@ -129,7 +135,7 @@ async function main(): Promise<void> {
     `;
 
     // lesson lift 原始数据：命中样本（trigger 匹配且有 reward）+ 各 actionType 基线
-    const [liftHits, baselines, lessons] = await Promise.all([
+    const [liftHits, baselines, lessons, knowledgeHits] = await Promise.all([
       prisma.$queryRaw<LiftHit[]>`
         SELECT mu.memory_id AS "memoryId", mu.action_type AS "actionType", mu.reward_score AS "rewardScore"
         FROM memory_usages mu
@@ -148,6 +154,13 @@ async function main(): Promise<void> {
         SELECT id, content
         FROM memories
         WHERE type = 'lesson' AND is_active = true
+      `,
+      // 已注入攻略的决策：以 rewardScore 非空代表该行为已被 judge 评分
+      prisma.$queryRaw<KnowledgeUsageRow[]>`
+        SELECT DISTINCT ku.event_id AS "eventId", ku.action_type AS "actionType", ku.reward_score AS "rewardScore"
+        FROM knowledge_usages ku
+        WHERE ku.event_id IS NOT NULL
+          AND ku.reward_score IS NOT NULL
       `,
     ]);
 
@@ -339,6 +352,45 @@ async function main(): Promise<void> {
         warmM.judged,
       ).padStart(12)}(n=${String(warmM.judged).padStart(2)})`,
     );
+    print('');
+
+    // ============ 五、攻略注入 vs 未注入 质量对比 ============
+    print('========== 五、攻略注入 vs 未注入 质量对比 ==========');
+    // knowledge_usages 记录了注入过攻略的决策事件；对比这些事件 vs 其余 judge 评分事件的分数
+    const scoredEvents = await prisma.$queryRaw<
+      Array<{ eventId: string; score: number; actionType: string }>
+    >`
+      SELECT dj.event_id AS "eventId", dj.score AS score, dj.action_type AS "actionType"
+      FROM decision_judgments dj
+      WHERE dj.score IS NOT NULL
+    `;
+    const injectedEventIds = new Set(
+      knowledgeHits.map((h) => h.eventId).filter((e): e is string => !!e),
+    );
+    let injectedSum = 0;
+    let injectedN = 0;
+    let nonInjectedSum = 0;
+    let nonInjectedN = 0;
+    for (const row of scoredEvents) {
+      if (injectedEventIds.has(row.eventId)) {
+        injectedSum += row.score;
+        injectedN += 1;
+      } else {
+        nonInjectedSum += row.score;
+        nonInjectedN += 1;
+      }
+    }
+    const injectedAvg = injectedN > 0 ? (injectedSum / injectedN).toFixed(1) : '  -  ';
+    const nonInjectedAvg = nonInjectedN > 0 ? (nonInjectedSum / nonInjectedN).toFixed(1) : '  -  ';
+    print(`                注入(被评分决策)   未注入(其余决策)`);
+    print(
+      `决策质量均分   ${injectedAvg.padStart(10)}(n=${String(injectedN).padStart(2)})${nonInjectedAvg.padStart(14)}(n=${String(
+        nonInjectedN,
+      ).padStart(2)})`,
+    );
+    if (injectedN === 0) {
+      print('暂无已注入攻略且被评分的决策（需先用 judge 跑出分数）。');
+    }
     print('');
 
     // ============ 辅助：阵营胜率 ============

@@ -48,7 +48,7 @@ export class StatisticsService {
     return byFaction.map((row) => ({ winnerFaction: row.winnerFaction, games: row._count }));
   }
 
-  /** Agent 排行：按 agentId 内存聚合（作品集规模足够，避免 raw SQL） */
+  /** Agent 排行：按 agentId 内存聚合 */
   async agentsRanking(minGames = 1, role?: string) {
     const performances = await this.prisma.agentPerformance.findMany({
       where: role ? { role } : undefined,

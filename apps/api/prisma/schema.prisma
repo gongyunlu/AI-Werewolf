@@ -48,6 +48,7 @@ model Game {
   decisionJudgments DecisionJudgment[]
   memoryUsages      MemoryUsage[]
   patternCandidates PatternCandidate[]
+  knowledgeUsages   KnowledgeUsage[]
 
   @@map("games")
 }
@@ -95,6 +96,7 @@ model Player {
   agentPerformances AgentPerformance[]
   decisionJudgments DecisionJudgment[]
   memoryUsages      MemoryUsage[]
+  knowledgeUsages   KnowledgeUsage[]
 
   @@unique([gameId, seatNo])
   @@unique([gameId, agentId]) // 同一 Agent 一局最多一个座位
@@ -131,6 +133,7 @@ model Event {
   actor             Player?            @relation(fields: [actorId], references: [id], onDelete: SetNull)
   memories          Memory[]
   memoryUsages      MemoryUsage[]
+  knowledgeUsages   KnowledgeUsage[]
   judgments         AgentJudgment[]
   decisionJudgments DecisionJudgment[]
 
@@ -393,4 +396,71 @@ model SpeechSummary {
   @@unique([gameId, day, seatNo])
   @@index([gameId, day])
   @@map("speech_summaries")
+}
+
+// 攻略知识库：把 data/ 下的非结构化攻略清洗、切块后经 LLM 蒸馏成 {role, scenario, trigger, action}
+// 的结构化战术条目，注入 agent 决策链作「通用战术层」。与 memories 独立：memories 是 agent 自学习经验
+// （agent_id NOT NULL + 衰减/归档），攻略是外部静态语料。原文与蒸馏条目在同一行双写。
+// 取值的 role 用开放字符串（取值口径见 packages/shared 的 ROLES，'any' 表示不限）、
+// scenario 用 packages/shared 的 AGENT_SCENARIOS，'any' 表示跨场景。检索时角色/场景在 SQL 层硬过滤
+// （embedding 区分不了「我是女巫 vs 我是预言家」），再按 cosine 相似度取 top-k。
+model KnowledgeChunk {
+  id        String   @id @default(uuid()) @db.Uuid
+  // 语料来源文件（相对 data/ 的文件名），用于审计与重建
+  sourceFile String  @map("source_file") @db.VarChar(128)
+  // 所属攻略文章标题（## 标题），作为章节锚点
+  articleTitle String @map("article_title") @db.VarChar(256)
+  // 小节标题（### / <strong> 显式小标题），可为空
+  sectionTitle String? @map("section_title") @db.VarChar(256)
+  role     String   @db.VarChar(32) // 适用角色，取值口径见 packages/shared 的 ROLES 或 'any'
+  scenario String   @db.VarChar(32) // 适用场景，取值口径见 packages/shared 的 AGENT_SCENARIOS 或 'any'
+  // LLM 蒸馏出的触发条件与行动建议（结构化条目）
+  trigger String   @db.Text
+  action  String   @db.Text
+  // 清洗后的原文段落（蒸馏的输入、可切换注入源的兜底）
+  content String   @db.Text
+  isActive Boolean  @default(true) @map("is_active")
+  // 语义向量，口径对齐 doubao-embedding-vision (2048)，写走 $queryRaw/$executeRaw，故此处 Unsupported
+  embedding            Unsupported("vector(2048)")?
+  embeddingModel       String?  @map("embedding_model") @db.VarChar(128)
+  embeddingDimension   Int?     @map("embedding_dimension")
+  embeddingContentHash String?  @map("embedding_content_hash") @db.Char(64)
+  embeddedAt           DateTime? @map("embedded_at") @db.Timestamptz
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  usages KnowledgeUsage[]
+
+  @@index([role, scenario])
+  @@map("knowledge_chunks")
+}
+
+// 攻略注入使用记录：某次已落库行为注入了哪些知识块。
+// 与 MemoryUsage 同构——注入候选先暂存在 AgentContext，行为 Event 写入成功后才以 eventId 精确落库，
+// 避免失败/降级调用污染样本；rewardScore 由 judge 回填与该行为评分（DecisionJudgment.score），
+// 供度量「攻略是否提升对局质量」（注入 vs 未注入组的评分对比）。
+model KnowledgeUsage {
+  id       String @id @default(uuid()) @db.Uuid
+  chunkId  String @map("chunk_id") @db.Uuid
+  gameId   String @map("game_id") @db.Uuid
+  playerId String @map("player_id") @db.Uuid
+  eventId  String? @map("event_id") @db.Uuid
+  // 注入场景，取值口径见 packages/shared 的 AGENT_SCENARIOS
+  scenario String @db.VarChar(32)
+  // 本次注入服务的行为类型，取值口径见 packages/shared 的 ACTION_TYPES
+  actionType String @map("action_type") @db.VarChar(64)
+  day        Int @db.SmallInt
+  // 关联行为的评分，由 judge.service.backfillRewards 回填，尚未回填时为 NULL
+  rewardScore Int? @map("reward_score") @db.SmallInt
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  chunk  KnowledgeChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  game   Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player         @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  event  Event?         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([chunkId])
+  @@index([gameId, playerId])
+  @@index([eventId])
+  @@unique([chunkId, eventId])
+  @@map("knowledge_usages")
 }

@@ -8,6 +8,7 @@ function createMockPrisma() {
   return {
     decisionJudgment: { findMany: jest.fn() },
     memoryUsage: { findMany: jest.fn(), update: jest.fn() },
+    knowledgeUsage: { findMany: jest.fn(), update: jest.fn() },
     event: { findMany: jest.fn() },
   };
 }
@@ -18,6 +19,8 @@ describe('JudgeService.backfillRewards', () => {
 
   beforeEach(() => {
     prisma = createMockPrisma();
+    // backfillRewards 现同时处理 knowledge_usages；默认无攻略注入，需覆盖时单测里 mockResolvedValue
+    (prisma.knowledgeUsage.findMany as jest.Mock).mockResolvedValue([]);
     service = new JudgeService(
       prisma as unknown as PrismaService,
       {} as unknown as PromptService,

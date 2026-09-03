@@ -369,7 +369,7 @@ export class JudgeService {
    * 因此 force 重评后会刷新旧 reward；不再可唯一匹配的旧样本会清空，避免保留陈旧分数。
    */
   async backfillRewards(gameId: string): Promise<number> {
-    const [judgments, usages] = await Promise.all([
+    const [judgments, usages, knowledgeUsages] = await Promise.all([
       this.prisma.decisionJudgment.findMany({
         where: { gameId },
         select: { eventId: true, playerId: true, actionType: true, day: true, score: true },
@@ -385,12 +385,26 @@ export class JudgeService {
           rewardScore: true,
         },
       }),
+      this.prisma.knowledgeUsage.findMany({
+        where: { gameId },
+        select: {
+          id: true,
+          eventId: true,
+          playerId: true,
+          actionType: true,
+          day: true,
+          rewardScore: true,
+        },
+      }),
     ]);
 
     const scoreByEventId = new Map(judgments.map((j) => [j.eventId, j.score]));
     // 仅供迁移前的旧 usage 使用。必须检查底层真实 Event 是否也唯一，不能只数评分。
     const legacyScoreByKey = new Map<string, number>();
-    if (usages.some((usage) => usage.eventId === null)) {
+    if (
+      usages.some((usage) => usage.eventId === null) ||
+      knowledgeUsages.some((u) => u.eventId === null)
+    ) {
       const events = await this.prisma.event.findMany({
         where: { gameId, actorId: { not: null }, day: { not: null } },
         select: { id: true, actorId: true, actionType: true, day: true },
@@ -411,6 +425,23 @@ export class JudgeService {
     }
 
     let filled = 0;
+    // 走同一套 eventId/legacy 映射，分别回填 memory_usages 与 knowledge_usages
+    for (const u of knowledgeUsages) {
+      const nextScore = u.eventId
+        ? (scoreByEventId.get(u.eventId) ?? null)
+        : (legacyScoreByKey.get(`${u.playerId}|${u.actionType}|${u.day}`) ?? null);
+
+      if (u.rewardScore === nextScore) {
+        if (nextScore !== null) filled += 1;
+        continue;
+      }
+      await this.prisma.knowledgeUsage.update({
+        where: { id: u.id },
+        data: { rewardScore: nextScore },
+      });
+      if (nextScore !== null) filled += 1;
+    }
+
     for (const u of usages) {
       const nextScore = u.eventId
         ? (scoreByEventId.get(u.eventId) ?? null)

@@ -14,6 +14,7 @@
     "prisma:check": "prisma migrate diff --from-schema prisma/schema.prisma --to-config-datasource --exit-code",
     "memory:backfill-embeddings": "node --import tsx src/memory/backfill-memory-embeddings.ts",
     "memory:backfill-lesson-trigger": "node --import tsx src/memory/backfill-lesson-trigger.ts",
+    "knowledge:build": "node --import tsx src/knowledge/build-knowledge-chunks.ts",
     "evaluation:measure": "node --import tsx src/evaluation/measure-learning.ts",
     "start:prod": "pnpm -w run docker:up && node dist/main",
     "preview": "pnpm run start:prod",

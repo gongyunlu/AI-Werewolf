@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory, type SimilarMemory } from '../memory/memory.service';
 import { GlobalMemoryService, type ActivePattern } from '../memory/global-memory.service';
+import { KnowledgeService, type KnowledgeHit } from '../knowledge/knowledge.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
@@ -64,6 +65,8 @@ interface AgentContext {
   scenario: AgentScenario;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的记忆使用关系 */
   pendingMemoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
+  /** 已注入 Prompt、待行为 Event 成功落库后确认的攻略使用关系 */
+  pendingKnowledgeUsages: Array<{ chunkId: string }>;
 }
 
 /**
@@ -84,6 +87,7 @@ export class AgentRuntimeService {
     private readonly prisma: PrismaService,
     private readonly memoryService: MemoryService,
     private readonly globalMemoryService: GlobalMemoryService,
+    private readonly knowledgeService: KnowledgeService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly langfuse: LangfuseService,
@@ -469,7 +473,10 @@ export class AgentRuntimeService {
     context: AgentContext,
     event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
   ): Promise<void> {
-    if (context.pendingMemoryUsages.length === 0) return;
+    // memory 与 knowledge 任一注入待确认都应继续走到下方各自记录
+    if (context.pendingMemoryUsages.length === 0 && context.pendingKnowledgeUsages.length === 0) {
+      return;
+    }
     if (
       event.gameId !== context.game.id ||
       event.actorId !== context.player.id ||
@@ -499,6 +506,21 @@ export class AgentRuntimeService {
         day: event.day!,
       })),
     );
+
+    // 攻略注入同样延迟到行为 Event 落库后确认，保证只记真实生效的注入
+    if (context.pendingKnowledgeUsages.length > 0) {
+      await this.knowledgeService.recordUsages(
+        context.pendingKnowledgeUsages.map((usage) => ({
+          chunkId: usage.chunkId,
+          eventId: event.id,
+          gameId: event.gameId,
+          playerId: context.player.id,
+          scenario: context.scenario,
+          actionType: event.actionType,
+          day: event.day!,
+        })),
+      );
+    }
   }
 
   async validateRequiredSkills(options: {
@@ -633,6 +655,18 @@ export class AgentRuntimeService {
     // 全局板子规律：跨对局晋升验证，与身份无关，全量注入所有玩家
     const globalPatterns = await this.globalMemoryService.retrieveActivePatterns();
 
+    // 攻略知识库：外部静态战术（清洗+蒸馏后的知识块）。检索失败降级为空，不阻断对局。
+    const knowledgeHits = await this.knowledgeService.retrieve(
+      buildScenarioQuery({
+        role: player.role,
+        scenario,
+        day: currentDay,
+        events,
+      }),
+      player.role,
+      scenario,
+    );
+
     const visiblePlayerSeats = otherPlayers
       .map((p) => p.seatNo)
       .filter((seatNo): seatNo is number => seatNo !== null);
@@ -660,6 +694,7 @@ export class AgentRuntimeService {
       memories,
       experience,
       globalPatterns,
+      knowledgeHits,
       context: layeredContext,
       additionalContext: [speechSummary, wolfDiscussionContext, additionalContext]
         .filter(Boolean)
@@ -672,6 +707,7 @@ export class AgentRuntimeService {
       game: player.game,
       scenario,
       pendingMemoryUsages,
+      pendingKnowledgeUsages: knowledgeHits.map((hit) => ({ chunkId: hit.id })),
     };
   }
 
@@ -847,11 +883,20 @@ export class AgentRuntimeService {
     memories: ActiveMemory[];
     experience: { lessons: ActiveMemory[]; playerModels: ActiveMemory[] };
     globalPatterns: ActivePattern[];
+    knowledgeHits: KnowledgeHit[];
     context: LayeredContext;
     additionalContext?: string;
   }): Promise<string> {
-    const { scenario, player, memories, experience, globalPatterns, context, additionalContext } =
-      options;
+    const {
+      scenario,
+      player,
+      memories,
+      experience,
+      globalPatterns,
+      knowledgeHits,
+      context,
+      additionalContext,
+    } = options;
 
     // 获取游戏的技能版本
     const skillVersion = player.game.skillVersion || 'v1';
@@ -926,6 +971,17 @@ export class AgentRuntimeService {
       .map((p) => `### ${p.title}\n${p.content}`)
       .join('\n\n');
 
+    // 攻略知识库：外部静态战术条目，按当前局面命中注入。附「与本局冲突以本局为准」防误导。
+    const knowledgeSection =
+      knowledgeHits.length > 0
+        ? knowledgeHits
+            .map(
+              (hit) =>
+                `### ${hit.articleTitle}【${hit.role === 'any' ? '通用' : hit.role}】\n场景：${hit.scenario}\n触发：${hit.trigger}\n行动：${hit.action}`,
+            )
+            .join('\n\n')
+        : '';
+
     // 角色特定历史信息
     let roleSpecificInfo = '';
 
@@ -949,6 +1005,7 @@ export class AgentRuntimeService {
       strategy: strategyMemory || '暂无',
       globalPattern: globalPatternSection || '暂无',
       experience: experienceSection || '暂无',
+      knowledge: knowledgeSection || '暂无',
       roleSpecificInfo,
       critical: context.critical,
       recent: context.recent,
