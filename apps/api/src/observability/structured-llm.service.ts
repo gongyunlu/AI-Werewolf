@@ -113,4 +113,41 @@ export class StructuredLlmService {
 
     return { output: output as T, modelName };
   }
+
+  /**
+   * 两段式 reflective 调用：初评 → 反思 → 修正后的结果。
+   *
+   * 反思复用同一 schema（修正结果直接走 invoke 的解析与单次重试逻辑），仅替换 system 与 user。
+   * 固定反思一次、不做循环——judge 打分无 ground truth，语义层问题（上帝视角、理由不支撑）
+   * 无法确定性判定「反思后是否更好」，循环只会让分数漂移、成本线性上涨。
+   */
+  async invokeReflective<T>(
+    options: StructuredInvokeOptions<T> & {
+      refineSystem: string;
+      refinePromptName?: string;
+      refinePromptVersion?: number | null;
+      refineUser: (first: T) => string;
+    },
+  ): Promise<{ output: T; modelName: string }> {
+    const { refineSystem, refinePromptName, refinePromptVersion, refineUser, ...firstOptions } =
+      options;
+
+    const first = await this.invoke(firstOptions);
+
+    // TODO(反思环演进)：当前固定反思一次，不循环。若后续要升级成「检测驱动的反思环」，
+    // 可在 judge-schema 里定义 verdict→score 的确定性映射（如 good∈[70,100]、fair∈[40,69]、
+    // poor∈[0,39]），用它做停止条件：初评不一致才触发反思、反思后仍不一致且未达上限（如 2 次）
+    // 才继续、一致或达上限即停。停止信号落在确定性规则而非 LLM 自评，避免无 ground truth 下的
+    // 无界循环；语义层问题无确定性信号，仍靠本次固定反思压制。
+    const refined = await this.invoke({
+      ...firstOptions,
+      system: refineSystem,
+      user: refineUser(first.output),
+      runName: `${options.runName}-refine`,
+      promptName: refinePromptName ?? firstOptions.promptName,
+      promptVersion: refinePromptVersion ?? firstOptions.promptVersion,
+    });
+
+    return refined;
+  }
 }

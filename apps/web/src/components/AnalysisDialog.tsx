@@ -72,7 +72,8 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
     [gameId],
   );
 
-  const runAll = useCallback(() => run({ judge: true, reflect: true }), [run]);
+  const runAll = useCallback(() => run({ judge: true, reflect: true, force: true }), [run]);
+  const runJudgeOnly = useCallback(() => run({ judge: true, reflect: false, force: true }), [run]);
   const runReflectOnly = useCallback(
     () => run({ judge: false, reflect: true, force: true }),
     [run],
@@ -117,8 +118,8 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
           </div>
 
           <p className={styles.hint}>
-            开始/补全分析默认复用已有结果，不会强制重跑。只重跑反思会复用已有评分，适合调整反思规则后使用；
-            它会把本局此前产出的记忆标记为失效，避免新旧经验并存。
+            开始分析会强制全量重跑评分与反思。重跑评分只重新打分决策与发言（复用已有反思）；
+            重跑反思只重新复盘与玩家反思（复用已有评分），并会把本局此前产出的记忆标记为失效。
           </p>
 
           {error && (
@@ -143,11 +144,19 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
             </Button>
             <Button
               variant="outline"
+              onClick={runJudgeOnly}
+              disabled={loading}
+              className={styles.secondaryButton}
+            >
+              重跑评分
+            </Button>
+            <Button
+              variant="outline"
               onClick={runReflectOnly}
               disabled={loading}
               className={styles.secondaryButton}
             >
-              只重跑反思
+              重跑反思
             </Button>
             <Button
               onClick={runAll}
@@ -155,7 +164,7 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
               aria-busy={loading}
               className={styles.primaryButton}
             >
-              {loading ? '投递中...' : '开始/补全分析'}
+              {loading ? '投递中...' : '开始分析'}
             </Button>
           </div>
         </div>

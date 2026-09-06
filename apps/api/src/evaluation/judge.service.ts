@@ -7,10 +7,12 @@ import { ACTION_TYPES, FACTIONS } from '@ai-werewolf/shared';
 import { JudgeOutputSchema, SpeechJudgeOutputSchema, validateSpeechOutput } from './judge-schema';
 import {
   buildJudgePromptVariables,
+  buildRefineUser,
   buildSpeechJudgePromptVariables,
   type JudgeEventInput,
 } from './judge-prompt';
 import { isJudgeableAction } from './action-catalog';
+import { aggregatePlayerScores as aggregateScores } from './player-score';
 
 /**
  * LLM-as-judge 决策质量评估服务。
@@ -125,15 +127,13 @@ export class JudgeService {
       events: judgeEvents,
     });
 
-    const [systemPrompt, userPrompt] = await Promise.all([
+    const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
       this.promptService.render(PROMPT_NAMES.judgeSystem),
       this.promptService.render(PROMPT_NAMES.judgeUser, variables),
+      this.promptService.render(PROMPT_NAMES.judgeRefineSystem),
     ]);
 
-    const {
-      output: { verdict, score, reasoning },
-      modelName,
-    } = await this.structuredLlm.invoke({
+    const { output: refined, modelName } = await this.structuredLlm.invokeReflective({
       schema: JudgeOutputSchema,
       runName: 'judge',
       scenario: 'judge',
@@ -145,7 +145,12 @@ export class JudgeService {
       role: player.role,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
+      refineSystem: refineSystemPrompt.text,
+      refinePromptName: refineSystemPrompt.name,
+      refinePromptVersion: refineSystemPrompt.version,
+      refineUser: (first) => buildRefineUser(userPrompt.text, first),
     });
+    const { verdict, score, reasoning } = refined;
 
     await this.prisma.decisionJudgment.upsert({
       where: { eventId },
@@ -263,12 +268,13 @@ export class JudgeService {
       return 0;
     }
 
-    const [systemPrompt, userPrompt] = await Promise.all([
+    const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
       this.promptService.render(PROMPT_NAMES.judgeSpeechSystem),
       this.promptService.render(PROMPT_NAMES.judgeSpeechUser, variables),
+      this.promptService.render(PROMPT_NAMES.judgeSpeechRefineSystem),
     ]);
 
-    const { output, modelName } = await this.structuredLlm.invoke({
+    const { output, modelName } = await this.structuredLlm.invokeReflective({
       schema: SpeechJudgeOutputSchema,
       runName: 'judge-speeches',
       scenario: 'judge',
@@ -280,6 +286,10 @@ export class JudgeService {
       role: player.role,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
+      refineSystem: refineSystemPrompt.text,
+      refinePromptName: refineSystemPrompt.name,
+      refinePromptVersion: refineSystemPrompt.version,
+      refineUser: (first) => buildRefineUser(userPrompt.text, first),
     });
 
     // 弱模型频繁漏标 index：条数对齐且全部漏标时按输出顺序回填（全漏标说明模型只是
@@ -460,5 +470,11 @@ export class JudgeService {
     }
 
     return filled;
+  }
+
+  /** 聚合个人过程分 + 选 MVP（实现见 player-score.ts 纯函数） */
+  async aggregatePlayerScores(gameId: string): Promise<void> {
+    const { scored, total } = await aggregateScores(this.prisma, gameId);
+    this.logger.log({ gameId, scored, total }, '个人过程分聚合完成');
   }
 }

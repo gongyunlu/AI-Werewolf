@@ -5,10 +5,8 @@ import type { Prisma } from '../generated/prisma/client';
 import {
   computePlayerMetrics,
   selectKeyEvents,
-  selectMvp,
   type MetricEvent,
   type MetricPlayer,
-  type MvpCandidate,
 } from './metrics';
 
 /**
@@ -74,8 +72,6 @@ export class SettlementService {
       content: (e.content as Record<string, unknown>) ?? {},
     }));
 
-    const mvpCandidates: MvpCandidate[] = [];
-
     for (const p of players) {
       const metrics = computePlayerMetrics(
         p,
@@ -85,15 +81,9 @@ export class SettlementService {
         winnerFaction,
       );
 
-      mvpCandidates.push({
-        playerId: p.id,
-        score: metrics.score,
-        isWinner: metrics.isWinner,
-        survivalDays: metrics.survivalDays,
-        voteAccuracy: metrics.voteAccuracy,
-      });
-
       // 正常结算时 role/faction 已在 initialize 阶段分配，?? '' 仅为兜底满足非空约束
+      // score 不在此写入：个人分由 judge 过程分聚合（JudgeService.aggregatePlayerScores）
+      // 在赛后异步落库，结算只负责胜负/存活/投票等客观统计。
       await this.prisma.agentPerformance.upsert({
         where: { gameId_playerId: { gameId, playerId: p.id } },
         update: {
@@ -106,7 +96,6 @@ export class SettlementService {
           abilityUseCount: metrics.abilityUseCount,
           speechCount: metrics.speechCount,
           speechAvgTokens: metrics.speechAvgTokens,
-          score: metrics.score,
         },
         create: {
           gameId,
@@ -120,7 +109,6 @@ export class SettlementService {
           abilityUseCount: metrics.abilityUseCount,
           speechCount: metrics.speechCount,
           speechAvgTokens: metrics.speechAvgTokens,
-          score: metrics.score,
         },
       });
     }
@@ -138,7 +126,6 @@ export class SettlementService {
         (p) => p.faction === FACTIONS.THIRD_PARTY && p.deathDay === null,
       ).length,
       keyEvents: selectKeyEvents(metricEvents) as unknown as Prisma.InputJsonValue,
-      mvpPlayerId: selectMvp(mvpCandidates),
       totalSpeechCount: metricEvents.filter((e) => e.actionType === ACTION_TYPES.SPEECH).length,
     };
 

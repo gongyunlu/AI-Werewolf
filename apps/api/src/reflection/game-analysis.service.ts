@@ -241,6 +241,7 @@ export class GameAnalysisService {
         if (judgedCount >= judgeableCount) {
           // 不需要重评，但仍严格刷新一次 reward，修复旧 completion 可能遗漏的派生数据。
           await this.judgeService.backfillRewards(gameId);
+          await this.judgeService.aggregatePlayerScores(gameId);
           this.logger.log({ gameId }, '评分已完整，已刷新 reward，跳过重复投递');
           return { judged: 0, reflectPlanned: 0, skipped: true };
         }

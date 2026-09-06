@@ -30,16 +30,17 @@ describe('AnalysisDialog', () => {
     });
   });
 
-  it('开始/补全分析不启用 force，且投递后不立即用旧汇总显示完成', async () => {
+  it('开始分析强制全量重跑评分与反思，投递后不立即用旧汇总显示完成', async () => {
     render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
     expect(await screen.findByText('4 / 4')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '开始/补全分析' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
 
     await waitFor(() => {
       expect(apiClientMock.analyzeGame).toHaveBeenCalledWith('game-1', {
         judge: true,
         reflect: true,
+        force: true,
       });
     });
     expect(apiClientMock.getAnalysisStatus).toHaveBeenCalledTimes(1);
@@ -48,11 +49,26 @@ describe('AnalysisDialog', () => {
     expect(screen.getByText(/已投递：评分 2 项、反思 6 人/)).toBeInTheDocument();
   });
 
-  it('只有显式重跑反思时传 force=true', async () => {
+  it('重跑评分只投评分并强制重跑', async () => {
     render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
     await screen.findByText('4 / 4');
 
-    fireEvent.click(screen.getByRole('button', { name: '只重跑反思' }));
+    fireEvent.click(screen.getByRole('button', { name: '重跑评分' }));
+
+    await waitFor(() => {
+      expect(apiClientMock.analyzeGame).toHaveBeenCalledWith('game-1', {
+        judge: true,
+        reflect: false,
+        force: true,
+      });
+    });
+  });
+
+  it('重跑反思只投反思并强制重跑', async () => {
+    render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
+    await screen.findByText('4 / 4');
+
+    fireEvent.click(screen.getByRole('button', { name: '重跑反思' }));
 
     await waitFor(() => {
       expect(apiClientMock.analyzeGame).toHaveBeenCalledWith('game-1', {
@@ -72,7 +88,7 @@ describe('AnalysisDialog', () => {
     render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
     await screen.findByText('4 / 4');
 
-    fireEvent.click(screen.getByRole('button', { name: '开始/补全分析' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
 
     expect(await screen.findByText(/未重新投递/)).toBeInTheDocument();
     expect(screen.queryByText(/已投递：/)).not.toBeInTheDocument();
@@ -87,7 +103,7 @@ describe('AnalysisDialog', () => {
     );
     render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole('button', { name: '开始/补全分析' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
     await screen.findByText(/已投递：评分 2 项、反思 6 人/);
     resolveStatus?.(COMPLETE_STATUS);
 

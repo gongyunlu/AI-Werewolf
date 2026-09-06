@@ -56,4 +56,19 @@ describe('StructuredLlmService', () => {
     });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
   });
+
+  it('invokeReflective 初评一次、反思一次，返回反思修正后的结果', async () => {
+    const service = createService([{ score: 90 }, { score: 60 }]);
+    const refineUser = jest.fn((first: { score: number }) => `refined:${first.score}`);
+
+    const result = await service.invokeReflective({
+      ...baseOptions,
+      refineSystem: 'refine-system',
+      refineUser,
+    });
+
+    expect(result).toEqual({ output: { score: 60 }, modelName: 'glm-4' });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(refineUser).toHaveBeenCalledWith({ score: 90 });
+  });
 });

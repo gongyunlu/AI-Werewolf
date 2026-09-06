@@ -21,7 +21,6 @@ export const createNightResolveNode: NodeFactory = (context) => {
       witchAntidoteTarget: state.witchAntidoteTarget,
       witchPoisonTarget: state.witchPoisonTarget,
       witchPlayerId: witch?.id,
-      currentDay: state.currentDay,
     });
 
     const nightDeaths = result.deaths;

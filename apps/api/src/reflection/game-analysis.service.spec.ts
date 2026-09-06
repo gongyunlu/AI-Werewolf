@@ -37,7 +37,11 @@ describe('GameAnalysisService', () => {
     enqueueFanout: jest.fn(),
   };
   const settlement = { settleGame: jest.fn() };
-  const judge = { countJudgeableTargets: jest.fn(), backfillRewards: jest.fn() };
+  const judge = {
+    countJudgeableTargets: jest.fn(),
+    backfillRewards: jest.fn(),
+    aggregatePlayerScores: jest.fn(),
+  };
   const flowProducer = { add: jest.fn() };
   const scheduleLease = { assertOwned: jest.fn() };
 
@@ -57,6 +61,7 @@ describe('GameAnalysisService', () => {
     prisma.gameSummary.findUnique.mockResolvedValue({ narrative: null });
     judge.countJudgeableTargets.mockResolvedValue(2);
     judge.backfillRewards.mockResolvedValue(0);
+    judge.aggregatePlayerScores.mockResolvedValue(undefined);
     reflectionQueue.withGameScheduleLock.mockImplementation(
       async (_gameId: string, task: (lease: typeof scheduleLease) => Promise<unknown>) => ({
         acquired: true,
@@ -207,6 +212,7 @@ describe('GameAnalysisService', () => {
     ).resolves.toMatchObject({ judged: 0, reflectPlanned: 0 });
 
     expect(judge.backfillRewards).toHaveBeenCalledWith(gameId);
+    expect(judge.aggregatePlayerScores).toHaveBeenCalledWith(gameId);
     expect(judgeQueue.enqueueGame).not.toHaveBeenCalled();
   });
 

@@ -31,7 +31,7 @@ describe('ReflectionWorkerService', () => {
   const prisma = {
     player: { findMany: jest.fn() },
   };
-  const judge = { backfillRewards: jest.fn() };
+  const judge = { backfillRewards: jest.fn(), aggregatePlayerScores: jest.fn() };
   const gameReview = { reviewGame: jest.fn(), loadReview: jest.fn() };
   const reflection = { reflect: jest.fn() };
   const globalMemory = { promotePatterns: jest.fn() };
@@ -44,6 +44,7 @@ describe('ReflectionWorkerService', () => {
     jest.clearAllMocks();
     prisma.player.findMany.mockResolvedValue(playerIds.map((id) => ({ id })));
     judge.backfillRewards.mockResolvedValue(0);
+    judge.aggregatePlayerScores.mockResolvedValue(undefined);
     gameReview.reviewGame.mockResolvedValue({});
     gameReview.loadReview.mockResolvedValue(null);
     globalMemory.promotePatterns.mockResolvedValue(0);

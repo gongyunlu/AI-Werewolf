@@ -75,10 +75,12 @@ export class ReflectionWorkerService extends WorkerHost {
       // 该路径回填失败会让 fanout 重试，避免反思已完成但 lesson 质量信号仍停留在旧版本。
       if (refreshRewards) {
         await this.judgeService.backfillRewards(gameId);
+        await this.judgeService.aggregatePlayerScores(gameId);
       } else {
         // 只跑反思时没有产生新评分，回填是尽力补历史空值，不阻断复盘。
         try {
           await this.judgeService.backfillRewards(gameId);
+          await this.judgeService.aggregatePlayerScores(gameId);
         } catch (error) {
           this.logger.warn(
             { gameId, err: error instanceof Error ? error.message : String(error) },

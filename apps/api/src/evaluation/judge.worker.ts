@@ -23,6 +23,7 @@ export class JudgeWorkerService extends WorkerHost {
       if (job.name === JUDGE_JOB_NAMES.complete) {
         // completion 只有在全部评分 child 成功后才会运行；回填失败必须重试，不能静默留下旧 reward。
         await this.judgeService.backfillRewards(gameId);
+        await this.judgeService.aggregatePlayerScores(gameId);
         return;
       }
 

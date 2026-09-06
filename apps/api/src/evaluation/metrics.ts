@@ -36,7 +36,6 @@ export interface PlayerMetrics {
   abilityUseCount: number;
   speechCount: number;
   speechAvgTokens: number | null;
-  score: number;
 }
 
 /** 对局关键事件摘要 */
@@ -184,24 +183,6 @@ export function averageSpeechTokens(player: MetricPlayer, events: MetricEvent[])
   return Math.round(total / speeches.length);
 }
 
-/**
- * 综合分（0~100）
- *
- * 权重：胜率主导（最终目标）60% + 存活占比 25% + 投票精度 15%，确定且可横向比较。
- */
-export function computeScore(input: {
-  isWinner: boolean;
-  survivalDays: number;
-  totalDays: number;
-  voteAccuracy: number | null;
-}): number {
-  const { isWinner, survivalDays, totalDays, voteAccuracy } = input;
-  const effectiveVoteAcc = voteAccuracy ?? 0.5;
-  const survivalRatio = totalDays > 0 ? survivalDays / totalDays : 0;
-  const raw = 100 * (0.6 * (isWinner ? 1 : 0) + 0.25 * survivalRatio + 0.15 * effectiveVoteAcc);
-  return Math.round(raw * 100) / 100;
-}
-
 /** 从死亡公告事件 content 中提取首血座位号 */
 function firstDeathSeatNo(content: Record<string, unknown>): number | undefined {
   const deaths = content.deaths;
@@ -283,6 +264,5 @@ export function computePlayerMetrics(
     abilityUseCount: countAbilityUses(player, events),
     speechCount: countSpeech(player, events),
     speechAvgTokens: averageSpeechTokens(player, events),
-    score: computeScore({ isWinner, survivalDays, totalDays, voteAccuracy }),
   };
 }

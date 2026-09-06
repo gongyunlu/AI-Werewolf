@@ -54,6 +54,11 @@ export class WitchAntidoteNode {
         return {};
       }
 
+      // 女巫不能自救：刀口是自己时无合法用药目标，直接不用药（刀口信息由 WOLF_KILL 事件可见）
+      if (state.wolfTarget === witch.id) {
+        return {};
+      }
+
       const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
         gameId: state.gameId,
         day: state.currentDay,

@@ -1,6 +1,7 @@
 import { ACTION_TYPES, FACTIONS, ROLES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
 import {
   buildJudgePrompt,
+  buildRefineUser,
   buildSpeechJudgePromptVariables,
   type JudgeEventInput,
 } from './judge-prompt';
@@ -122,7 +123,7 @@ describe('buildJudgePrompt 视角还原', () => {
     expect(user).toContain('狼人刀了 3号位');
   });
 
-  it('女巫已用解药后看不到刀口', () => {
+  it('女巫已用解药后保留交药前刀口，交药后刀口不可见', () => {
     const events: JudgeEventInput[] = [
       ev({
         sequence: 10,
@@ -137,6 +138,13 @@ describe('buildJudgePrompt 视角还原', () => {
         actorId: 'p2',
         content: { targetSeatNo: 3, saved: true },
       }),
+      ev({
+        sequence: 18,
+        actionType: ACTION_TYPES.WOLF_KILL,
+        visibility: VISIBILITY_TYPES.WOLF_KILL,
+        day: 2,
+        content: { targetSeatNo: 5 },
+      }),
     ];
 
     const { user } = buildJudgePrompt({
@@ -148,7 +156,9 @@ describe('buildJudgePrompt 视角还原', () => {
       events,
     });
 
-    expect(user).not.toContain('狼人刀了 3号位');
+    // 交药前看过的刀口保留（累积知识，报银水合法）；交药后不再被唤醒，看不到新刀口
+    expect(user).toContain('狼人刀了 3号位');
+    expect(user).not.toContain('狼人刀了 5号位');
   });
 
   it('女巫跳过解药后仍可看到后续刀口', () => {
@@ -346,5 +356,16 @@ describe('buildSpeechJudgePromptVariables 整局时间线', () => {
 
     expect(variables.timeline).toContain('狼人刀了 4号位');
     expect(variables.timeline).not.toContain('狼人刀了 6号位');
+  });
+});
+
+describe('buildRefineUser', () => {
+  it('拼接原始评估上下文与初评结果', () => {
+    const user = buildRefineUser('上下文内容', { verdict: 'good', score: 80, reasoning: '合理' });
+
+    expect(user).toContain('【原始评估上下文】');
+    expect(user).toContain('上下文内容');
+    expect(user).toContain('【初评结果】');
+    expect(user).toContain('"score": 80');
   });
 });

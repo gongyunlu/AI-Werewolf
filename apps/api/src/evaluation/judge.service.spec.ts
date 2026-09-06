@@ -3,12 +3,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
 import { StructuredLlmService } from '../observability/structured-llm.service';
 
-/** mock PrismaService（仅覆盖 reward 回填用到的读写面） */
+/** mock PrismaService（仅覆盖 reward 回填与个人分聚合用到的读写面） */
 function createMockPrisma() {
   return {
-    decisionJudgment: { findMany: jest.fn() },
+    decisionJudgment: { findMany: jest.fn(), groupBy: jest.fn() },
     memoryUsage: { findMany: jest.fn(), update: jest.fn() },
     knowledgeUsage: { findMany: jest.fn(), update: jest.fn() },
+    agentPerformance: { findMany: jest.fn(), update: jest.fn() },
+    gameSummary: { update: jest.fn() },
     event: { findMany: jest.fn() },
   };
 }
@@ -168,6 +170,113 @@ describe('JudgeService.backfillRewards', () => {
     expect(prisma.memoryUsage.update).toHaveBeenCalledWith({
       where: { id: 'u1' },
       data: { rewardScore: null },
+    });
+  });
+});
+
+describe('JudgeService.aggregatePlayerScores', () => {
+  let service: JudgeService;
+  let prisma: ReturnType<typeof createMockPrisma>;
+
+  beforeEach(() => {
+    prisma = createMockPrisma();
+    service = new JudgeService(
+      prisma as unknown as PrismaService,
+      {} as unknown as PromptService,
+      {} as unknown as StructuredLlmService,
+    );
+  });
+
+  it('决策与发言各占 50% 加权合成，最高分当选 MVP', async () => {
+    (prisma.decisionJudgment.groupBy as jest.Mock)
+      .mockResolvedValueOnce([
+        { playerId: 'p1', _avg: { score: 80 } },
+        { playerId: 'p2', _avg: { score: 50 } },
+      ])
+      .mockResolvedValueOnce([
+        { playerId: 'p1', _avg: { score: 60 } },
+        { playerId: 'p2', _avg: { score: 50 } },
+      ]);
+    (prisma.agentPerformance.findMany as jest.Mock).mockResolvedValue([
+      { playerId: 'p1', isWinner: false, survivalDays: 2, voteAccuracy: 0.5 },
+      { playerId: 'p2', isWinner: true, survivalDays: 4, voteAccuracy: 1 },
+    ]);
+
+    await service.aggregatePlayerScores('g1');
+
+    // p1 = 0.5*80 + 0.5*60 = 70；p2 = 0.5*50 + 0.5*50 = 50
+    expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
+      where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
+      data: { score: 70 },
+    });
+    expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
+      where: { gameId_playerId: { gameId: 'g1', playerId: 'p2' } },
+      data: { score: 50 },
+    });
+    expect(prisma.gameSummary.update).toHaveBeenCalledWith({
+      where: { gameId: 'g1' },
+      data: { mvpPlayerId: 'p1' },
+    });
+  });
+
+  it('单维度玩家用该维度均分，不因另一维度缺失置 null', async () => {
+    (prisma.decisionJudgment.groupBy as jest.Mock)
+      .mockResolvedValueOnce([{ playerId: 'p1', _avg: { score: 80 } }])
+      .mockResolvedValueOnce([]);
+    (prisma.agentPerformance.findMany as jest.Mock).mockResolvedValue([
+      { playerId: 'p1', isWinner: true, survivalDays: 3, voteAccuracy: 0.8 },
+    ]);
+
+    await service.aggregatePlayerScores('g1');
+
+    expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
+      where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
+      data: { score: 80 },
+    });
+    expect(prisma.gameSummary.update).toHaveBeenCalledWith({
+      where: { gameId: 'g1' },
+      data: { mvpPlayerId: 'p1' },
+    });
+  });
+
+  it('无可评行为的玩家 score 置 null，不参与 MVP', async () => {
+    (prisma.decisionJudgment.groupBy as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    (prisma.agentPerformance.findMany as jest.Mock).mockResolvedValue([
+      { playerId: 'p1', isWinner: false, survivalDays: 1, voteAccuracy: null },
+    ]);
+
+    await service.aggregatePlayerScores('g1');
+
+    expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
+      where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
+      data: { score: null },
+    });
+    expect(prisma.gameSummary.update).toHaveBeenCalledWith({
+      where: { gameId: 'g1' },
+      data: { mvpPlayerId: null },
+    });
+  });
+
+  it('加权合成保留两位小数', async () => {
+    (prisma.decisionJudgment.groupBy as jest.Mock)
+      .mockResolvedValueOnce([{ playerId: 'p1', _avg: { score: 66.6667 } }])
+      .mockResolvedValueOnce([{ playerId: 'p1', _avg: { score: 66.6667 } }]);
+    (prisma.agentPerformance.findMany as jest.Mock).mockResolvedValue([
+      { playerId: 'p1', isWinner: true, survivalDays: 3, voteAccuracy: 0.8 },
+    ]);
+
+    await service.aggregatePlayerScores('g1');
+
+    // 0.5*66.6667 + 0.5*66.6667 = 66.6667 → 66.67
+    expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
+      where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
+      data: { score: 66.67 },
+    });
+    expect(prisma.gameSummary.update).toHaveBeenCalledWith({
+      where: { gameId: 'g1' },
+      data: { mvpPlayerId: 'p1' },
     });
   });
 });

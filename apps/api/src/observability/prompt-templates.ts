@@ -13,6 +13,8 @@ export const PROMPT_NAMES = {
   judgeUser: 'judge/user',
   judgeSpeechSystem: 'judge/speech-system',
   judgeSpeechUser: 'judge/speech-user',
+  judgeRefineSystem: 'judge/refine-system',
+  judgeSpeechRefineSystem: 'judge/speech-refine-system',
   gameReviewSystem: 'reflection/game-review-system',
   gameReviewUser: 'reflection/game-review-user',
   reflectionSystem: 'reflection/player-system',
@@ -121,8 +123,21 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     请调用工具提交你的决策。
   `,
 
-  [PROMPT_NAMES.judgeSystem]:
-    '你是一名狼人杀决策质量评估员。请站在玩家做出决策的那一刻、仅凭其当时可见的有限信息，评估该决策是否合理（而非事后以上帝视角倒推）。综合考虑信息利用率、目标选择合理性、与阵营目标的契合度，给出三档结论与 0-100 分。',
+  [PROMPT_NAMES.judgeSystem]: `
+    你是一名狼人杀决策质量评估员。评估的唯一标准是「收益」：站在玩家做出决策的那一刻、仅凭其当时可见的有效信息，判断这一步给本方阵营带来的期望收益有多高，以及该信息状态下是否存在收益更高的其他选择。
+
+    收益由两部分构成：
+    - 信息收益：这一步为后续决策锁定或传递了多少有效信息（如验人能锁定多少身份、发言给了别人多少判断依据）；
+    - 阵营收益：这一步直接推进本方目标的价值（如毒狼、投狼、刀神、藏身份、带节奏）。
+
+    评估规则：
+    - 只用决策时点之前、该玩家可见的有效信息计算收益，禁止用结果倒推、禁止上帝视角；
+    - 「信息源是否可靠」是有效信息的一部分：采信不可靠的声明（如悍跳狼的假查杀）属于错误估算收益，应扣分；
+    - 若该信息状态下存在收益明显更高的其他选择，说明这一步未最大化收益，应给低分；接近最优选择才给高分；
+    - 前后事实矛盾说明收益估算本身出错，应扣分。
+
+    给出三档结论与 0-100 分，并附一句理由。
+  `,
 
   [PROMPT_NAMES.judgeUser]: [
     '【玩家身份】',
@@ -140,11 +155,9 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     你是一名狼人杀发言质量评估员。下面给出某位玩家整局的可见时间线，其中标有 [发言#n] 的是他本人的发言。
     请为每一条 [发言#n] 独立打分。
 
-    评估维度：
-    - 视角一致性：有没有说出以他的身份在当时不该知道的信息（泄漏即暴露身份，重罚）
-    - 信息增量：是否给出了可供他人判断的有效依据，而不是空话
-    - 逻辑自洽：与他本人此前的发言是否矛盾
-    - 阵营贡献：是否推进了本方目标（好人找狼 / 狼人藏身与带节奏）
+    评估的唯一标准是「收益」：站在该条发言的时点、仅凭此前可见的有效信息，判断这条发言给本方阵营带来的期望收益。
+    - 信息收益：是否给出了可供他人判断的有效依据，而不是空话；
+    - 阵营收益：是否推进了本方目标（好人找狼 / 狼人藏身与带节奏）。
 
     硬性约束：
     - 评估 [发言#n] 时只能使用时间线中位于它之前的信息，之后发生的事一律不得作为依据。
@@ -169,6 +182,29 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     '共有 {{speechCount}} 条待评估发言（[发言#1] 至 [发言#{{speechCount}}]），请逐条评估。',
     '每条评分都必须填写 index，与 [发言#n] 的序号一一对应，缺少 index 的输出无效。',
   ].join('\n'),
+
+  [PROMPT_NAMES.judgeRefineSystem]: `
+    你是狼人杀决策打分的评审员。下面给出某一步决策的初评结果（verdict 三档 + 0-100 分 + 理由），请复核并输出修正后的结果。
+
+    只审查三点，其余不动：
+    - 上帝视角：初评是否用了该玩家决策时点不该知道的信息（身份、夜间行动、死后事件）当依据；
+    - verdict 与 score 是否一致；
+    - 理由是否支撑分数。
+
+    只有确实发现问题才修正；没问题就原样返回，不要为改而改。输出格式与初评一致（verdict + score + reasoning）。
+  `,
+
+  [PROMPT_NAMES.judgeSpeechRefineSystem]: `
+    你是狼人杀发言打分的评审员。下面给出某位玩家多条发言的初评结果（每条带 index、verdict、score、reasoning），请逐条复核并输出修正后的结果。
+
+    只审查三点，其余不动：
+    - 上帝视角：初评是否用了该发言时点不该知道的信息当依据；
+    - verdict 与 score 是否一致；
+    - 理由是否支撑分数。
+
+    延续初评硬约束：评估某条发言只能用该发言之前的信息；前后矛盾归咎于后出现的那一条；说服失败不等于发言差。
+    index 必须保留并与初评一一对应，items 数量与初评一致。只有确实发现问题才修正；没问题就原样返回。
+  `,
 
   [PROMPT_NAMES.gameReviewSystem]: `
     你是狼人杀对局的复盘者，拥有上帝视角：下面给出的身份、夜间行动、狼队商议全部为真实信息。

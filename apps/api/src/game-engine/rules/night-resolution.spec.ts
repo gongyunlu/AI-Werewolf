@@ -137,6 +137,26 @@ describe('resolveNightActions - 夜晚结算逻辑', () => {
       expect(result.deaths).toHaveLength(0);
       expect(result.antidoteUsed).toBe(false); // 解药未使用
     });
+
+    it('女巫不能自救（统一规则）', () => {
+      const witch = createPlayer('witch', 3, { role: 'witch' });
+      const players = [
+        createPlayer({ id: 'p1', seatNo: 1, role: 'villager', faction: 'villager' }),
+        createPlayer({ id: 'p2', seatNo: 2, role: 'villager', faction: 'villager' }),
+        witch,
+      ];
+
+      expect(() =>
+        resolveNightActions({
+          players,
+          wolfTarget: 'witch',
+          guardTarget: null,
+          witchAntidoteTarget: 'witch', // 女巫试图自救
+          witchPoisonTarget: null,
+          witchPlayerId: 'witch',
+        }),
+      ).toThrow('女巫不能自救');
+    });
   });
 
   describe('守卫与女巫冲突', () => {

@@ -8,9 +8,7 @@ export interface NightActionInput {
   guardTarget: string | null;
   witchAntidoteTarget: string | null;
   witchPoisonTarget: string | null;
-  witchPlayerId?: string; // 女巫玩家 ID（用于查找女巫的用药历史）
-  currentDay?: number; // 当前天数（用于判断女巫首夜自救）
-  allowWitchSelfSaveFirstNight?: boolean; // 是否允许女巫首夜自救（房规配置，默认 true）
+  witchPlayerId?: string; // 女巫玩家 ID（用于校验自救与用药历史）
 }
 
 export interface NightDeathRecord {
@@ -38,7 +36,7 @@ export interface NightResolutionResult {
  * 6. 已死亡玩家不能成为目标
  * 7. 女巫同一晚只能用一种药（解药 OR 毒药）
  * 8. 女巫解药和毒药不能对同一人使用（整局游戏）
- * 9. 女巫首夜自救：根据房规配置决定（默认允许）
+ * 9. 女巫不能自救（统一规则）
  */
 export function resolveNightActions(input: NightActionInput): NightResolutionResult {
   const {
@@ -48,8 +46,6 @@ export function resolveNightActions(input: NightActionInput): NightResolutionRes
     witchAntidoteTarget,
     witchPoisonTarget,
     witchPlayerId,
-    currentDay = 1,
-    allowWitchSelfSaveFirstNight = true,
   } = input;
 
   // 校验：女巫同一晚只能用一种药
@@ -80,11 +76,11 @@ export function resolveNightActions(input: NightActionInput): NightResolutionRes
     }
   }
 
-  // 校验：女巫首夜自救规则
-  if (currentDay === 1 && !allowWitchSelfSaveFirstNight && witchAntidoteTarget !== null) {
+  // 校验：女巫不能自救（统一规则，所有板子所有场景）
+  if (witchAntidoteTarget !== null) {
     const witchPlayer = players.find((p) => p.role === ROLES.WITCH);
     if (witchPlayer && witchAntidoteTarget === witchPlayer.id) {
-      throw new Error('女巫首夜不能自救（房规限制）');
+      throw new Error('女巫不能自救（统一规则）');
     }
   }
 

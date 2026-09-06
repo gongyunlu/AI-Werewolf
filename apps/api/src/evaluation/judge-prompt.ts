@@ -1,4 +1,4 @@
-import { ACTION_TYPES } from '@ai-werewolf/shared';
+import { ACTION_TYPES, ROLES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
 import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
 import { getActionLabel, renderActionLine } from './action-catalog';
 import {
@@ -84,6 +84,26 @@ export type JudgePromptVariables = {
 };
 
 /**
+ * 女巫交药后对刀口的「累积知识」：交药前看过的刀口事件（WOLF_KILL）对她仍可见。
+ *
+ * getVisibleVisibilitiesForRole 是「当前可见性」语义（交药后女巫不再被唤醒看刀口，
+ * 游戏引擎据此判断实时可见性是对的），但 judge 视角还原要重建「该玩家在此刻知道什么」，
+ * 必须补回交药前看过的刀口（女巫在交药前被唤醒看到过这些刀口事件）。
+ */
+function isWitchRetainedKill(
+  role: string,
+  event: JudgeEventInput,
+  antidoteSeq: number | undefined,
+): boolean {
+  return (
+    role === ROLES.WITCH &&
+    event.visibility === VISIBILITY_TYPES.WOLF_KILL &&
+    antidoteSeq !== undefined &&
+    event.sequence < antidoteSeq
+  );
+}
+
+/**
  * 计算 judge prompt 的渲染变量（视角还原 + 事件渲染 + 决策描述）。
  *
  * 与模板文本解耦：变量计算保持纯函数可单测，模板渲染由调用方走 PromptService。
@@ -100,14 +120,18 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
     events,
   } = input;
 
-  // 女巫是否已用过解药：只看决策之前的 witch_save（本人）
-  const hasUsedAntidote = events.some(
+  // 女巫是否已用过解药：只看决策之前的 witch_save（本人）。同时记下交药 sequence——
+  // 交药后不再被唤醒看刀口，但仍保留交药前看过的刀口（累积知识），judge 视角还原需补回，
+  // 否则会把「女巫报自己救的银水」误判成凭空捏造。
+  const antidoteEvent = events.find(
     (e) =>
       e.sequence < decision.sequence &&
       e.actionType === ACTION_TYPES.WITCH_SAVE &&
       e.actorId === playerId &&
       e.content.saved === true,
   );
+  const hasUsedAntidote = antidoteEvent !== undefined;
+  const antidoteSeq = antidoteEvent?.sequence;
 
   const visible = getVisibleVisibilitiesForRole({
     role: playerRole,
@@ -118,7 +142,9 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
   const contextLines = events
     .filter((e) => {
       if (e.sequence >= decision.sequence) return false;
-      if (!visible.includes(e.visibility)) return false;
+      if (!visible.includes(e.visibility) && !isWitchRetainedKill(playerRole, e, antidoteSeq)) {
+        return false;
+      }
       // 投票是并发「同时举票」：评估投票决策时排除同轮（同 day）其他投票，避免视角泄漏假象
       if (
         decision.actionType === ACTION_TYPES.VOTE &&
@@ -242,4 +268,20 @@ export function buildJudgePrompt(input: JudgePromptInput): { system: string; use
     system: renderTemplate(FALLBACK_TEMPLATES[PROMPT_NAMES.judgeSystem]),
     user: renderTemplate(FALLBACK_TEMPLATES[PROMPT_NAMES.judgeUser], variables),
   };
+}
+
+/**
+ * 反思（refine）阶段的 user 文本：原始评估上下文 + 初评结果。
+ *
+ * 反思指令在 refine-system prompt 里，这里只负责把「初评时看到的上下文」和「初评结果」
+ * 一并交给评审员复核，修正后的输出 schema 与初评一致。
+ */
+export function buildRefineUser(firstUser: string, firstOutput: unknown): string {
+  return [
+    '【原始评估上下文】',
+    firstUser,
+    '',
+    '【初评结果】',
+    JSON.stringify(firstOutput, null, 2),
+  ].join('\n');
 }

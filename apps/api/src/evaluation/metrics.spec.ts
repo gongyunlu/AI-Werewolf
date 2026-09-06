@@ -1,6 +1,5 @@
 import {
   computePlayerMetrics,
-  computeScore,
   computeSurvivalDays,
   computeVoteAccuracy,
   countAbilityUses,
@@ -177,30 +176,6 @@ describe('countSpeech / averageSpeechTokens / estimateTokens', () => {
   });
 });
 
-describe('computeScore', () => {
-  it('胜者满存活满投票得满分', () => {
-    expect(computeScore({ isWinner: true, survivalDays: 5, totalDays: 5, voteAccuracy: 1 })).toBe(
-      100,
-    );
-  });
-
-  it('败者零存活零投票得 0 分', () => {
-    expect(computeScore({ isWinner: false, survivalDays: 0, totalDays: 5, voteAccuracy: 0 })).toBe(
-      0,
-    );
-  });
-
-  it('无投票时用中性基线 0.5', () => {
-    const score = computeScore({
-      isWinner: false,
-      survivalDays: 5,
-      totalDays: 5,
-      voteAccuracy: null,
-    });
-    expect(score).toBeCloseTo(32.5, 2); // 0 + 25 + 7.5
-  });
-});
-
 describe('computePlayerMetrics', () => {
   it('组合出完整指标', () => {
     const players = [
@@ -216,7 +191,6 @@ describe('computePlayerMetrics', () => {
     expect(m.voteAccuracy).toBe(1);
     expect(m.abilityUseCount).toBe(0);
     expect(m.speechCount).toBe(0);
-    expect(m.score).toBe(100);
   });
 });
 
