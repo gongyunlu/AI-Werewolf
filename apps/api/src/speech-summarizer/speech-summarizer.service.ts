@@ -12,6 +12,7 @@ import { PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { readExperiment } from '../evaluation/experiment-snapshot';
 
 /**
  * 私有信息（Agent 独有）
@@ -387,6 +388,11 @@ export class SpeechSummarizerService {
     visiblePlayerSeats: number[],
     modelName: string,
   ): Promise<{ judgments: AgentJudgment[] }> {
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+      select: { experiment: true },
+    });
+    const experiment = readExperiment(game?.experiment);
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
       model: modelName,
@@ -397,13 +403,17 @@ export class SpeechSummarizerService {
       timeout: 180000,
     });
 
-    const systemPrompt = this.loadSystemPromptTemplate(role, privateInfo);
+    const systemPrompt = this.loadSystemPromptTemplate(role, privateInfo, experiment?.roleContexts);
 
-    const humanPrompt = await this.promptService.render(PROMPT_NAMES.summarizerJudgmentHuman, {
-      speeches: this.formatSpeeches(speeches, visiblePlayerSeats),
-      recentJudgments: this.formatRecentJudgments(recentJudgments),
-      olderJudgments: this.formatOlderJudgments(olderJudgments),
-    });
+    const humanPrompt = await this.promptService.render(
+      PROMPT_NAMES.summarizerJudgmentHuman,
+      {
+        speeches: this.formatSpeeches(speeches, visiblePlayerSeats),
+        recentJudgments: this.formatRecentJudgments(recentJudgments),
+        olderJudgments: this.formatOlderJudgments(olderJudgments),
+      },
+      experiment?.prompts,
+    );
 
     const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt.text)];
 
@@ -492,7 +502,13 @@ export class SpeechSummarizerService {
     gameId: string,
     groups: Array<{ day: number; seatNo: number; speeches: string[] }>,
   ): Promise<SpeechSummary[]> {
-    const modelName = this.configService.get('ARK_DEFAULT_MODEL');
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+      select: { experiment: true },
+    });
+    const experiment = readExperiment(game?.experiment);
+    const modelName =
+      experiment?.auxiliaryModel ?? this.configService.getOrThrow('ARK_DEFAULT_MODEL');
     const model = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
       model: modelName,
@@ -503,7 +519,11 @@ export class SpeechSummarizerService {
       timeout: 180000,
     });
 
-    const systemPrompt = await this.promptService.render(PROMPT_NAMES.summarizerGlobalSummary);
+    const systemPrompt = await this.promptService.render(
+      PROMPT_NAMES.summarizerGlobalSummary,
+      undefined,
+      experiment?.prompts,
+    );
 
     const speechesText = groups
       .map((g) => `Day ${g.day} - ${g.seatNo}号位：${g.speeches.join('；').substring(0, 200)}...`)
@@ -579,7 +599,11 @@ export class SpeechSummarizerService {
   /**
    * 获取角色视角的上下文
    */
-  private getRoleContext(role: string, privateInfo: PrivateInfo): string {
+  private getRoleContext(
+    role: string,
+    privateInfo: PrivateInfo,
+    frozen?: Record<string, string>,
+  ): string {
     try {
       // 确定角色对应的 MD 文件
       const roleFile = ['werewolf', 'seer', 'witch', 'villager'].includes(role)
@@ -587,7 +611,7 @@ export class SpeechSummarizerService {
         : 'default.md';
 
       const mdPath = join(__dirname, '../role-contexts', roleFile);
-      let template = this.readTemplate(mdPath);
+      let template = frozen ? frozen[roleFile.replace('.md', '')] : this.readTemplate(mdPath);
 
       // 替换变量
       if (role === 'werewolf') {
@@ -618,15 +642,22 @@ export class SpeechSummarizerService {
   /**
    * 加载 System Prompt 模板（从 MD 文件加载）
    */
-  private loadSystemPromptTemplate(role: string, privateInfo: PrivateInfo): string {
+  private loadSystemPromptTemplate(
+    role: string,
+    privateInfo: PrivateInfo,
+    frozen?: Record<string, string>,
+  ): string {
     try {
       const templatePath = join(__dirname, '../role-contexts', 'system-prompt-template.md');
-      let template = this.readTemplate(templatePath);
+      let template = frozen ? frozen['system-prompt-template'] : this.readTemplate(templatePath);
 
       // 替换变量
       template = template.replace('{{role}}', role);
       template = template.replace('{{seatNo}}', String(privateInfo.seatNo));
-      template = template.replace('{{roleContext}}', this.getRoleContext(role, privateInfo));
+      template = template.replace(
+        '{{roleContext}}',
+        this.getRoleContext(role, privateInfo, frozen),
+      );
 
       return template;
     } catch {

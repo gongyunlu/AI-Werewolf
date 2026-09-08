@@ -60,6 +60,9 @@ const CONTEXT_EVENT_LIMIT = 40;
 
 /** 决策 → 可读描述 */
 function renderDecision(d: JudgeDecisionInput): string {
+  // 评价的是查谁；查验结果在决策完成后才产生。
+  if (d.actionType === ACTION_TYPES.SEER_CHECK)
+    return `预言家选择查验 ${d.targetSeatNo}号位（结果未知）`;
   if (d.content) {
     const rendered = renderActionLine(d.actionType, d.content, 'public');
     if (rendered) return rendered;
@@ -145,11 +148,12 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
       if (!visible.includes(e.visibility) && !isWitchRetainedKill(playerRole, e, antidoteSeq)) {
         return false;
       }
-      // 投票是并发「同时举票」：评估投票决策时排除同轮（同 day）其他投票，避免视角泄漏假象
+      // 投票是并发「同时举票」：评估投票决策时排除本轮及之后的投票，保留同 day 已结束轮次，避免视角泄漏假象
       if (
         decision.actionType === ACTION_TYPES.VOTE &&
         e.actionType === ACTION_TYPES.VOTE &&
-        e.day === decision.day
+        e.day === decision.day &&
+        Number(e.content.voteRound ?? 0) >= Number(decision.content?.voteRound ?? 0)
       ) {
         return false;
       }
@@ -157,7 +161,7 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
     })
     .toSorted((a, b) => a.sequence - b.sequence)
     .slice(-CONTEXT_EVENT_LIMIT)
-    .map((e) => renderActionLine(e.actionType, e.content ?? {}, e.visibility))
+    .map((e) => renderActionLine(e.actionType, e.content ?? {}, e.visibility, { fullSpeech: true }))
     .filter((line): line is string => line !== null);
 
   const roleLabel = ROLE_LABELS[playerRole] ?? playerRole;
@@ -200,9 +204,8 @@ export type SpeechJudgePromptVariables = {
 /**
  * 构建发言批量评估的渲染变量。
  *
- * 与单决策评估的区别：跨越整局而非截断到某一时点，因此可见性要逐条事件重算
- * （女巫用掉解药后即失去刀口频道，玩家死亡后不再获得新信息）。
- * 自己的发言取原文并标号，他人的发言走目录表的截断预览。
+ * 调用方截断到待评发言，逐事件还原当时可见性（女巫用药后不再获得新刀口）。
+ * 待评发言取原文并标号，其他发言保留完整正文作为历史证据。
  */
 export function buildSpeechJudgePromptVariables(input: SpeechJudgePromptInput): {
   variables: SpeechJudgePromptVariables;
@@ -229,7 +232,9 @@ export function buildSpeechJudgePromptVariables(input: SpeechJudgePromptInput): 
           lines.push(`[发言#${targets.length}] ${dayPrefix}我的发言：${speech}`);
         }
       } else {
-        const line = renderActionLine(e.actionType, e.content ?? {}, e.visibility);
+        const line = renderActionLine(e.actionType, e.content ?? {}, e.visibility, {
+          fullSpeech: true,
+        });
         if (line) lines.push(`${dayPrefix}${line}`);
       }
     }

@@ -29,6 +29,7 @@ describe('ReflectionWorkerService', () => {
   const playerIds = ['player-1', 'player-2'];
 
   const prisma = {
+    game: { findUnique: jest.fn() },
     player: { findMany: jest.fn() },
   };
   const judge = { backfillRewards: jest.fn(), aggregatePlayerScores: jest.fn() };
@@ -42,6 +43,7 @@ describe('ReflectionWorkerService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.game.findUnique.mockResolvedValue({ experiment: null });
     prisma.player.findMany.mockResolvedValue(playerIds.map((id) => ({ id })));
     judge.backfillRewards.mockResolvedValue(0);
     judge.aggregatePlayerScores.mockResolvedValue(undefined);
@@ -62,6 +64,21 @@ describe('ReflectionWorkerService', () => {
     );
   });
 
+  it('实验手动分析生成复盘和玩家任务，但不晋升或维护记忆', async () => {
+    prisma.game.findUnique.mockResolvedValue({ experiment: { arm: 'on' } });
+    gameReview.loadReview.mockResolvedValue({ patterns: [{ title: '不应晋升的规律' }] });
+    await worker.process(fanoutJob({ gameId }));
+    expect(judge.aggregatePlayerScores).toHaveBeenCalledWith(gameId);
+    expect(reflection.reflect).not.toHaveBeenCalled();
+    expect(gameReview.reviewGame).toHaveBeenCalledWith(gameId, false);
+    expect(globalMemory.promotePatterns).not.toHaveBeenCalled();
+    expect(maintenance.enqueueForGame).not.toHaveBeenCalled();
+    expect(queue.enqueuePlayers).toHaveBeenCalledWith(gameId, playerIds, {
+      force: undefined,
+      suffix: undefined,
+    });
+  });
+
   it('force fanout 在玩家投递失败后重试时复用同一份已落库复盘', async () => {
     const job = fanoutJob({ gameId, force: true, suffix: '_run_1' });
     queue.enqueuePlayers.mockRejectedValueOnce(new Error('redis unavailable'));
@@ -75,6 +92,17 @@ describe('ReflectionWorkerService', () => {
     expect(gameReview.reviewGame).toHaveBeenCalledWith(gameId, true);
     expect(job.updateData).toHaveBeenCalledTimes(1);
     expect(queue.enqueuePlayers).toHaveBeenCalledTimes(2);
+  });
+
+  it('实验玩家反思关闭写回，完成任务不触发记忆维护', async () => {
+    prisma.game.findUnique.mockResolvedValue({ experiment: { arm: 'off' } });
+    const job = fanoutJob({ gameId, playerId: 'player-1', force: true });
+    job.name = REFLECT_JOB_NAMES.player;
+    await worker.process(job);
+    expect(reflection.reflect).toHaveBeenCalledWith(gameId, 'player-1', true, false);
+    job.name = REFLECT_JOB_NAMES.complete;
+    await worker.process(job);
+    expect(maintenance.enqueueForGame).not.toHaveBeenCalled();
   });
 
   it('judge 重跑后的 reward 刷新失败会重试且不会重做复盘', async () => {

@@ -6,11 +6,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 
 interface Props {
   gameId: string | null;
+  experiment?: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 /** 赛后分析：展示进度并按需重跑评分或反思 */
-export function AnalysisDialog({ gameId, onOpenChange }: Props) {
+export function AnalysisDialog({ gameId, onOpenChange, experiment = false }: Props) {
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -86,7 +87,9 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
     <Dialog open={!!gameId} onOpenChange={onOpenChange}>
       <DialogContent className={styles.dialog}>
         <DialogHeader>
-          <DialogTitle className={styles.dialogTitle}>赛后分析</DialogTitle>
+          <DialogTitle className={styles.dialogTitle}>
+            {experiment ? 'A/B 评分与反思' : '赛后分析'}
+          </DialogTitle>
         </DialogHeader>
 
         <div className={styles.body}>
@@ -118,8 +121,9 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
           </div>
 
           <p className={styles.hint}>
-            开始分析会强制全量重跑评分与反思。重跑评分只重新打分决策与发言（复用已有反思）；
-            重跑反思只重新复盘与玩家反思（复用已有评分），并会把本局此前产出的记忆标记为失效。
+            {experiment
+              ? '评分包含决策与发言。反思仅生成本局分析，不写回经验、对手建模或全局记忆。两个操作分别执行。'
+              : '开始分析会强制全量重跑评分与反思。重跑评分只重新打分决策与发言（复用已有反思）；重跑反思只重新复盘与玩家反思（复用已有评分），并会把本局此前产出的记忆标记为失效。'}
           </p>
 
           {error && (
@@ -148,7 +152,7 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
               disabled={loading}
               className={styles.secondaryButton}
             >
-              重跑评分
+              {experiment ? 'A/B 评分' : '重跑评分'}
             </Button>
             <Button
               variant="outline"
@@ -156,16 +160,18 @@ export function AnalysisDialog({ gameId, onOpenChange }: Props) {
               disabled={loading}
               className={styles.secondaryButton}
             >
-              重跑反思
+              {experiment ? 'A/B 反思' : '重跑反思'}
             </Button>
-            <Button
-              onClick={runAll}
-              disabled={loading}
-              aria-busy={loading}
-              className={styles.primaryButton}
-            >
-              {loading ? '投递中...' : '开始分析'}
-            </Button>
+            {!experiment && (
+              <Button
+                onClick={runAll}
+                disabled={loading}
+                aria-busy={loading}
+                className={styles.primaryButton}
+              >
+                {loading ? '投递中...' : '开始分析'}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>

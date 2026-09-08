@@ -22,7 +22,7 @@ type VoteDecision = {
 };
 
 /**
- * PK 投票节点（两阶段版本）
+ * PK 投票节点（理由与动作一并生成）
  */
 @Injectable()
 export class PkVoteNode {
@@ -56,24 +56,14 @@ export class PkVoteNode {
             player.id,
             'vote' as any,
             extraInfo,
+            undefined,
+            Math.max(1, state.pkRound),
           );
 
           const threadId = getPlayerThreadId(state.gameId, player.id);
 
-          // 阶段1：流式推理
-          const reasoning = await this.agentRuntime.streamReasoning(
+          const { decision } = await this.agentRuntime.decide<VoteDecision>(
             contextData,
-            threadId,
-            context.signal,
-            (_token) => {
-              // PK投票不推送推理过程
-            },
-          );
-
-          // 阶段2：生成决策
-          const decision = await this.agentRuntime.generateDecision<VoteDecision>(
-            contextData,
-            reasoning,
             buildPkVoteSchema(state.pkCandidates!),
             context.signal,
             threadId,
@@ -88,6 +78,7 @@ export class PkVoteNode {
               gameId: state.gameId,
               day: state.currentDay,
               actorId: player.id,
+              voteRound: Math.max(1, state.pkRound),
               voterSeatNo: player.seatNo,
               targetSeatNo: 0,
             });
@@ -100,6 +91,7 @@ export class PkVoteNode {
             gameId: state.gameId,
             day: state.currentDay,
             actorId: player.id,
+            voteRound: Math.max(1, state.pkRound),
             voterSeatNo: player.seatNo!,
             targetSeatNo: decision.targetSeatNo,
           });
@@ -122,6 +114,7 @@ export class PkVoteNode {
             gameId: state.gameId,
             day: state.currentDay,
             actorId: player.id,
+            voteRound: Math.max(1, state.pkRound),
             voterSeatNo: player.seatNo,
             targetSeatNo: 0,
           });

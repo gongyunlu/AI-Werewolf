@@ -13,6 +13,14 @@ import {
 } from './judge-prompt';
 import { isJudgeableAction } from './action-catalog';
 import { aggregatePlayerScores as aggregateScores } from './player-score';
+import { readExperiment } from './experiment-snapshot';
+import type { Prisma } from '../generated/prisma/client';
+import { ExperimentInvalidError } from './experiment-integrity';
+import { evaluationCompleteness, judgeableEventIds } from './evaluation-completeness';
+
+import { EVALUATION_VERSION } from './evaluation-version';
+const EVIDENCE_POLICY =
+  '\n只依据决策时点可见的本局证据及规则评估行动。过去对局记忆仅是先验，不是本局身份事实；允许引用历史风格但不得据此确认身份。不依据实际查验结果、后续死亡或最终胜负倒推决策优劣。忽略输入中的攻略质量及是否注入，不把更长的思考当成更好的决策。';
 
 /**
  * LLM-as-judge 决策质量评估服务。
@@ -34,7 +42,7 @@ export class JudgeService {
     const events = await this.prisma.event.findMany({
       // 无 actor 的系统事件无法归属到玩家，也不会被 judgeEvent 落 Judgment；
       // 在任务发现阶段就排除，确保完成度分母与真正可落库的目标一致。
-      where: { gameId, actorId: { not: null } },
+      where: { gameId, OR: [{ actorId: { not: null } }, { actionType: ACTION_TYPES.WOLF_KILL }] },
       select: { id: true, actionType: true, content: true },
       orderBy: { sequence: 'asc' },
     });
@@ -45,7 +53,7 @@ export class JudgeService {
   }
 
   /** 评估单个决策事件并落库 */
-  async judgeEvent(gameId: string, eventId: string): Promise<void> {
+  async judgeEvent(gameId: string, eventId: string, runId?: string): Promise<void> {
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
       select: {
@@ -69,13 +77,22 @@ export class JudgeService {
     if (!isJudgeableAction(event.actionType, content)) {
       return;
     }
-    if (!event.actorId) {
+    const isTeam = event.actionType === ACTION_TYPES.WOLF_KILL;
+    const teamRepresentative = isTeam
+      ? await this.prisma.player.findFirst({
+          where: { gameId, faction: FACTIONS.WEREWOLF },
+          orderBy: { seatNo: 'asc' },
+          select: { id: true },
+        })
+      : null;
+    const actorId = event.actorId ?? teamRepresentative?.id;
+    if (!actorId) {
       this.logger.warn({ gameId, eventId }, '决策事件缺少 actorId，跳过评估');
       return;
     }
 
     const player = await this.prisma.player.findUnique({
-      where: { id: event.actorId },
+      where: { id: actorId },
       select: { id: true, seatNo: true, role: true, faction: true, deathDay: true },
     });
     if (!player) {
@@ -127,17 +144,80 @@ export class JudgeService {
       events: judgeEvents,
     });
 
+    const [game, decisionContext] = await Promise.all([
+      this.prisma.game.findUnique({ where: { id: gameId }, include: { ruleset: true } }),
+      this.prisma.decisionContext.findUnique({ where: { eventId } }),
+    ]);
+    const experiment = readExperiment(game?.experiment);
+    if (experiment?.invalid) throw new ExperimentInvalidError(experiment.invalid.reason);
+    const snapshot = decisionContext?.snapshot as Record<string, unknown> | undefined;
+    if (isTeam)
+      variables.identity = `狼人阵营集体决策；已知狼队座位：[${[player.seatNo, ...teammates].join(', ')}]`;
+    const rules =
+      experiment?.skills[`rulesets/${game?.rulesetId}`] ??
+      JSON.stringify(game?.ruleset.definition ?? {});
+    variables.contextLines += `\n本局规则：${rules}\n当时的合法动作约束：${JSON.stringify(snapshot?.schema ?? '历史事件未记录，不能假设不存在的技能')}`;
+    if (typeof snapshot?.reasoning === 'string')
+      variables.thinking = '玩家当次决策理由：' + snapshot.reasoning;
+    if (snapshot?.baseSystemPrompt)
+      variables.contextLines += `\n当时提供给玩家的信息（攻略已移除）：\n${snapshot.baseSystemPrompt}`;
+    if (
+      experiment &&
+      isTeam &&
+      (!Array.isArray(content.proposalEventIds) || !content.proposalEventIds.length)
+    )
+      throw new Error('实验狼刀缺少提刀事件关联');
+    if (isTeam && Array.isArray(content.proposalEventIds) && content.proposalEventIds.length) {
+      const proposalIds = [
+        ...new Set(content.proposalEventIds.filter((id): id is string => typeof id === 'string')),
+      ];
+      const proposals = await this.prisma.event.findMany({
+        where: {
+          gameId,
+          id: { in: proposalIds },
+          actionType: ACTION_TYPES.WOLF_PROPOSAL,
+          sequence: { lt: event.sequence },
+          day: event.day,
+        },
+        select: { id: true, content: true },
+        orderBy: { sequence: 'asc' },
+      });
+      const inputs = await this.prisma.decisionContext.findMany({
+        where: { gameId, eventId: { in: proposals.map((p) => p.id) } },
+      });
+      variables.thinking = proposals.map((p) => JSON.stringify(p.content)).join('\n');
+      variables.contextLines +=
+        '\n狼队各提刀者当时的输入（攻略已移除）：\n' +
+        inputs
+          .map((input) => {
+            const saved = input.snapshot as Record<string, unknown>;
+            return JSON.stringify({
+              eventId: input.eventId,
+              baseSystemPrompt: saved.baseSystemPrompt,
+              schema: saved.schema,
+            });
+          })
+          .join('\n');
+      if (
+        experiment &&
+        (!proposalIds.length ||
+          proposals.length !== proposalIds.length ||
+          inputs.length !== proposals.length)
+      )
+        throw new Error('狼刀缺少提刀输入快照');
+    }
     const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
-      this.promptService.render(PROMPT_NAMES.judgeSystem),
-      this.promptService.render(PROMPT_NAMES.judgeUser, variables),
-      this.promptService.render(PROMPT_NAMES.judgeRefineSystem),
+      this.promptService.render(PROMPT_NAMES.judgeSystem, undefined, experiment?.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeUser, variables, experiment?.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeRefineSystem, undefined, experiment?.prompts),
     ]);
 
     const { output: refined, modelName } = await this.structuredLlm.invokeReflective({
       schema: JudgeOutputSchema,
       runName: 'judge',
       scenario: 'judge',
-      system: systemPrompt.text,
+      system: systemPrompt.text + EVIDENCE_POLICY,
+      modelName: experiment?.judgeModel,
       user: userPrompt.text,
       gameId,
       playerId: player.id,
@@ -145,29 +225,63 @@ export class JudgeService {
       role: player.role,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
-      refineSystem: refineSystemPrompt.text,
+      refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
       refinePromptName: refineSystemPrompt.name,
       refinePromptVersion: refineSystemPrompt.version,
       refineUser: (first) => buildRefineUser(userPrompt.text, first),
     });
     const { verdict, score, reasoning } = refined;
 
-    await this.prisma.decisionJudgment.upsert({
-      where: { eventId },
-      update: { verdict, score, reasoning, modelName },
-      create: {
-        gameId,
-        playerId: player.id,
-        eventId,
-        actionType: event.actionType,
-        day: event.day ?? 0,
-        targetSeatNo: typeof content.targetSeatNo === 'number' ? content.targetSeatNo : null,
-        verdict,
-        score,
-        reasoning,
-        modelName,
-      },
-    });
+    if (isTeam) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${eventId}, 0))`;
+        const old = await tx.teamJudgment.findUnique({ where: { eventId } });
+        if (runId && old?.evaluationRunId === runId) return;
+        await tx.teamJudgment.upsert({
+          where: { eventId },
+          update: {
+            verdict,
+            score,
+            reasoning,
+            modelName,
+            evaluationVersion: EVALUATION_VERSION,
+            previousEvaluations: this.archive(old),
+            evaluationRunId: runId ?? null,
+          },
+          create: {
+            eventId,
+            gameId,
+            faction: FACTIONS.WEREWOLF,
+            actionType: event.actionType,
+            verdict,
+            score,
+            reasoning,
+            modelName,
+            evaluationVersion: EVALUATION_VERSION,
+            evaluationRunId: runId ?? null,
+          },
+        });
+      });
+    } else
+      await this.saveJudgment(
+        {
+          where: { eventId },
+          update: { verdict, score, reasoning, modelName },
+          create: {
+            gameId,
+            playerId: player.id,
+            eventId,
+            actionType: event.actionType,
+            day: event.day ?? 0,
+            targetSeatNo: typeof content.targetSeatNo === 'number' ? content.targetSeatNo : null,
+            verdict,
+            score,
+            reasoning,
+            modelName,
+          },
+        },
+        runId,
+      );
 
     this.logger.log(
       { gameId, eventId, actionType: event.actionType, verdict, score },
@@ -175,7 +289,7 @@ export class JudgeService {
     );
   }
 
-  /** 找出对局内有过发言的玩家 id（发言按玩家整局批量评，不逐条送评） */
+  /** 找出对局内有过发言的玩家 id，供队列按玩家调度逐条评分。 */
   async findSpeakingPlayers(gameId: string): Promise<string[]> {
     const rows = await this.prisma.event.findMany({
       where: { gameId, actionType: ACTION_TYPES.SPEECH, actorId: { not: null } },
@@ -204,26 +318,16 @@ export class JudgeService {
   }
 
   /**
-   * 统计本局真正可评的目标数：可评决策事件 + 非空发言事件。
-   *
-   * getStatus 用它当分母对齐 decisionJudgment.count（按事件数）。不能用 listGameJobs 的
-   * job 数——发言按玩家批量评，一个 job 对应多条发言，量纲会对不上。
-   */
-  async countJudgeableTargets(gameId: string): Promise<number> {
-    const [decisionIds, speechIds] = await Promise.all([
-      this.findJudgeableEvents(gameId),
-      this.findSpeechesToJudge(gameId),
-    ]);
-    return decisionIds.length + speechIds.length;
-  }
-
-  /**
    * 批量评估某玩家本局的全部发言。
    *
-   * 一次调用评完整局：既省调用数，也让模型能发现「后一天推翻前一天说法」这类跨发言问题。
-   * 代价是模型看得到该发言之后的信息，靠 prompt 硬约束「只能用发言之前的信息」来压制后见之明。
+   * 队列按玩家调度，每条发言单独评分；上下文截止到该条发言，历史发言作为证据。
    */
-  async judgeSpeeches(gameId: string, playerId: string): Promise<number> {
+  async judgeSpeeches(
+    gameId: string,
+    playerId: string,
+    targetSequence?: number,
+    runId?: string,
+  ): Promise<number> {
     const player = await this.prisma.player.findUnique({
       where: { id: playerId },
       select: { id: true, gameId: true, seatNo: true, role: true, faction: true, deathDay: true },
@@ -234,8 +338,12 @@ export class JudgeService {
     }
 
     const events = await this.prisma.event.findMany({
-      where: { gameId },
+      where: {
+        gameId,
+        ...(targetSequence !== undefined ? { sequence: { lte: targetSequence } } : {}),
+      },
       select: {
+        id: true,
         sequence: true,
         day: true,
         actionType: true,
@@ -259,7 +367,12 @@ export class JudgeService {
         day: e.day,
         actionType: e.actionType,
         visibility: e.visibility,
-        actorId: e.actorId,
+        actorId:
+          targetSequence !== undefined &&
+          e.actionType === ACTION_TYPES.SPEECH &&
+          e.sequence !== targetSequence
+            ? null
+            : e.actorId,
         content: (e.content as Record<string, unknown>) ?? {},
       })),
     });
@@ -268,17 +381,54 @@ export class JudgeService {
       return 0;
     }
 
+    if (targetSequence === undefined) {
+      let count = 0;
+      for (const target of targets)
+        count += await this.judgeSpeeches(gameId, playerId, target.sequence, runId);
+      return count;
+    }
+
+    if (runId) {
+      const targetId = events.find((e) => e.sequence === targetSequence)?.id;
+      if (!targetId) throw new Error('发言目标事件不存在');
+      const saved = await this.prisma.decisionJudgment.findUnique({ where: { eventId: targetId } });
+      if (
+        saved?.evaluationVersion === EVALUATION_VERSION &&
+        (saved.evaluationRunId === runId ||
+          (Array.isArray(saved.previousEvaluations) &&
+            saved.previousEvaluations.some(
+              (value) =>
+                value &&
+                typeof value === 'object' &&
+                !Array.isArray(value) &&
+                value.evaluationRunId === runId,
+            )))
+      )
+        return 1;
+    }
+
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+      select: { experiment: true },
+    });
+    const experiment = readExperiment(game?.experiment);
+    if (experiment?.invalid) throw new ExperimentInvalidError(experiment.invalid.reason);
     const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
-      this.promptService.render(PROMPT_NAMES.judgeSpeechSystem),
-      this.promptService.render(PROMPT_NAMES.judgeSpeechUser, variables),
-      this.promptService.render(PROMPT_NAMES.judgeSpeechRefineSystem),
+      this.promptService.render(PROMPT_NAMES.judgeSpeechSystem, undefined, experiment?.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeSpeechUser, variables, experiment?.prompts),
+      this.promptService.render(
+        PROMPT_NAMES.judgeSpeechRefineSystem,
+        undefined,
+        experiment?.prompts,
+      ),
     ]);
 
     const { output, modelName } = await this.structuredLlm.invokeReflective({
       schema: SpeechJudgeOutputSchema,
+      modelName: experiment?.judgeModel,
       runName: 'judge-speeches',
       scenario: 'judge',
-      system: systemPrompt.text,
+      system: systemPrompt.text + EVIDENCE_POLICY,
       user: userPrompt.text,
       gameId,
       playerId: player.id,
@@ -286,7 +436,7 @@ export class JudgeService {
       role: player.role,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
-      refineSystem: refineSystemPrompt.text,
+      refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
       refinePromptName: refineSystemPrompt.name,
       refinePromptVersion: refineSystemPrompt.version,
       refineUser: (first) => buildRefineUser(userPrompt.text, first),
@@ -325,22 +475,30 @@ export class JudgeService {
         continue;
       }
 
-      await this.prisma.decisionJudgment.upsert({
-        where: { eventId },
-        update: { verdict: item.verdict, score: item.score, reasoning: item.reasoning, modelName },
-        create: {
-          gameId,
-          playerId: player.id,
-          eventId,
-          actionType: ACTION_TYPES.SPEECH,
-          day: target.day ?? 0,
-          targetSeatNo: null,
-          verdict: item.verdict,
-          score: item.score,
-          reasoning: item.reasoning,
-          modelName,
+      await this.saveJudgment(
+        {
+          where: { eventId },
+          update: {
+            verdict: item.verdict,
+            score: item.score,
+            reasoning: item.reasoning,
+            modelName,
+          },
+          create: {
+            gameId,
+            playerId: player.id,
+            eventId,
+            actionType: ACTION_TYPES.SPEECH,
+            day: target.day ?? 0,
+            targetSeatNo: null,
+            verdict: item.verdict,
+            score: item.score,
+            reasoning: item.reasoning,
+            modelName,
+          },
         },
-      });
+        runId,
+      );
       saved += 1;
     }
 
@@ -357,6 +515,137 @@ export class JudgeService {
   }
 
   /** 同阵营队友座位号：仅狼人阵营互通身份 */
+  private archive(
+    old: {
+      evaluationVersion: number;
+      evaluationRunId?: string | null;
+      previousEvaluations: Prisma.JsonValue;
+      score: number;
+      verdict: string;
+      reasoning: string | null;
+      modelName: string;
+    } | null,
+  ): Prisma.InputJsonValue {
+    const history = Array.isArray(old?.previousEvaluations) ? old.previousEvaluations : [];
+    if (!old) return [];
+    return JSON.parse(
+      JSON.stringify([
+        ...history,
+        {
+          evaluationVersion: old.evaluationVersion,
+          evaluationRunId: old.evaluationRunId ?? null,
+          score: old.score,
+          verdict: old.verdict,
+          reasoning: old.reasoning,
+          modelName: old.modelName,
+          archivedAt: new Date().toISOString(),
+        },
+      ]),
+    ) as Prisma.InputJsonValue;
+  }
+
+  private async saveJudgment(
+    args: Prisma.DecisionJudgmentUpsertArgs,
+    runId?: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${String(args.where.eventId)}, 0))`;
+      const old = await tx.decisionJudgment.findUnique({ where: args.where });
+      if (runId && old?.evaluationRunId === runId) return;
+      await tx.decisionJudgment.upsert({
+        ...args,
+        update: {
+          ...args.update,
+          evaluationVersion: EVALUATION_VERSION,
+          previousEvaluations: this.archive(old),
+          evaluationRunId: runId ?? null,
+        },
+        create: {
+          ...args.create,
+          evaluationVersion: EVALUATION_VERSION,
+          evaluationRunId: runId ?? null,
+        },
+      });
+    });
+  }
+
+  async beginEvaluation(gameId: string, runId: string): Promise<void> {
+    const game = await this.prisma.game.findUniqueOrThrow({
+      where: { id: gameId },
+      select: { status: true, experiment: true },
+    });
+    if (game.status !== 'finished' || readExperiment(game.experiment)?.invalid)
+      throw new Error('仅允许为有效已结束对局创建评分批次');
+    const [decisions, speeches] = await Promise.all([
+      this.findJudgeableEvents(gameId),
+      this.findSpeechesToJudge(gameId),
+    ]);
+    await this.prisma.evaluationRun.upsert({
+      where: { id: runId },
+      update: {},
+      create: { id: runId, gameId, expectedEventIds: [...decisions, ...speeches] },
+    });
+  }
+
+  async completeEvaluation(gameId: string, runId: string): Promise<void> {
+    const run = await this.prisma.evaluationRun.findUniqueOrThrow({ where: { id: runId } });
+    if (run.gameId !== gameId) throw new Error('评分批次与对局不匹配');
+    const [individual, team] = await Promise.all([
+      this.prisma.decisionJudgment.findMany({
+        where: { gameId, evaluationRunId: runId, evaluationVersion: EVALUATION_VERSION },
+        select: { eventId: true },
+      }),
+      this.prisma.teamJudgment.findMany({
+        where: { gameId, evaluationRunId: runId, evaluationVersion: EVALUATION_VERSION },
+        select: { eventId: true },
+      }),
+    ]);
+    const scored = new Set([...individual, ...team].map((row) => row.eventId));
+    if (run.expectedEventIds.some((id) => !scored.has(id))) throw new Error('评分批次尚未完整落库');
+    await this.prisma.evaluationRun.update({
+      where: { id: runId },
+      data: { status: 'complete', completedAt: new Date() },
+    });
+  }
+
+  /** 状态与恢复共用事件覆盖校验；旧局无批次时只用于判断是否需要补评。 */
+  async getEvaluationProgress(gameId: string) {
+    return this.prisma.$transaction(
+      async (db) => {
+        const [run, events, individual, team] = await Promise.all([
+          db.evaluationRun.findFirst({
+            where: { gameId },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          }),
+          db.event.findMany({
+            where: { gameId },
+            select: { id: true, actorId: true, actionType: true, content: true },
+          }),
+          db.decisionJudgment.findMany({
+            where: { gameId },
+            select: { eventId: true, evaluationRunId: true, evaluationVersion: true },
+          }),
+          db.teamJudgment.findMany({
+            where: { gameId },
+            select: { eventId: true, evaluationRunId: true, evaluationVersion: true },
+          }),
+        ]);
+        const judgments = [...individual, ...team];
+        const expected = judgeableEventIds(events);
+        const evaluation = evaluationCompleteness({ run, events, judgments });
+        const scored = new Set(judgments.map((j) => j.eventId));
+        const missing = run ? evaluation.missing : expected.filter((id) => !scored.has(id));
+        return {
+          runId: run?.id,
+          complete: run ? evaluation.complete : missing.length === 0,
+          judgeableCount: expected.length,
+          judgedCount: expected.length - missing.length,
+        };
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
+  }
+
   private async loadTeammates(
     gameId: string,
     playerId: string,
@@ -409,6 +698,27 @@ export class JudgeService {
     ]);
 
     const scoreByEventId = new Map(judgments.map((j) => [j.eventId, j.score]));
+    const teamScores = await this.prisma.teamJudgment.findMany({
+      where: { gameId },
+      select: { eventId: true, score: true },
+    });
+    if (teamScores.length) {
+      const kills = await this.prisma.event.findMany({
+        where: {
+          gameId,
+          id: { in: teamScores.map((j) => j.eventId) },
+          actionType: ACTION_TYPES.WOLF_KILL,
+        },
+        select: { id: true, content: true },
+      });
+      for (const kill of kills) {
+        const proposalIds = (kill.content as Record<string, unknown>).proposalEventIds;
+        if (Array.isArray(proposalIds))
+          for (const id of proposalIds)
+            if (typeof id === 'string')
+              scoreByEventId.set(id, teamScores.find((j) => j.eventId === kill.id)!.score);
+      }
+    }
     // 仅供迁移前的旧 usage 使用。必须检查底层真实 Event 是否也唯一，不能只数评分。
     const legacyScoreByKey = new Map<string, number>();
     if (

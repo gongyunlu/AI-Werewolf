@@ -28,6 +28,7 @@ function createMocks() {
     agentJudgment: { findMany: jest.fn() },
     memory: { findMany: jest.fn() },
     $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
+    $executeRaw: jest.fn().mockResolvedValue(1),
   };
 
   const promptService = {
@@ -89,6 +90,7 @@ const LLM_OUTPUT = {
       importance: 0.8,
       role: ROLES.SEER,
       scenario: 'day_speech',
+      conditions: ['public_discussion'],
     },
   ],
   playerModels: [{ agentName: '阿二', content: '悍跳倾向强', confidence: 0.7 }],
@@ -96,6 +98,23 @@ const LLM_OUTPUT = {
 
 describe('ReflectionService', () => {
   let mocks: ReturnType<typeof createMocks>;
+
+  it('实验反思仅保存对局分析，不写入或失效记忆，也不调用 embedding', async () => {
+    await mocks.service.reflect('g1', 'p1', true, false);
+    expect(mocks.prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    const [sql, ...values] = mocks.prisma.$executeRaw.mock.calls[0] as unknown as [
+      TemplateStringsArray,
+      ...unknown[],
+    ];
+    expect(sql.join(' ')).toContain('experimentReflection');
+    expect(sql.join(' ')).toContain('reflection_generated = true');
+    expect(values).toContain(JSON.stringify(LLM_OUTPUT));
+    expect(mocks.memoryService.createMemories).not.toHaveBeenCalled();
+    expect(mocks.memoryService.embedMemories).not.toHaveBeenCalled();
+    expect(mocks.memoryService.deactivateGameMemories).not.toHaveBeenCalled();
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    expect(mocks.tx.memory.updateMany).not.toHaveBeenCalled();
+  });
 
   beforeEach(() => {
     mocks = createMocks();
@@ -137,6 +156,7 @@ describe('ReflectionService', () => {
       trigger: '我是预言家且首夜验出金水',
       role: ROLES.SEER,
       scenario: 'day_speech',
+      conditions: ['public_discussion'],
     });
   });
 

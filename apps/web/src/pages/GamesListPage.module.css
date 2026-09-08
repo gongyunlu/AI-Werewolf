@@ -188,6 +188,11 @@
   gap: 0.5rem;
 }
 
+.experimentBadge {
+  height: auto;
+  border: 0;
+}
+
 .error {
   display: flex;
   flex-direction: column;

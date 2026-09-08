@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Langfuse } from 'langfuse-langchain';
 import type { Env } from '../config/env.validation';
+import type { FrozenPrompts } from '../evaluation/experiment-snapshot';
+import { ExperimentInvalidError } from '../evaluation/experiment-integrity';
 import {
   extractPromptVariables,
   FALLBACK_TEMPLATES,
@@ -49,11 +51,32 @@ export class PromptService {
    * @param name prompt 名称
    * @param variables `{{var}}` 占位符的取值，缺失渲染为空串
    */
-  async render(name: PromptName, variables?: Record<string, string>): Promise<RenderedPrompt> {
+  async render(
+    name: PromptName,
+    variables?: Record<string, string>,
+    frozen?: FrozenPrompts,
+  ): Promise<RenderedPrompt> {
+    const template = frozen ? frozen[name] : await this.loadTemplate(name);
+    if (!template) throw new ExperimentInvalidError(`实验快照缺少 prompt: ${name}`);
+    return { text: renderTemplate(template.text, variables), name, version: template.version };
+  }
+
+  async captureSnapshot(
+    names: PromptName[] = (Object.keys(FALLBACK_TEMPLATES) as PromptName[]).filter(
+      (name) => !name.startsWith('memory/') && !name.startsWith('reflection/'),
+    ),
+  ): Promise<FrozenPrompts> {
+    const entries = await Promise.all(
+      names.map(async (name) => [name, await this.loadTemplate(name)] as const),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  private async loadTemplate(name: PromptName): Promise<RenderedPrompt> {
     const fallback = FALLBACK_TEMPLATES[name];
 
     if (!this.langfuse) {
-      return { text: renderTemplate(fallback, variables), name, version: null };
+      return { text: fallback, name, version: null };
     }
 
     try {
@@ -70,12 +93,12 @@ export class PromptService {
         throw new Error(`production 版本缺少必需变量: ${missingVariables.join(', ')}`);
       }
 
-      return { text: client.compile(variables), name, version: client.version };
+      return { text: client.prompt, name, version: client.version };
     } catch (error) {
       this.logger.warn(
         `prompt "${name}" 拉取或校验失败，降级本地默认模板: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return { text: renderTemplate(fallback, variables), name, version: null };
+      return { text: fallback, name, version: null };
     }
   }
 }

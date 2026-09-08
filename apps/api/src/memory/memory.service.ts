@@ -1,3 +1,4 @@
+import { lessonApplies } from './lesson-applicability';
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -5,6 +6,7 @@ import type { MemoryType } from '@ai-werewolf/shared';
 import { Prisma } from '../generated/prisma/client';
 import { EmbeddingService } from './embedding.service';
 import { computeLessonCandidateScore, computeLessonRank, type LessonHit } from './lesson-rank';
+import { retrieveFrozenMemories, type FrozenMemory } from '../evaluation/experiment-snapshot';
 
 export type ActiveMemory = Prisma.MemoryGetPayload<{
   select: {
@@ -17,7 +19,7 @@ export type ActiveMemory = Prisma.MemoryGetPayload<{
 }>;
 
 /** 语义检索结果：在 ActiveMemory 基础上附带与 query 的余弦相似度 */
-export type SimilarMemory = ActiveMemory & { similarity: number };
+export type SimilarMemory = ActiveMemory & { similarity: number; metadata?: unknown };
 
 export type RetrieveSimilarOptions = {
   /** 指定类型集合，缺省不过滤 */
@@ -96,6 +98,71 @@ export class MemoryService {
     private readonly embeddingService: EmbeddingService,
   ) {}
 
+  async captureExperimentMemories(agentIds: string[]): Promise<FrozenMemory[]> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const rows = await tx.$queryRaw<Array<FrozenMemory & { vector: string | null }>>`
+        SELECT m.id, m.agent_id AS "agentId", m.label, m.type, m.title, m.content, m.importance,
+               m.metadata, m.created_at::text AS "createdAt",
+               CASE WHEN m.embedding_model = ${this.embeddingService.model} THEN m.embedding::text ELSE NULL END AS vector
+        FROM memories m JOIN agents a ON a.id = m.agent_id AND a.memory_label = m.label
+        WHERE m.agent_id IN (${Prisma.join(agentIds)}) AND m.is_active = true
+      `;
+        const hits = await tx.$queryRaw<
+          Array<{ memoryId: string; agentId: string; actionType: string; reward: number }>
+        >`
+        SELECT u.memory_id AS "memoryId", m.agent_id AS "agentId", u.action_type AS "actionType", u.reward_score AS reward
+        FROM memory_usages u JOIN memories m ON m.id = u.memory_id
+        WHERE m.agent_id IN (${Prisma.join(agentIds)}) AND m.type = 'lesson' AND u.trigger_matched AND u.reward_score IS NOT NULL
+      `;
+        const baselines = await tx.decisionJudgment.groupBy({
+          where: { game: { experiment: { equals: Prisma.DbNull } } },
+          by: ['actionType'],
+          _avg: { score: true },
+        });
+        const baselineByActionType = new Map(
+          baselines.map((b) => [b.actionType, b._avg.score ?? 50]),
+        );
+        const values = [...baselineByActionType.values()];
+        const defaultBaseline = values.length
+          ? values.reduce((a, b) => a + b, 0) / values.length
+          : 50;
+        return rows.map(({ vector, ...row }) =>
+          Object.assign(row, {
+            metadata: row.metadata ?? {},
+            embedding: vector ? (JSON.parse(vector) as number[]) : null,
+            rank: computeLessonRank({
+              hits: hits.filter((h) => h.memoryId === row.id),
+              baselineByActionType,
+              defaultBaseline,
+              totalHits: hits.filter((h) => h.agentId === row.agentId).length,
+              importance: row.importance,
+            }),
+          }),
+        );
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
+  }
+
+  async retrieveFrozen(
+    snapshot: { memories: FrozenMemory[]; embeddingModel: string },
+    input: {
+      agentId: string;
+      label: string;
+      opponentAgentIds: string[];
+      role: string | null;
+      scenario: string;
+      query: string;
+      facts?: string[];
+    },
+  ) {
+    if (snapshot.embeddingModel !== this.embeddingService.model)
+      throw new Error('实验 embedding 模型已改变，请创建新实验');
+    const queryVector = await this.embeddingService.embedText(input.query);
+    return retrieveFrozenMemories(snapshot.memories, { ...input, queryVector });
+  }
+
   /**
    * 检索指定 agent 的指定 label 的所有 active memory，按 importance 降序、createdAt 升序排序。
    * @param agentId
@@ -163,6 +230,7 @@ export class MemoryService {
     role: string | null;
     /** 当前场景，硬过滤掉不适用的 lesson */
     scenario: string;
+    facts?: string[];
     lessonLimit?: number;
   }): Promise<{ lessons: SimilarMemory[]; playerModels: ActiveMemory[] }> {
     const { agentId, label, opponentAgentIds, query, role, scenario } = options;
@@ -206,7 +274,11 @@ export class MemoryService {
           role: role ?? undefined,
           scenario,
         });
-        return await this.rankLessons(candidates, agentId, lessonLimit);
+        return await this.rankLessons(
+          candidates.filter((m) => lessonApplies(m.metadata, options.facts ?? [])),
+          agentId,
+          lessonLimit,
+        );
       } catch (error) {
         this.logger.warn(
           {
@@ -259,6 +331,7 @@ export class MemoryService {
         select: { memoryId: true, actionType: true, rewardScore: true },
       }),
       this.prisma.decisionJudgment.groupBy({
+        where: { game: { experiment: { equals: Prisma.DbNull } } },
         by: ['actionType'],
         _avg: { score: true },
       }),
@@ -451,9 +524,10 @@ export class MemoryService {
         content: string;
         importance: number;
         similarity: number;
+        metadata: unknown;
       }>
     >`
-      SELECT id, type, title, content, importance,
+      SELECT id, type, title, content, importance, metadata,
              1 - (embedding <=> ${JSON.stringify(queryVec)}::vector) AS similarity
       FROM memories
       WHERE agent_id = ${agentId}::uuid
@@ -483,6 +557,7 @@ export class MemoryService {
       content: r.content,
       importance: r.importance,
       similarity: r.similarity,
+      metadata: r.metadata,
     }));
   }
 

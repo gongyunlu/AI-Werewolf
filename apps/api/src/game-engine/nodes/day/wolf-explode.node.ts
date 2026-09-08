@@ -7,6 +7,7 @@ import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/agent-runtime/abort.utils';
+import { ExperimentInvalidError } from '@/evaluation/experiment-integrity';
 
 /**
  * 狼人自爆决策 Schema
@@ -56,30 +57,37 @@ export class WolfExplodeNode {
             wolf.id,
             'night_action' as any,
             '现在是天亮阶段。你可以选择自爆：公开你的狼人身份并立即出局（自己死亡退场），当天白天直接结束进入黑夜，跳过发言与投票。自爆是牺牲自己换取跳过白天，请审慎判断是否值得。',
+            'wolf_explode',
           );
 
           const threadId = getPlayerThreadId(state.gameId, wolf.id);
 
-          const reasoning = await this.agentRuntime.streamReasoning(
+          const { reasoning, decision } = await this.agentRuntime.decide<WolfExplodeDecision>(
             contextData,
-            threadId,
-            raceController.signal,
-          );
-
-          const decision = await this.agentRuntime.generateDecision<WolfExplodeDecision>(
-            contextData,
-            reasoning,
             WolfExplodeDecisionSchema,
             raceController.signal,
             threadId,
           );
 
+          throwIfAborted(raceController.signal);
           if (decision.action === 'explode' && explodeWinner === null) {
             explodeWinner = wolf;
             explodeReason = decision.reason;
             raceController.abort(); // 中止其余狼人的询问
           }
+          const decisionEvent = await context.eventWriter.writeWolfDecisionEvent({
+            gameId: state.gameId,
+            day: state.currentDay,
+            actorId: wolf.id,
+            actionType: 'wolf_explode',
+            content: { action: decision.action, seatNo: wolf.seatNo, thinking: reasoning },
+          });
+          await this.agentRuntime.recordExperienceUsages(contextData, decisionEvent);
         } catch (error) {
+          if (error instanceof ExperimentInvalidError) {
+            raceController.abort();
+            throw error;
+          }
           // 被其余狼抢先自爆或游戏中止导致的 abort 属正常竞争结果，忽略
           if (raceController.signal.aborted) return;
           gameLogger.error(
@@ -88,8 +96,12 @@ export class WolfExplodeNode {
         }
       };
 
-      await Promise.allSettled(werewolves.map(decide));
+      const results = await Promise.allSettled(werewolves.map(decide));
       context.signal?.removeEventListener('abort', onGameAbort);
+      const invalid = results.find(
+        (result) => result.status === 'rejected' && result.reason instanceof ExperimentInvalidError,
+      );
+      if (invalid?.status === 'rejected') throw invalid.reason;
       throwIfAborted(context.signal);
 
       if (!explodeWinner) {

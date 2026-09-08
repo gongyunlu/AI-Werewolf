@@ -6,6 +6,7 @@ import { StructuredLlmService } from '../observability/structured-llm.service';
 /** mock PrismaService（仅覆盖 reward 回填与个人分聚合用到的读写面） */
 function createMockPrisma() {
   return {
+    teamJudgment: { findMany: jest.fn().mockResolvedValue([]) },
     decisionJudgment: { findMany: jest.fn(), groupBy: jest.fn() },
     memoryUsage: { findMany: jest.fn(), update: jest.fn() },
     knowledgeUsage: { findMany: jest.fn(), update: jest.fn() },
@@ -16,6 +17,30 @@ function createMockPrisma() {
 }
 
 describe('JudgeService.backfillRewards', () => {
+  it('团队狼刀分数通过提刀事件关联回填攻略和记忆 usage', async () => {
+    const db = createMockPrisma();
+    db.decisionJudgment.findMany.mockResolvedValue([]);
+    db.teamJudgment.findMany.mockResolvedValue([{ eventId: 'kill', score: 88 }]);
+    db.event.findMany.mockResolvedValue([
+      { id: 'kill', content: { proposalEventIds: ['proposal'] } },
+    ]);
+    const usage = {
+      id: 'u',
+      eventId: 'proposal',
+      playerId: 'p',
+      actionType: 'wolf_proposal',
+      day: 1,
+      rewardScore: null,
+    };
+    db.memoryUsage.findMany.mockResolvedValue([usage]);
+    db.knowledgeUsage.findMany.mockResolvedValue([usage]);
+    const judge = new JudgeService(
+      ...([db, {}, {}] as unknown as ConstructorParameters<typeof JudgeService>),
+    );
+    await judge.backfillRewards('g');
+    for (const table of [db.memoryUsage, db.knowledgeUsage])
+      expect(table.update).toHaveBeenCalledWith({ where: { id: 'u' }, data: { rewardScore: 88 } });
+  });
   let service: JudgeService;
   let prisma: ReturnType<typeof createMockPrisma>;
 

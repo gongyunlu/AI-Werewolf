@@ -352,4 +352,44 @@ describe('MemoryService', () => {
       skipDuplicates: true,
     });
   });
+
+  it('普通局检索也排除事实不满足的经验，保留条件适用的经验', async () => {
+    (embeddingService.embedText as jest.Mock).mockResolvedValue(
+      Array<number>(MEMORY_EMBEDDING_DIMENSION).fill(0.1),
+    );
+    (prisma.$queryRaw as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          id: 'future',
+          type: 'lesson',
+          title: '救人后',
+          content: '银水经验',
+          importance: 1,
+          similarity: 0.99,
+          metadata: { conditions: ['has_saved'] },
+        },
+        {
+          id: 'now',
+          type: 'lesson',
+          title: '首夜',
+          content: '首夜经验',
+          importance: 1,
+          similarity: 0.7,
+          metadata: { conditions: ['first_night'] },
+        },
+      ])
+      .mockResolvedValueOnce([{ count: 0 }]);
+    (prisma.memoryUsage.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.decisionJudgment.groupBy as jest.Mock).mockResolvedValue([]);
+    const result = await service.retrieveExperience({
+      agentId: '5b12e37c-62ca-491a-a46d-a649d08416fd',
+      label: 'default',
+      opponentAgentIds: [],
+      query: '首夜救人',
+      role: 'witch',
+      scenario: 'night_action',
+      facts: ['first_night', 'antidote_unused'],
+    });
+    expect(result.lessons.map((m) => m.id)).toEqual(['now']);
+  });
 });

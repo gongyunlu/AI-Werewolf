@@ -21,7 +21,7 @@ type SheriffDecideOrderDecision = {
 };
 
 /**
- * 警长决定发言顺序节点（两阶段版本）
+ * 警长决定发言顺序节点（理由与动作一并生成）
  */
 @Injectable()
 export class SheriffDecideOrderNode {
@@ -66,20 +66,8 @@ export class SheriffDecideOrderNode {
 
         const threadId = getPlayerThreadId(state.gameId, sheriff.id);
 
-        // 阶段1：流式推理
-        const reasoning = await this.agentRuntime.streamReasoning(
+        const { decision } = await this.agentRuntime.decide<SheriffDecideOrderDecision>(
           contextData,
-          threadId,
-          context.signal,
-          (_token) => {
-            // 警长决定发言顺序不推送推理过程
-          },
-        );
-
-        // 阶段2：生成决策
-        const decision = await this.agentRuntime.generateDecision<SheriffDecideOrderDecision>(
-          contextData,
-          reasoning,
           SheriffDecideOrderSchema,
           context.signal,
           threadId,

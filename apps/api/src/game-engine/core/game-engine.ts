@@ -18,6 +18,12 @@ import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.s
 import { LangfuseService } from '@/observability/langfuse.service';
 import { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
+import { readExperiment } from '@/evaluation/experiment-snapshot';
+import {
+  abortExperiment,
+  assertExperimentConfiguration,
+  ExperimentInvalidError,
+} from '@/evaluation/experiment-integrity';
 
 /**
  * 游戏引擎 - 简单状态机实现
@@ -75,6 +81,16 @@ export class GameEngine {
     let state = initialState;
 
     try {
+      const game = await this.prisma.game.findUnique({
+        where: { id: state.gameId },
+        select: { experiment: true },
+      });
+      if (game?.experiment) {
+        assertExperimentConfiguration(
+          readExperiment(game.experiment)!,
+          this.configService.get('ARK_EMBEDDING_MODEL'),
+        );
+      }
       state = await this.executeNode('init', state);
 
       // 主循环
@@ -95,9 +111,8 @@ export class GameEngine {
 
       return state;
     } catch (error) {
-      if (error instanceof GamePausedException || error instanceof GameAbortedException) {
-        throw error;
-      }
+      if (error instanceof ExperimentInvalidError)
+        return abortExperiment(this.prisma, state.gameId, error);
       throw error;
     } finally {
       this.pauseCheckCache = null;
@@ -243,7 +258,13 @@ export class GameEngine {
         currentState.interrupt?.type === 'wolf_explode' ||
         currentState.interrupt?.type === 'white_wolf_explode'
       ) {
-        return { ...currentState, nextIsDay: false };
+        currentState = await this.executeNode('checkWin', currentState);
+        return {
+          ...currentState,
+          interrupt: null,
+          currentDay: currentState.currentDay + (currentState.isGameOver ? 0 : 1),
+          nextIsDay: false,
+        };
       }
 
       // 如果游戏已结束，立即中断白天管道

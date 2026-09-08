@@ -28,7 +28,7 @@ type SeerCheckDecision = {
 };
 
 /**
- * 预言家查验节点（两阶段版本）
+ * 预言家查验节点（理由与动作一并生成）
  */
 @Injectable()
 export class SeerCheckNode {
@@ -80,20 +80,8 @@ export class SeerCheckNode {
         const legalHint = `你今晚只能查验以下存活且未查验过的玩家：${legalSeatNos.join('号、')}号。`;
         const contextData = await this.prepareContext(state, seer.id, context, legalHint);
 
-        // 阶段1：流式推理
-        const reasoning = await this.agentRuntime.streamReasoning(
+        const { reasoning, decision } = await this.agentRuntime.decide<SeerCheckDecision>(
           contextData,
-          threadId,
-          context.signal,
-          (_token) => {
-            // 可选：SSE 推送推理过程
-          },
-        );
-
-        // 阶段2：生成结构化决策
-        const decision = await this.agentRuntime.generateDecision<SeerCheckDecision>(
-          contextData,
-          reasoning,
           buildSeerCheckSchema(legalSeatNos),
           context.signal,
           threadId,

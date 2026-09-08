@@ -67,7 +67,7 @@ standalone + PrismaPg + PrismaClient 范式）。package.json 加脚本 `knowled
 
 ## 落库
 
-- 逐块 INSERT（`id` 用 `gen_random_uuid()` 或 uuidv4），幂等可重跑：脚本开头可选 `TRUNCATE knowledge_chunks`（加 `--reset` 参数）或 `DELETE FROM knowledge_chunks WHERE source_file = $file` 后重建。
+- 按版本与来源哈希 upsert，保留已有块和使用关系。冲突时使用数据库实际正文生成向量，写入前核对正文未变；缺失或不匹配的向量可重跑补齐。`--reset` 已禁止，替换攻略使用新版本及停用旧块。
 - 每插入一块打印进度（成功/失败计数），失败不中断（下批重跑补）。
 - 完成后打印总块数、role/scenario 取值分布，供人工核查。
 

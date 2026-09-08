@@ -19,7 +19,6 @@ describe('GameAnalysisService', () => {
   const prisma = {
     game: { findUnique: jest.fn() },
     player: { findUnique: jest.fn() },
-    decisionJudgment: { count: jest.fn() },
     agentPerformance: { count: jest.fn() },
     gameSummary: { findUnique: jest.fn() },
   };
@@ -38,7 +37,7 @@ describe('GameAnalysisService', () => {
   };
   const settlement = { settleGame: jest.fn() };
   const judge = {
-    countJudgeableTargets: jest.fn(),
+    getEvaluationProgress: jest.fn(),
     backfillRewards: jest.fn(),
     aggregatePlayerScores: jest.fn(),
   };
@@ -56,10 +55,13 @@ describe('GameAnalysisService', () => {
       _count: { players: 6 },
     });
     prisma.player.findUnique.mockResolvedValue({ gameId });
-    prisma.decisionJudgment.count.mockResolvedValue(0);
     prisma.agentPerformance.count.mockResolvedValue(0);
     prisma.gameSummary.findUnique.mockResolvedValue({ narrative: null });
-    judge.countJudgeableTargets.mockResolvedValue(2);
+    judge.getEvaluationProgress.mockResolvedValue({
+      complete: false,
+      judgedCount: 0,
+      judgeableCount: 2,
+    });
     judge.backfillRewards.mockResolvedValue(0);
     judge.aggregatePlayerScores.mockResolvedValue(undefined);
     reflectionQueue.withGameScheduleLock.mockImplementation(
@@ -103,6 +105,37 @@ describe('GameAnalysisService', () => {
     expect(settlement.settleGame).not.toHaveBeenCalled();
   });
 
+  it('实验局手动反思可以投递，但不隐式重跑评分', async () => {
+    prisma.game.findUnique.mockResolvedValue({
+      status: GAME_STATUSES.FINISHED,
+      experiment: { arm: 'off' },
+      _count: { players: 6 },
+    });
+    await expect(
+      service.analyzeGame(gameId, { judge: false, reflect: true, force: true }),
+    ).resolves.toMatchObject({ judged: 0, reflectPlanned: 6, skipped: false });
+    expect(reflectionQueue.enqueueFanout).toHaveBeenCalledWith(
+      expect.objectContaining({ gameId, force: true }),
+    );
+    expect(judgeQueue.enqueueGame).not.toHaveBeenCalled();
+    expect(judgeQueue.rejudgeGame).not.toHaveBeenCalled();
+  });
+
+  it('实验局自动分析仍只评分，不自动投递反思', async () => {
+    prisma.game.findUnique.mockResolvedValue({
+      status: GAME_STATUSES.FINISHED,
+      experiment: { arm: 'on' },
+      _count: { players: 6 },
+    });
+    judgeQueue.enqueueGame.mockResolvedValue(2);
+    await expect(service.analyzeGame(gameId)).resolves.toMatchObject({
+      judged: 2,
+      reflectPlanned: 0,
+    });
+    expect(reflectionQueue.enqueueFanout).not.toHaveBeenCalled();
+    expect(flowProducer.add).not.toHaveBeenCalled();
+  });
+
   it('指定的反思玩家不属于该局时同步拒绝，不投递空任务', async () => {
     prisma.player.findUnique.mockResolvedValue({
       gameId: '00000000-0000-4000-8000-000000000099',
@@ -121,8 +154,11 @@ describe('GameAnalysisService', () => {
   });
 
   it('持久化分析已经完整时，force=false 不重复投递任何任务', async () => {
-    judge.countJudgeableTargets.mockResolvedValue(8);
-    prisma.decisionJudgment.count.mockResolvedValue(8);
+    judge.getEvaluationProgress.mockResolvedValue({
+      complete: true,
+      judgedCount: 8,
+      judgeableCount: 8,
+    });
     prisma.agentPerformance.count.mockResolvedValue(6);
     prisma.gameSummary.findUnique.mockResolvedValue({ narrative: '{"narrative":"done"}' });
 
@@ -136,6 +172,23 @@ describe('GameAnalysisService', () => {
     expect(judgeQueue.listGameJobs).not.toHaveBeenCalled();
     expect(flowProducer.add).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    '共享校验未通过时恢复评分，即使评分数量齐全（反思=%s）',
+    async (reflect) => {
+      judge.getEvaluationProgress.mockResolvedValue({
+        runId: 'pending-run',
+        complete: false,
+        judgedCount: 8,
+        judgeableCount: 8,
+      });
+      prisma.agentPerformance.count.mockResolvedValue(6);
+      prisma.gameSummary.findUnique.mockResolvedValue({ narrative: 'done' });
+      await service.analyzeGame(gameId, { judge: true, reflect });
+      if (reflect) expect(judgeQueue.listGameJobs).toHaveBeenCalled();
+      else expect(judgeQueue.enqueueGame).toHaveBeenCalledWith(gameId, `_resume_${now}`);
+    },
+  );
 
   it('首次完整分析使用稳定 jobId，并让任一 judge 最终失败直接使 fanout 失败', async () => {
     const result = await service.analyzeGame(gameId);
@@ -203,8 +256,11 @@ describe('GameAnalysisService', () => {
   });
 
   it('judge-only 非 force 在评分完整时只刷新 reward，不重复创建 flow', async () => {
-    judge.countJudgeableTargets.mockResolvedValue(2);
-    prisma.decisionJudgment.count.mockResolvedValue(2);
+    judge.getEvaluationProgress.mockResolvedValue({
+      complete: true,
+      judgedCount: 2,
+      judgeableCount: 2,
+    });
     judge.backfillRewards.mockResolvedValue(2);
 
     await expect(
@@ -231,7 +287,11 @@ describe('GameAnalysisService', () => {
     '稳定 flow 状态为 %s 且产物不完整时用恢复后缀重新投递',
     async (state) => {
       reflectionQueue.getFanoutState.mockResolvedValue(state);
-      prisma.decisionJudgment.count.mockResolvedValue(1);
+      judge.getEvaluationProgress.mockResolvedValue({
+        complete: false,
+        judgedCount: 1,
+        judgeableCount: 2,
+      });
       judgeQueue.listGameJobs.mockImplementation(async (_id: string, suffix: string) => [
         {
           name: 'judge-decision',
@@ -262,8 +322,11 @@ describe('GameAnalysisService', () => {
   });
 
   it('评分已经完整时只补复盘和反思，不重新 judge', async () => {
-    judge.countJudgeableTargets.mockResolvedValue(2);
-    prisma.decisionJudgment.count.mockResolvedValue(2);
+    judge.getEvaluationProgress.mockResolvedValue({
+      complete: true,
+      judgedCount: 2,
+      judgeableCount: 2,
+    });
 
     await expect(service.analyzeGame(gameId)).resolves.toMatchObject({
       judged: 0,

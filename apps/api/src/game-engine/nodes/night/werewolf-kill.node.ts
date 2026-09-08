@@ -39,12 +39,18 @@ export class WerewolfKillNode {
       await context.eventBus?.publish(nightPromptEvent);
 
       let targetPlayerId: string | null = null;
+      const proposalEventIds: string[] = [];
       try {
         if (werewolves.length === 1) {
-          targetPlayerId = await singleWolfDecision(werewolves[0], state, context);
+          targetPlayerId = await singleWolfDecision(
+            werewolves[0],
+            state,
+            context,
+            proposalEventIds,
+          );
         } else {
           const discussion = await wolfDiscussion(werewolves, state, context);
-          const votes = await wolfVoting(werewolves, state, context, discussion);
+          const votes = await wolfVoting(werewolves, state, context, discussion, proposalEventIds);
           targetPlayerId = selectTargetFromVotes(votes, state);
         }
       } catch (error) {
@@ -78,6 +84,7 @@ export class WerewolfKillNode {
         day: state.currentDay,
         targetId: targetPlayerId ?? undefined,
         targetSeatNo: target?.seatNo,
+        proposalEventIds,
       });
       await context.eventBus?.publish(wolfKillEvent);
 

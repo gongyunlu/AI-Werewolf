@@ -42,6 +42,59 @@ describe('buildJudgePrompt 视角还原', () => {
     expect(user).toContain('队友座位号 [5]');
   });
 
+  it('PK 评分保留已公开的首轮票，隐藏当前轮其他人的投票', () => {
+    const { user } = buildJudgePrompt({
+      ...baseInput,
+      decision: { ...baseInput.decision, content: { targetSeatNo: 1, voteRound: 1 } },
+      events: [
+        ev({
+          sequence: 90,
+          day: 2,
+          actorId: 'p3',
+          actionType: ACTION_TYPES.VOTE,
+          content: { voterSeatNo: 3, targetSeatNo: 5, voteRound: 0 },
+        }),
+        ev({
+          sequence: 99,
+          day: 2,
+          actorId: 'p4',
+          actionType: ACTION_TYPES.VOTE,
+          content: { voterSeatNo: 4, targetSeatNo: 6, voteRound: 1 },
+        }),
+      ],
+    });
+    expect(user).toContain('3号位');
+    expect(user).not.toContain('4号位');
+  });
+
+  it('当前查验的真实结果不会进入待评决策描述，已完成查验仍作为历史证据', () => {
+    const { user } = buildJudgePrompt({
+      ...baseInput,
+      playerRole: ROLES.SEER,
+      playerFaction: FACTIONS.VILLAGER,
+      teammates: [],
+      decision: {
+        sequence: 100,
+        actionType: ACTION_TYPES.SEER_CHECK,
+        day: 2,
+        targetSeatNo: 4,
+        content: { targetSeatNo: 4, result: 'werewolf' },
+      },
+      events: [
+        ev({
+          sequence: 1,
+          actionType: ACTION_TYPES.SEER_CHECK,
+          visibility: VISIBILITY_TYPES.SEER,
+          actorId: 'p2',
+          content: { targetSeatNo: 3, result: 'good' },
+        }),
+      ],
+    });
+    expect(user).toContain('4号位（结果未知）');
+    expect(user).not.toContain('4号位 → 狼人');
+    expect(user).toContain('3号位 → 好人');
+  });
+
   it('无目标座位的警长决策按目录渲染真实方向，不伪装成放弃行动', () => {
     const { user } = buildJudgePrompt({
       ...baseInput,
@@ -268,7 +321,7 @@ describe('buildSpeechJudgePromptVariables 整局时间线', () => {
     teammates: [] as number[],
   };
 
-  it('自己的发言按顺序标号并取原文，他人发言截断', () => {
+  it('自己的发言按顺序标号，并保留他人的完整发言证据', () => {
     const events: JudgeEventInput[] = [
       ev({
         sequence: 10,
@@ -300,7 +353,7 @@ describe('buildSpeechJudgePromptVariables 整局时间线', () => {
     expect(variables.speechCount).toBe('2');
     expect(variables.timeline).toContain('[发言#1] 第1天 我的发言：我是女巫，昨晚救了3号');
     expect(variables.timeline).toContain('[发言#2] 第2天 我的发言：我改口了，我是平民');
-    expect(variables.timeline).toContain('…'); // 他人发言被截断
+    expect(variables.timeline).toContain('啊'.repeat(200));
   });
 
   it('女巫用掉解药后失去刀口频道，解药事件本身仍可见', () => {

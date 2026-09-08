@@ -8,6 +8,8 @@ import { CreateGameDialog } from '@/components/CreateGameDialog';
 import { AnalysisDialog } from '@/components/AnalysisDialog';
 import { PerspectiveDialog } from '@/components/game-watch/PerspectiveDialog';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { cn } from '@/lib/utils';
 import { GAME_STATUSES, FACTIONS } from '@ai-werewolf/shared';
 
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -118,15 +120,9 @@ export default function GamesListPage() {
     }
   }, []);
 
-  const handleAnalysisClose = useCallback(
-    (open: boolean) => {
-      if (!open) {
-        setAnalysisGameId(null);
-        void fetchGames();
-      }
-    },
-    [fetchGames],
-  );
+  const handleAnalysisClose = useCallback((open: boolean) => {
+    if (!open) setAnalysisGameId(null);
+  }, []);
 
   const handleRetry = useCallback(() => {
     void fetchGames();
@@ -140,7 +136,11 @@ export default function GamesListPage() {
         onOpenChange={handleDialogClose}
         onSelect={handleSelectPerspective}
       />
-      <AnalysisDialog gameId={analysisGameId} onOpenChange={handleAnalysisClose} />
+      <AnalysisDialog
+        gameId={analysisGameId}
+        experiment={Boolean(games.find((game) => game.id === analysisGameId)?.experimentArm)}
+        onOpenChange={handleAnalysisClose}
+      />
 
       <div className={styles.body}>
         <div className={styles.container}>
@@ -149,7 +149,10 @@ export default function GamesListPage() {
               <h1 className={styles.title}>对局列表</h1>
               <p className={styles.subtitle}>查看所有游戏对局</p>
             </div>
-            <CreateGameDialog onCreated={handleCreated} />
+            <div className={styles.cardActions}>
+              <CreateGameDialog onCreated={handleCreated} />
+              <CreateGameDialog mode="ab" onCreated={handleRetry} />
+            </div>
           </div>
 
           {loading ? (
@@ -181,6 +184,20 @@ export default function GamesListPage() {
                       <div className={styles.info}>
                         <div className={styles.metaRow}>
                           <span className={styles.gameId}>#{game.id.slice(0, 8)}</span>
+                          {game.experimentArm && (
+                            <Badge
+                              variant="secondary"
+                              className={cn(
+                                styles.badge,
+                                styles.experimentBadge,
+                                game.experimentArm === 'on'
+                                  ? [styles.badgeSoft, styles.badgeCyan]
+                                  : styles.badgeSolid,
+                              )}
+                            >
+                              A/B · {game.experimentArm.toUpperCase()}
+                            </Badge>
+                          )}
                           {getStatusBadge(game.status)}
                           {getWinnerBadge(game.winnerFaction)}
                         </div>
@@ -213,7 +230,11 @@ export default function GamesListPage() {
                             data-game-id={game.id}
                             onClick={handleAnalyze}
                           >
-                            {game.analyzed ? '已分析' : '分析'}
+                            {game.experimentArm
+                              ? 'A/B 评分 / 反思'
+                              : game.analyzed
+                                ? '已分析'
+                                : '分析'}
                           </Button>
                         )}
                         <Button

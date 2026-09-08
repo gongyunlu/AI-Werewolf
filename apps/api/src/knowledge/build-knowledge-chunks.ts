@@ -9,7 +9,9 @@ import { z } from 'zod';
 import { resolveStructuredOutputMethod } from '../observability/structured-output-method';
 import { RoleSchema } from '@ai-werewolf/shared';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient, Prisma } from '../generated/prisma/client';
+import { PrismaClient } from '../generated/prisma/client';
+import { knowledgeSourceHash, knowledgeEmbeddingText } from './knowledge-policy';
+import { storeKnowledgeChunk, writeKnowledgeEmbedding } from './knowledge-build-store';
 
 const repositoryRoot = resolve(__dirname, '../../../..');
 
@@ -254,7 +256,11 @@ async function main(): Promise<void> {
     throw new Error('缺少必要环境变量（DATABASE_URL/ARK_API_KEY/ARK_DEFAULT_MODEL/ARK_BASE_URL）');
   }
 
-  const reset = process.argv.includes('--reset');
+  if (process.argv.includes('--reset'))
+    throw new Error('不再支持删除历史攻略；请使用 --version=<新版本> 重建并保留使用记录');
+  const version =
+    process.argv.find((arg) => arg.startsWith('--version='))?.slice('--version='.length) ??
+    'distilled-v2';
   const probe = process.argv.includes('--probe');
   // --limit=N：只蒸馏前 N 块（冒烟用，验证 ARK 通路；<0 表示不限）
   const limitOpt = process.argv.find((arg) => arg.startsWith('--limit='));
@@ -306,21 +312,19 @@ async function main(): Promise<void> {
       return;
     }
 
-    // 幂等：清空历史重建或只重建本次三个 source_file
-    if (reset) {
-      const cleared = await prisma.$executeRaw`DELETE FROM knowledge_chunks`;
-      logger.log(`--reset：已清空 knowledge_chunks（${cleared} 行）`);
-    } else {
-      const cleared = await prisma.$executeRaw`
-        DELETE FROM knowledge_chunks WHERE source_file IN (${Prisma.join(SOURCE_FILES)})
-      `;
-      logger.log(`已清理三个 source_file 的既有块（${cleared} 行），开始重建`);
-    }
-
     logger.log(`切块完成：共 ${rawChunks.length} 块`);
 
     // 2. 蒸馏：每块一次结构化输出调用，失败计数不中断
-    const toDistill = chunkLimit >= 0 ? rawChunks.slice(0, chunkLimit) : rawChunks;
+    const existing = await prisma.knowledgeChunk.findMany({
+      where: { version },
+      select: { sourceHash: true },
+    });
+    const knownHashes = new Set(existing.map((row) => row.sourceHash));
+    const uniqueChunks = [
+      ...new Map(rawChunks.map((chunk) => [knowledgeSourceHash(chunk), chunk])).values(),
+    ];
+    const pending = uniqueChunks.filter((chunk) => !knownHashes.has(knowledgeSourceHash(chunk)));
+    const toDistill = chunkLimit >= 0 ? pending.slice(0, chunkLimit) : pending;
     if (chunkLimit >= 0)
       logger.log(
         `--limit=${chunkLimit}：仅蒸馏前 ${Math.min(chunkLimit, rawChunks.length)} 块（冒烟）`,
@@ -365,21 +369,21 @@ async function main(): Promise<void> {
     let insertFailed = 0;
     for (const chunk of successful) {
       try {
-        const row = await prisma.knowledgeChunk.create({
-          data: {
-            sourceFile: chunk.sourceFile,
-            articleTitle: chunk.articleTitle,
-            sectionTitle: chunk.sectionTitle,
-            role: chunk.distilled.role,
-            scenario: chunk.distilled.scenario,
-            trigger: chunk.distilled.trigger,
-            action: chunk.distilled.action,
-            content: chunk.content,
-            isActive: true,
-          },
-          select: { id: true },
+        const sourceHash = knowledgeSourceHash(chunk);
+        const row = await storeKnowledgeChunk(prisma, {
+          version,
+          sourceHash,
+          sourceFile: chunk.sourceFile,
+          articleTitle: chunk.articleTitle,
+          sectionTitle: chunk.sectionTitle,
+          role: chunk.distilled.role,
+          scenario: chunk.distilled.scenario,
+          trigger: chunk.distilled.trigger,
+          action: chunk.distilled.action,
+          content: chunk.content,
+          isActive: false, // 未经适用性审核的蒸馏结果不直接进入对局
         });
-        inserted.push({ id: row.id, content: chunk.content });
+        inserted.push(row);
       } catch (error) {
         insertFailed += 1;
         logger.warn(
@@ -390,6 +394,30 @@ async function main(): Promise<void> {
       }
     }
     logger.log(`落库完成：成功 ${inserted.length}，失败 ${insertFailed}`);
+    const pendingEmbeddings = await prisma.$queryRaw<
+      Array<{
+        id: string;
+        role: string;
+        scenario: string;
+        trigger: string;
+        action: string;
+        embedding_content_hash: string | null;
+        embedding_model: string | null;
+        has_embedding: boolean;
+      }>
+    >`
+      SELECT id, role, scenario, trigger, action, embedding_content_hash, embedding_model, embedding IS NOT NULL AS has_embedding FROM knowledge_chunks
+      WHERE version = ${version}
+    `;
+    for (const chunk of pendingEmbeddings) {
+      if (
+        !inserted.some((row) => row.id === chunk.id) &&
+        (!chunk.has_embedding ||
+          chunk.embedding_model !== embeddingModel ||
+          chunk.embedding_content_hash !== hashContent(knowledgeEmbeddingText(chunk)))
+      )
+        inserted.push({ id: chunk.id, content: knowledgeEmbeddingText(chunk) });
+    }
 
     // 4. embedding：按 10 条分批 embedDocuments，校验维度后逐块 UPDATE
     const embeddings = new OpenAIEmbeddings({
@@ -411,25 +439,14 @@ async function main(): Promise<void> {
         for (let j = 0; j < batch.length; j++) {
           const vector = vectors[j];
           assertValidVector(vector);
-          const next = await prisma.$executeRaw`
-            UPDATE knowledge_chunks
-            SET embedding = ${JSON.stringify(vector)}::vector,
-                embedding_model = ${embeddingModel},
-                embedding_dimension = ${EMBEDDING_DIMENSION},
-                embedding_content_hash = ${hashContent(batch[j].content)},
-                embedded_at = NOW()
-            WHERE id = ${batch[j].id}::uuid AND content = ${batch[j].content}
-          `;
-          if (next !== 1) {
-            throw new Error(`块 ${batch[j].id} 的内容在向量生成期间发生变化，请重试`);
-          }
+          await writeKnowledgeEmbedding(prisma, batch[j], vector, embeddingModel);
           embedded += 1;
         }
       } catch (error) {
         logger.warn(
           `embedding 批次失败 第 ${i + 1}-${Math.min(i + EMBEDDING_BATCH_SIZE, inserted.length)} 块：${
             error instanceof Error ? error.message : String(error)
-          }（这批向量未写入，可重跑补齐）`,
+          }（未完成条目可重跑补齐）`,
         );
       }
     }

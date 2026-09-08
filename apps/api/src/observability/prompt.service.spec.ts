@@ -1,7 +1,12 @@
 import { ConfigService } from '@nestjs/config';
 import { Langfuse } from 'langfuse-langchain';
 import type { Env } from '../config/env.validation';
-import { FALLBACK_TEMPLATES, PROMPT_NAMES, REQUIRED_PROMPT_VARIABLES } from './prompt-templates';
+import {
+  FALLBACK_TEMPLATES,
+  PROMPT_NAMES,
+  REQUIRED_PROMPT_VARIABLES,
+  renderTemplate,
+} from './prompt-templates';
 import { PromptService } from './prompt.service';
 
 function createConfig(enabled = true): ConfigService<Env, true> {
@@ -19,6 +24,23 @@ function createConfig(enabled = true): ConfigService<Env, true> {
 }
 
 describe('PromptService', () => {
+  it('线上及冻结模板接受空格占位符，输入中的美元和嵌套占位符保持原文', async () => {
+    const name = PROMPT_NAMES.agentDecisionUser;
+    const template = FALLBACK_TEMPLATES[name].replace(/\{\{(\w+)\}\}/g, '{{ $1 }}');
+    jest
+      .spyOn(Langfuse.prototype, 'getPrompt')
+      .mockResolvedValueOnce({ prompt: template, version: 9 } as never);
+    const service = new PromptService(createConfig());
+    const variables = { reasoning: '输入 $& {{ untouched }}' };
+    const online = await service.render(name, variables);
+    const frozen = await service.render(name, variables, {
+      [name]: { text: template, version: 9 },
+    });
+    expect(online).toEqual(frozen);
+    expect(online.version).toBe(9);
+    expect(online.text).toContain(variables.reasoning);
+    expect(online.text).not.toContain('{{ reasoning }}');
+  });
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -35,11 +57,13 @@ describe('PromptService', () => {
     const result = await service.render(PROMPT_NAMES.agentSpeechContent, { thinking: '推理' });
 
     expect(result).toEqual({
-      text: 'online rendered prompt',
+      text: renderTemplate(FALLBACK_TEMPLATES[PROMPT_NAMES.agentSpeechContent], {
+        thinking: '推理',
+      }),
       name: PROMPT_NAMES.agentSpeechContent,
       version: 7,
     });
-    expect(compile).toHaveBeenCalledWith({ thinking: '推理' });
+    expect(compile).not.toHaveBeenCalled();
   });
 
   it('production prompt 缺少 experience 时回退本地模板，不静默丢弃经验', async () => {

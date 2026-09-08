@@ -21,6 +21,8 @@ export const ACTION_TYPES = {
 
   // —— 夜间角色技能 ——
   WOLF_KILL: 'wolf_kill', // 狼人刀杀
+  WOLF_PROPOSAL: 'wolf_proposal', // 狼队私下提刀
+  WOLF_EXPLODE: 'wolf_explode', // 自爆或保留白天的私下选择
   SEER_CHECK: 'seer_check', // 预言家查验(结果设 visibility='seer')
   WITCH_SAVE: 'witch_save', // 女巫解药
   WITCH_POISON: 'witch_poison', // 女巫毒药
@@ -55,7 +57,7 @@ export const ACTION_TYPES = {
   LOVERS_ANNOUNCE: 'lovers_announce', // 情侣公布(殉情)
 } as const;
 
-export type ActionType = typeof ACTION_TYPES[keyof typeof ACTION_TYPES];
+export type ActionType = (typeof ACTION_TYPES)[keyof typeof ACTION_TYPES];
 
 const ACTION_TYPES_ARRAY = Object.values(ACTION_TYPES);
 export const ActionTypeSchema = z.enum(ACTION_TYPES_ARRAY as [string, ...string[]]);

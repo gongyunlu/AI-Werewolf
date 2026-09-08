@@ -4,6 +4,10 @@ import { FlowProducer, Queue, type JobsOptions, type JobState } from 'bullmq';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JudgeService } from './judge.service';
+import { randomUUID } from 'node:crypto';
+
+export const buildEvaluationRunId = (gameId: string, suffix = '') =>
+  `${gameId}${suffix || '_initial'}`;
 
 export const JUDGE_QUEUE_NAME = 'judge-queue';
 export const JUDGE_FLOW_PRODUCER = 'judge-flow';
@@ -17,6 +21,7 @@ export const JUDGE_JOB_NAMES = {
 
 /** judge 任务数据（按 job.name 区分形状） */
 export interface JudgeJobData {
+  runId?: string;
   gameId: string;
   eventId?: string;
   playerId?: string;
@@ -75,7 +80,7 @@ export class JudgeQueueService {
   }
 
   /**
-   * 列出对局的全部 judge 任务：每个可评估决策一条 + 每个发过言的玩家一条。
+   * 先登记评分批次及全部目标，再生成 judge 任务：每个决策一条 + 每个发过言的玩家一条。
    *
    * jobId 一律用下划线分隔：这些任务会作为 flow 的 child 投递，
    * 而 FlowProducer 会拒绝含冒号的 jobId（普通 queue.add 不校验，只在 flow 路径炸）。
@@ -83,6 +88,8 @@ export class JudgeQueueService {
    * @param suffix - 追加到 jobId 的后缀，用于强制重跑（缺省时 jobId 天然幂等）
    */
   async listGameJobs(gameId: string, suffix = ''): Promise<JudgeJobSpec[]> {
+    const runId = buildEvaluationRunId(gameId, suffix);
+    await this.judgeService.beginEvaluation(gameId, runId);
     const [eventIds, playerIds] = await Promise.all([
       this.judgeService.findJudgeableEvents(gameId),
       this.judgeService.findSpeakingPlayers(gameId),
@@ -91,12 +98,12 @@ export class JudgeQueueService {
     return [
       ...eventIds.map((eventId) => ({
         name: JUDGE_JOB_NAMES.decision,
-        data: { gameId, eventId },
+        data: { gameId, eventId, runId },
         jobId: `${eventId}${suffix}`,
       })),
       ...playerIds.map((playerId) => ({
         name: JUDGE_JOB_NAMES.speeches,
-        data: { gameId, playerId },
+        data: { gameId, playerId, runId },
         jobId: `speeches_${gameId}_${playerId}${suffix}`,
       })),
     ];
@@ -109,7 +116,7 @@ export class JudgeQueueService {
 
   /** 重评对局内全部待评估目标，返回投递数量 */
   async rejudgeGame(gameId: string): Promise<number> {
-    return this.enqueueGameFlow(gameId, `_rejudge_${Date.now()}`);
+    return this.enqueueGameFlow(gameId, `_rejudge_${randomUUID()}`);
   }
 
   /**
@@ -121,7 +128,7 @@ export class JudgeQueueService {
     const completion = {
       name: JUDGE_JOB_NAMES.complete,
       queueName: JUDGE_QUEUE_NAME,
-      data: { gameId },
+      data: { gameId, runId: buildEvaluationRunId(gameId, suffix) },
       opts: {
         ...JUDGE_JOB_OPTIONS,
         jobId: buildJudgeCompleteJobId(gameId, suffix),

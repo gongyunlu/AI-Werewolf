@@ -35,6 +35,24 @@ export class EventWriterService {
   /**
    * 写入预言家查验事件
    */
+  async writeWolfDecisionEvent(options: {
+    gameId: string;
+    day: number;
+    actorId: string;
+    actionType: 'wolf_explode' | 'wolf_proposal';
+    content: Prisma.InputJsonObject;
+  }): Promise<Event> {
+    return this.createEventWithSequence(options.gameId, {
+      day: options.day,
+      phase: options.actionType === 'wolf_explode' ? PHASES.DAY_ANNOUNCE : PHASES.NIGHT,
+      actionType: options.actionType,
+      visibility: VISIBILITY_TYPES.WOLF,
+      actorId: options.actorId,
+      targetIds: [],
+      content: options.content,
+    });
+  }
+
   async writeSeerCheckEvent(options: {
     gameId: string;
     day: number;
@@ -70,6 +88,7 @@ export class EventWriterService {
     day: number;
     targetId?: string | null;
     targetSeatNo?: number;
+    proposalEventIds?: string[];
   }): Promise<Event> {
     const { gameId, day, targetId, targetSeatNo } = options;
 
@@ -83,6 +102,7 @@ export class EventWriterService {
       content: {
         targetSeatNo,
         cause: 'night_kill',
+        proposalEventIds: options.proposalEventIds ?? [],
       },
     });
 
@@ -270,6 +290,7 @@ export class EventWriterService {
     actorId: string;
     voterSeatNo: number;
     targetSeatNo: number;
+    voteRound?: number;
   }): Promise<Event> {
     const { gameId, day, actorId, voterSeatNo, targetSeatNo } = options;
 
@@ -281,6 +302,7 @@ export class EventWriterService {
       actorId,
       targetIds: [],
       content: {
+        voteRound: options.voteRound ?? 0,
         voterSeatNo,
         targetSeatNo,
       },

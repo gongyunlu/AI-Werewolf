@@ -110,6 +110,28 @@ class ApiClient {
     return response.json();
   }
 
+  /** 同一配置启动一对 ON/OFF，沿用批量配对接口。 */
+  async startAbGames(dto: {
+    rulesetId: string;
+    agentIds: string[];
+  }): Promise<{ gameIds: string[]; experimentId: string }> {
+    const response = await fetch(`${this.baseURL}/evaluation/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...dto,
+        count: 1,
+        shuffleAgents: false,
+        experiment: { paired: true, start: true },
+      }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || `启动 A/B 对局失败：${response.statusText}`);
+    }
+    return response.json();
+  }
+
   /**
    * 初始化对局（分配角色）
    */

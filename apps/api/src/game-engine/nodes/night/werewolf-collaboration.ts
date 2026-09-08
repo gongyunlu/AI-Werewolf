@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { FACTIONS } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState, PlayerState } from '../../core/types';
@@ -6,6 +7,7 @@ import { getWolfTeamThreadId } from '@/agent-runtime/thread-id.utils';
 import { PROMPT_NAMES } from '@/observability/prompt-templates';
 import { gameLogger } from '../../utils/game-logger';
 import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
+import { readExperiment } from '@/evaluation/experiment-snapshot';
 
 /**
  * 狼人刀人决策 Schema
@@ -56,12 +58,13 @@ const WOLF_NIGHT_ANCHOR = `## 当前阶段：狼队夜间行动
 不要在这里输出白天的发言稿。`;
 
 /**
- * 单狼决策（两阶段版本）
+ * 单狼决策（理由与动作一并生成）
  */
 export async function singleWolfDecision(
   wolf: PlayerState,
   state: GameGraphState,
   context: NodeContext,
+  proposalEventIds: string[] = [],
 ): Promise<string | null> {
   try {
     const contextData = await context.agentRuntime.prepareContextPublic(
@@ -73,20 +76,8 @@ export async function singleWolfDecision(
 
     const wolfThreadId = getWolfTeamThreadId(state.gameId);
 
-    // 阶段1：流式推理
-    const reasoning = await context.agentRuntime.streamReasoning(
+    const { reasoning, decision } = await context.agentRuntime.decide<ProposeKillDecision>(
       contextData,
-      wolfThreadId,
-      context.signal,
-      (_token) => {
-        // 可选：SSE 推送推理过程
-      },
-    );
-
-    // 阶段2：生成决策
-    const decision = await context.agentRuntime.generateDecision<ProposeKillDecision>(
-      contextData,
-      reasoning,
       ProposeKillDecisionSchema,
       context.signal,
       wolfThreadId,
@@ -95,10 +86,19 @@ export async function singleWolfDecision(
     if (decision.action === 'propose_kill') {
       const targetPlayer = state.players.find((p) => p.seatNo === decision.targetSeatNo);
 
-      if (!targetPlayer) {
+      if (!targetPlayer || !targetPlayer.isAlive) {
         throw new Error(`[单狼决策] 数据一致性错误：未找到目标玩家 ${decision.targetSeatNo}号位`);
       }
 
+      const event = await context.eventWriter.writeWolfDecisionEvent({
+        gameId: state.gameId,
+        day: state.currentDay,
+        actorId: wolf.id,
+        actionType: 'wolf_proposal',
+        content: { targetSeatNo: decision.targetSeatNo, seatNo: wolf.seatNo, thinking: reasoning },
+      });
+      await context.agentRuntime.recordExperienceUsages(contextData, event);
+      proposalEventIds.push(event.id);
       return targetPlayer.id;
     }
 
@@ -140,12 +140,23 @@ async function shouldContinueDiscussion(
   const summary = discussionHistory.map((msg) => `${msg.seatNo}号位: ${msg.content}`).join('\n');
 
   try {
-    const coordinationPrompt = await context.promptService.render(PROMPT_NAMES.wolfCoordination, {
-      discussion: summary,
+    const game = await context.prisma.game.findUnique({
+      where: { id: state.gameId },
+      select: { experiment: true },
     });
+    const experiment = readExperiment(game?.experiment);
+    const coordinationPrompt = await context.promptService.render(
+      PROMPT_NAMES.wolfCoordination,
+      {
+        discussion: summary,
+      },
+      experiment?.prompts,
+    );
 
     const { ChatOpenAI } = await import('@langchain/openai');
-    const modelName = context.configService.get('ARK_DEFAULT_MODEL', { infer: true });
+    const modelName =
+      experiment?.auxiliaryModel ??
+      context.configService.getOrThrow('ARK_DEFAULT_MODEL', { infer: true });
     const model = new ChatOpenAI({
       apiKey: context.configService.get('ARK_API_KEY', { infer: true }),
       model: modelName,
@@ -178,7 +189,7 @@ async function shouldContinueDiscussion(
 }
 
 /**
- * 狼人讨论阶段（两阶段版本）
+ * 狼人讨论阶段（流式发言）
  */
 export async function wolfDiscussion(
   werewolves: PlayerState[],
@@ -188,11 +199,18 @@ export async function wolfDiscussion(
   const discussionHistory: DiscussionMessage[] = [];
   const speechCount = new Map<string, number>();
 
+  const game = await context.prisma.game.findUnique({
+    where: { id: state.gameId },
+    select: { experiment: true },
+  });
+  const experiment = readExperiment(game?.experiment);
   const maxRounds = 2;
   const maxSpeechPerWolf = 2;
 
   for (let round = 0; round < maxRounds; round++) {
-    const shuffled = [...werewolves].toSorted(() => Math.random() - 0.5);
+    const shuffled = experiment
+      ? pairedWolfOrder(werewolves, experiment.pairId, state.currentDay, round)
+      : [...werewolves].toSorted(() => Math.random() - 0.5);
 
     for (const wolf of shuffled) {
       throwIfAborted(context.signal);
@@ -312,13 +330,14 @@ export async function wolfDiscussion(
 }
 
 /**
- * 狼人投票阶段（两阶段版本）
+ * 狼人投票阶段（理由与动作一并生成）
  */
 export async function wolfVoting(
   werewolves: PlayerState[],
   state: GameGraphState,
   context: NodeContext,
   discussion: DiscussionMessage[],
+  proposalEventIds: string[] = [],
 ): Promise<VoteRecord[]> {
   const discussionSummary =
     discussion.length > 0
@@ -336,23 +355,29 @@ export async function wolfVoting(
         discussionSummary,
       );
 
-      // 阶段1：流式推理
-      const reasoning = await context.agentRuntime.streamReasoning(
+      const { reasoning, decision } = await context.agentRuntime.decide<ProposeKillDecision>(
         contextData,
-        wolfThreadId,
-        context.signal,
-      );
-
-      // 阶段2：生成投票决策
-      const decision = await context.agentRuntime.generateDecision<ProposeKillDecision>(
-        contextData,
-        reasoning,
         ProposeKillDecisionSchema,
         context.signal,
         wolfThreadId,
       );
 
       if (decision.action === 'propose_kill') {
+        if (!state.players.some((p) => p.isAlive && p.seatNo === decision.targetSeatNo))
+          throw new Error('狼刀目标不存活');
+        const event = await context.eventWriter.writeWolfDecisionEvent({
+          gameId: state.gameId,
+          day: state.currentDay,
+          actorId: wolf.id,
+          actionType: 'wolf_proposal',
+          content: {
+            targetSeatNo: decision.targetSeatNo,
+            seatNo: wolf.seatNo,
+            thinking: reasoning,
+          },
+        });
+        await context.agentRuntime.recordExperienceUsages(contextData, event);
+        proposalEventIds.push(event.id);
         return {
           voterId: wolf.id,
           voterSeatNo: wolf.seatNo,
@@ -411,4 +436,16 @@ export function selectTargetFromVotes(votes: VoteRecord[], state: GameGraphState
     throw new Error(`[狼人投票] 数据一致性错误：未找到目标玩家 ${targetSeatNo}号位`);
   }
   return player.id;
+}
+
+/** 同一配对使用相同座位排序键，不依赖各局 Player UUID 或墙钟。 */
+export function pairedWolfOrder<T extends { seatNo: number }>(
+  wolves: T[],
+  pairId: string,
+  day: number,
+  round: number,
+): T[] {
+  const key = (wolf: T) =>
+    createHash('sha256').update([pairId, day, round, wolf.seatNo].join(':')).digest('hex');
+  return wolves.toSorted((a, b) => key(a).localeCompare(key(b)) || a.seatNo - b.seatNo);
 }

@@ -1,3 +1,4 @@
+import { LessonConditionsSchema } from '../memory/lesson-applicability';
 import { z } from 'zod';
 import { RoleSchema } from '@ai-werewolf/shared';
 
@@ -65,6 +66,9 @@ export const ReflectionOutputSchema = z.object({
         role: RoleSchema.or(z.literal('any')),
         /** 适用场景：这条经验在哪个场景注入时成立；跨场景才显式填 any */
         scenario: LessonScenarioSchema,
+        conditions: LessonConditionsSchema.describe(
+          '从可枚举事实中列出触发所必需的条件；首夜/后续夜、已救人、已公开讨论等。没有这些限定才填空数组',
+        ),
       }),
     )
     .max(5),

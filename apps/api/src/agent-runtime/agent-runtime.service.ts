@@ -30,6 +30,16 @@ import { isAbortError, throwIfAborted } from './abort.utils';
 import { formatMemorySection } from './memory-prompt.utils';
 import { buildScenarioQuery } from './scenario-query';
 import { ChatHistoryService } from './chat-history.service';
+import {
+  readExperiment,
+  type ExperimentSnapshot,
+  type FrozenPrompts,
+} from '../evaluation/experiment-snapshot';
+import { buildKnowledgeFacts } from '../knowledge/knowledge-policy';
+import {
+  assertExperimentConfiguration,
+  ExperimentInvalidError,
+} from '../evaluation/experiment-integrity';
 
 /**
  * lesson 场景匹配阈值：与当前局面的余弦相似度不低于此值，才把注入记为 trigger 命中。
@@ -55,9 +65,13 @@ interface LayeredContext {
 }
 
 /**
- * Agent 上下文（prepareContext 的产物，贯穿两阶段决策）
+ * Agent 上下文（prepareContext 的产物，贯穿决策与发言）
  */
 interface AgentContext {
+  experiment?: ExperimentSnapshot;
+  prompts?: FrozenPrompts;
+  retrievalId?: string;
+  replay?: Record<string, unknown>;
   systemPrompt: string;
   player: PlayerWithGame;
   game: Prisma.GameGetPayload<Record<string, never>>;
@@ -70,13 +84,12 @@ interface AgentContext {
 }
 
 /**
- * Agent Runtime Service - 两阶段决策模式
+ * Agent Runtime Service - 上下文准备、发言与决策
  *
  * 1. prepareContext - 准备上下文
  * 2. buildLayeredContext - 分层记忆
  * 3. assembleSystemPrompt - 组装 System Prompt（包含 Skill）
- * 4. streamReasoning - 阶段1：流式输出推理过程
- * 5. generateDecision - 阶段2：生成结构化决策
+ * 4. decide - 同次生成理由与结构化动作
  */
 @Injectable()
 export class AgentRuntimeService {
@@ -94,98 +107,6 @@ export class AgentRuntimeService {
     private readonly promptService: PromptService,
     private readonly chatHistory: ChatHistoryService,
   ) {}
-
-  /**
-   * 阶段1：流式输出角色推理过程（纯文本思考）
-   *
-   * @param context 已准备好的上下文（包含 systemPrompt、player、game）
-   * @param threadId 会话 ID
-   * @param signal 中断信号
-   * @param onStreamToken 流式 token 回调
-   * @param onStreamComplete 流式完成回调
-   * @returns 推理文本内容
-   */
-  async streamReasoning(
-    context: AgentContext,
-    threadId: string,
-    signal?: AbortSignal,
-    onStreamToken?: (token: string) => void,
-    onStreamComplete?: (fullContent: string) => void,
-  ): Promise<string> {
-    throwIfAborted(signal);
-    const modelName = context.player.modelName;
-    const model = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
-      model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-      streaming: !!onStreamToken,
-      modelKwargs: {
-        thinking: { type: 'enabled' },
-        reasoning_effort: 'medium',
-      },
-    });
-
-    // 渲染推理指令 prompt，版本关联到本次 trace
-    const humanPrompt = await this.promptService.render(PROMPT_NAMES.agentReasoning);
-
-    const trace = this.langfuse.trace({
-      runName: 'reasoning',
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      scenario: context.scenario,
-      seatNo: context.player.seatNo,
-      role: context.player.role,
-      promptName: humanPrompt.name,
-      promptVersion: humanPrompt.version,
-    });
-
-    const history = await this.loadHistory(threadId);
-
-    const humanMessage = new HumanMessage(humanPrompt.text);
-    const messages: BaseMessage[] = [
-      new SystemMessage(context.systemPrompt),
-      ...history,
-      humanMessage,
-    ];
-
-    let fullContent = '';
-
-    if (onStreamToken) {
-      const stream = await model.stream(messages, { signal, ...trace });
-
-      for await (const chunk of stream) {
-        throwIfAborted(signal);
-
-        if (typeof chunk.content === 'string' && chunk.content) {
-          fullContent += chunk.content;
-          onStreamToken(chunk.content);
-        }
-
-        const reasoningContent = (chunk.additional_kwargs as any)?.reasoning_content;
-        if (typeof reasoningContent === 'string' && reasoningContent) {
-          fullContent += reasoningContent;
-          onStreamToken(reasoningContent);
-        }
-      }
-
-      if (onStreamComplete) {
-        onStreamComplete(fullContent);
-      }
-    } else {
-      throwIfAborted(signal);
-      const response = await model.invoke(messages, { signal, ...trace });
-
-      const responseReasoning = (response.additional_kwargs as any)?.reasoning_content;
-      if (typeof responseReasoning === 'string' && responseReasoning.trim()) {
-        fullContent = responseReasoning;
-      } else if (typeof response.content === 'string' && response.content.trim()) {
-        fullContent = response.content;
-      }
-    }
-
-    return fullContent;
-  }
 
   /**
    * 单次自然语言流式调用（不使用 thinking 模式 / reasoning_content / Structured Output）
@@ -267,7 +188,11 @@ export class AgentRuntimeService {
     };
     const history = await this.loadHistory(threadId);
 
-    const thinkingPrompt = await this.promptService.render(PROMPT_NAMES.agentSpeechThinking);
+    const thinkingPrompt = await this.promptService.render(
+      PROMPT_NAMES.agentSpeechThinking,
+      undefined,
+      context.prompts,
+    );
     const thinkingTrace = this.langfuse.trace({
       runName: 'speech-thinking',
       ...traceParams,
@@ -291,9 +216,13 @@ export class AgentRuntimeService {
 
     throwIfAborted(signal);
     const contentStartTime = Date.now();
-    const contentPrompt = await this.promptService.render(PROMPT_NAMES.agentSpeechContent, {
-      thinking,
-    });
+    const contentPrompt = await this.promptService.render(
+      PROMPT_NAMES.agentSpeechContent,
+      {
+        thinking,
+      },
+      context.prompts,
+    );
     const contentTrace = this.langfuse.trace({
       runName: 'speech-content',
       ...traceParams,
@@ -323,23 +252,26 @@ export class AgentRuntimeService {
     };
   }
 
-  /**
-   * 阶段2：根据推理结果生成结构化决策
-   *
-   * @param context 已准备好的上下文
-   * @param reasoning 阶段1的推理文本
-   * @param zodSchema 决策的 Zod Schema
-   * @param signal 中断信号
-   * @returns 结构化决策对象
-   */
-  async generateDecision<T = any>(
+  /** 在同一次模型调用中形成理由与动作，不再二次转换推理结论。 */
+  async decide<T = any>(
     context: AgentContext,
-    reasoning: string,
     zodSchema: z.ZodType,
     signal?: AbortSignal,
     threadId?: string,
-  ): Promise<T> {
+  ): Promise<{ reasoning: string; decision: T }> {
     throwIfAborted(signal);
+    const outputSchema = z.object({
+      reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
+      decision: zodSchema,
+    });
+    const history = threadId ? await this.loadHistory(threadId) : [];
+    if (context.replay)
+      Object.assign(context.replay, {
+        schema: z.toJSONSchema(zodSchema),
+        outputSchema: z.toJSONSchema(outputSchema),
+        decisionMode: 'joint',
+        reasoningHistory: history.map((m) => ({ type: m.getType(), content: m.content })),
+      });
     const modelName = context.player.modelName;
     const baseModel = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
@@ -349,18 +281,15 @@ export class AgentRuntimeService {
     });
 
     // GLM 系列不支持 json_schema，须走 functionCalling；其余默认 jsonSchema（见 resolveStructuredOutputMethod）
-    const model = baseModel.withStructuredOutput(zodSchema, {
+    const model = baseModel.withStructuredOutput(outputSchema, {
       method: resolveStructuredOutputMethod(modelName),
     });
 
-    const [systemPrompt, userPrompt] = await Promise.all([
-      this.promptService.render(PROMPT_NAMES.agentDecisionSystem, {
-        systemPrompt: context.systemPrompt,
-      }),
-      this.promptService.render(PROMPT_NAMES.agentDecisionUser, {
-        reasoning,
-      }),
-    ]);
+    const systemPrompt = await this.promptService.render(
+      PROMPT_NAMES.agentActionSystem,
+      { systemPrompt: context.systemPrompt },
+      context.prompts,
+    );
 
     const trace = this.langfuse.trace({
       runName: 'decision',
@@ -370,13 +299,14 @@ export class AgentRuntimeService {
       scenario: context.scenario,
       seatNo: context.player.seatNo,
       role: context.player.role,
-      promptName: userPrompt.name,
-      promptVersion: userPrompt.version,
+      promptName: systemPrompt.name,
+      promptVersion: systemPrompt.version,
     });
 
     const baseMessages: BaseMessage[] = [
       new SystemMessage(systemPrompt.text),
-      new HumanMessage(userPrompt.text),
+      ...history,
+      new HumanMessage('请提交本次的 reasoning 和 decision，理由与最终动作必须一致。'),
     ];
 
     // function calling 模式下，模型不调用工具会抛异常（而非返回非法对象），
@@ -401,25 +331,29 @@ export class AgentRuntimeService {
           scenario: context.scenario,
           seatNo: context.player.seatNo,
           role: context.player.role,
-          promptName: userPrompt.name,
-          promptVersion: userPrompt.version,
+          promptName: systemPrompt.name,
+          promptVersion: systemPrompt.version,
         }),
       });
     }
 
     // Zod 兜底校验：结构已由 structured output 层保证，此处仅做字段级校验
-    decision = zodSchema.parse(decision);
+    const result = outputSchema.parse(decision);
+    if (context.replay)
+      Object.assign(context.replay, {
+        reasoning: result.reasoning,
+        decision: result.decision,
+      });
 
     // 保存决策结论到跨轮记忆（只存结论，不存推理过程）
     if (threadId) {
-      const history = await this.loadHistory(threadId);
       await this.saveHistory(threadId, [
         ...history,
-        new AIMessage(`决策结果：${JSON.stringify(decision)}`),
+        new AIMessage(`决策结果：${JSON.stringify(result.decision)}`),
       ]);
     }
 
-    return decision as T;
+    return { reasoning: result.reasoning, decision: result.decision as T };
   }
 
   /**
@@ -454,12 +388,16 @@ export class AgentRuntimeService {
     playerId: string,
     scenario: AgentScenario,
     additionalContext?: string,
+    actionType?: string,
+    voteRound = 0,
   ): Promise<AgentContext> {
     return this.prepareContext({
       gameId,
       playerId,
       scenario,
       additionalContext,
+      actionType,
+      voteRound,
     });
   }
 
@@ -474,7 +412,11 @@ export class AgentRuntimeService {
     event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
   ): Promise<void> {
     // memory 与 knowledge 任一注入待确认都应继续走到下方各自记录
-    if (context.pendingMemoryUsages.length === 0 && context.pendingKnowledgeUsages.length === 0) {
+    if (
+      !context.replay &&
+      context.pendingMemoryUsages.length === 0 &&
+      context.pendingKnowledgeUsages.length === 0
+    ) {
       return;
     }
     if (
@@ -495,17 +437,53 @@ export class AgentRuntimeService {
       return;
     }
 
-    await this.memoryService.recordUsages(
-      context.pendingMemoryUsages.map((usage) => ({
-        ...usage,
-        eventId: event.id,
-        gameId: event.gameId,
-        playerId: context.player.id,
-        scenario: context.scenario,
-        actionType: event.actionType,
-        day: event.day!,
-      })),
-    );
+    if (context.replay) {
+      try {
+        await this.prisma.decisionContext.upsert({
+          where: { eventId: event.id },
+          update: {},
+          create: {
+            eventId: event.id,
+            gameId: event.gameId,
+            playerId: context.player.id,
+            snapshot: JSON.parse(JSON.stringify(context.replay)) as Prisma.InputJsonValue,
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          { eventId: event.id, err: error instanceof Error ? error.message : String(error) },
+          '决策快照保存失败，该事件不可用于受控重放',
+        );
+        if (context.experiment)
+          throw new ExperimentInvalidError('实验决策输入快照保存失败', { cause: error });
+      }
+    }
+    if (context.retrievalId) {
+      try {
+        await this.prisma.knowledgeRetrieval.updateMany({
+          where: { id: context.retrievalId, eventId: null },
+          data: { eventId: event.id },
+        });
+      } catch (error) {
+        this.logger.warn(
+          { eventId: event.id, err: error instanceof Error ? error.message : String(error) },
+          '检索日志关联失败',
+        );
+      }
+    }
+    // 实验使用证据保存在快照，避免实验行为改变普通对局的记忆热度和排序。
+    if (!context.experiment)
+      await this.memoryService.recordUsages(
+        context.pendingMemoryUsages.map((usage) => ({
+          ...usage,
+          eventId: event.id,
+          gameId: event.gameId,
+          playerId: context.player.id,
+          scenario: context.scenario,
+          actionType: event.actionType,
+          day: event.day!,
+        })),
+      );
 
     // 攻略注入同样延迟到行为 Event 落库后确认，保证只记真实生效的注入
     if (context.pendingKnowledgeUsages.length > 0) {
@@ -559,6 +537,8 @@ export class AgentRuntimeService {
     playerId: string;
     scenario: AgentScenario;
     additionalContext?: string;
+    actionType?: string;
+    voteRound?: number;
   }): Promise<AgentContext> {
     const { gameId, playerId, scenario, additionalContext } = input;
 
@@ -571,6 +551,9 @@ export class AgentRuntimeService {
     if (!player || player.gameId !== gameId) {
       throw new Error('玩家不存在或不属于该对局');
     }
+    const experiment = readExperiment(player.game.experiment);
+    if (experiment)
+      assertExperimentConfiguration(experiment, this.configService.get('ARK_EMBEDDING_MODEL'));
 
     // 2. 查询 Event 历史（按权限过滤）
     // 女巫需要先查询所有事件来判断是否使用过解药
@@ -600,18 +583,27 @@ export class AgentRuntimeService {
       });
     }
 
-    // 投票是并发同时执行：决策时点不应看到本轮其他人的投票，避免视角泄漏
+    // 投票是并发同时执行：决策时点不应看到本轮其他人的投票，保留已经结束的投票轮次
     if (scenario === AGENT_SCENARIOS.VOTE) {
       const voteDay = await this.getCurrentRound(gameId, events);
-      events = events.filter((e) => !(e.actionType === ACTION_TYPES.VOTE && e.day === voteDay));
+      events = events.filter(
+        (e) =>
+          !(
+            e.actionType === ACTION_TYPES.VOTE &&
+            e.day === voteDay &&
+            Number((e.content as Record<string, unknown>).voteRound ?? 0) >= (input.voteRound ?? 0)
+          ),
+      );
     }
 
     // 3. 查询 Memory
-    const memories = await this.memoryService.retrieveActiveMemories(
-      player.agentId,
-      player.memoryLabelSnapshot,
-      { types: ['persona', 'strategy'] },
-    );
+    let memories = experiment
+      ? []
+      : await this.memoryService.retrieveActiveMemories(
+          player.agentId,
+          player.memoryLabelSnapshot,
+          { types: ['persona', 'strategy'] },
+        );
 
     // 4. 构建分层上下文
     const layeredContext = await this.buildLayeredContext({
@@ -637,35 +629,70 @@ export class AgentRuntimeService {
       where: { gameId, id: { not: playerId } },
       select: { agentId: true },
     });
-    const experience = await this.memoryService.retrieveExperience({
+    const actionType =
+      input.actionType ??
+      {
+        day_speech: 'speech',
+        last_words: 'speech',
+        vote: 'vote',
+        sheriff_decide_order: 'sheriff_decide_order',
+      }[scenario] ??
+      (player.role === ROLES.SEER
+        ? 'seer_check'
+        : player.role === ROLES.WEREWOLF
+          ? 'wolf_kill'
+          : 'night_action');
+    const query = `${buildScenarioQuery({ role: player.role, scenario, day: currentDay, events })}\n板子：${player.game.rulesetId}\n动作：${actionType}\n${additionalContext ?? ''}`;
+    const situation = {
+      rulesetId: player.game.rulesetId,
+      actionType,
+      facts: buildKnowledgeFacts({ day: currentDay, playerId, seatNo: player.seatNo, events }),
+    };
+    const experienceInput = {
       agentId: player.agentId,
       label: player.memoryLabelSnapshot,
       opponentAgentIds: opponents.map((o) => o.agentId),
-      query: buildScenarioQuery({
-        role: player.role,
-        scenario,
-        day: currentDay,
-        events,
-      }),
+      query,
+      facts: situation.facts,
       role: player.role,
       scenario,
-    });
+    };
+    const frozen = experiment
+      ? await this.memoryService.retrieveFrozen(experiment, experienceInput).catch((error) => {
+          throw new ExperimentInvalidError('实验冻结记忆检索失败', { cause: error });
+        })
+      : undefined;
+    const experience = frozen ?? (await this.memoryService.retrieveExperience(experienceInput));
+    if (frozen) memories = frozen.active;
     const pendingMemoryUsages = this.buildPendingMemoryUsages(experience);
 
     // 全局板子规律：跨对局晋升验证，与身份无关，全量注入所有玩家
-    const globalPatterns = await this.globalMemoryService.retrieveActivePatterns();
+    const globalPatterns =
+      experiment?.globalPatterns ?? (await this.globalMemoryService.retrieveActivePatterns());
 
-    // 攻略知识库：外部静态战术（清洗+蒸馏后的知识块）。检索失败降级为空，不阻断对局。
-    const knowledgeHits = await this.knowledgeService.retrieve(
-      buildScenarioQuery({
-        role: player.role,
-        scenario,
-        day: currentDay,
-        events,
-      }),
-      player.role,
-      scenario,
-    );
+    // 攻略知识库：外部静态战术。普通局允许检索降级，冻结实验在检索失效时中止。
+    // KNOWLEDGE_INJECTION 关闭时跳过检索（A/B 对照实验），返回空攻略。
+    let retrievalId: string | undefined;
+    const injectionEnabled = experiment
+      ? experiment.arm === 'on'
+      : this.configService.get('KNOWLEDGE_INJECTION', { infer: true });
+    const knowledgeHits = injectionEnabled
+      ? await this.knowledgeService
+          .retrieve(query, player.role, scenario, {
+            situation,
+            gameId,
+            playerId,
+            chunkIds: experiment?.knowledgeChunkIds,
+            strict: Boolean(experiment),
+            onAudit: (id) => {
+              retrievalId = id;
+            },
+          })
+          .catch((error) => {
+            if (experiment) throw new ExperimentInvalidError('实验攻略检索失败', { cause: error });
+            throw error;
+          })
+      : [];
 
     const visiblePlayerSeats = otherPlayers
       .map((p) => p.seatNo)
@@ -688,7 +715,18 @@ export class AgentRuntimeService {
         : '';
 
     // 6. 组装 System Prompt
-    const systemPrompt = await this.assembleSystemPrompt({
+    const prompts =
+      experiment?.prompts ??
+      (await this.promptService.captureSnapshot([
+        PROMPT_NAMES.agentSystemPrompt,
+        PROMPT_NAMES.agentReasoning,
+        PROMPT_NAMES.agentSpeechThinking,
+        PROMPT_NAMES.agentSpeechContent,
+        PROMPT_NAMES.agentDecisionSystem,
+        PROMPT_NAMES.agentDecisionUser,
+      ]));
+    const assembly = {
+      prompts,
       scenario,
       player,
       memories,
@@ -699,10 +737,34 @@ export class AgentRuntimeService {
       additionalContext: [speechSummary, wolfDiscussionContext, additionalContext]
         .filter(Boolean)
         .join('\n\n'),
-    });
+    };
+    const systemPrompt = await this.assembleSystemPrompt(assembly);
+    const baseSystemPrompt = knowledgeHits.length
+      ? await this.assembleSystemPrompt({ ...assembly, knowledgeHits: [] })
+      : systemPrompt;
 
     return {
       systemPrompt,
+      experiment,
+      prompts,
+      retrievalId,
+      replay: {
+        version: 1,
+        baseSystemPrompt,
+        systemPrompt,
+        modelName: player.modelName,
+        role: player.role,
+        scenario,
+        query,
+        situation,
+        knowledgeHits,
+        injectionEnabled: Boolean(injectionEnabled),
+        evidence: events,
+        memoryIds: [...memories, ...experience.lessons, ...experience.playerModels].map(
+          (m) => m.id,
+        ),
+        prompts,
+      },
       player,
       game: player.game,
       scenario,
@@ -789,6 +851,8 @@ export class AgentRuntimeService {
                   return `- ${content.voterSeatNo}号位投票给 ${content.targetSeatNo}号位`;
                 case ACTION_TYPES.PLAYER_DIED:
                   return `- 死亡公告：${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
+                case ACTION_TYPES.JUDGE_ANNOUNCE:
+                  return typeof content.content === 'string' ? `- ${content.content}` : null;
                 default:
                   return `- ${e.actionType}`;
               }
@@ -809,6 +873,7 @@ export class AgentRuntimeService {
                   ACTION_TYPES.SEER_CHECK,
                   ACTION_TYPES.PLAYER_DIED,
                   ACTION_TYPES.PLAYER_EXECUTED,
+                  ACTION_TYPES.JUDGE_ANNOUNCE,
                 ] as string[]
               ).includes(e.actionType),
             )
@@ -824,6 +889,10 @@ export class AgentRuntimeService {
                   return `Day ${dayLabel}: 死亡 ${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
                 case ACTION_TYPES.PLAYER_EXECUTED:
                   return `Day ${dayLabel}: 放逐 ${content.targetSeatNo}号位`;
+                case ACTION_TYPES.JUDGE_ANNOUNCE:
+                  return typeof content.content === 'string'
+                    ? `Day ${dayLabel}: ${content.content}`
+                    : '';
                 default:
                   return '';
               }
@@ -878,11 +947,12 @@ export class AgentRuntimeService {
    * - 角色特定历史（预言家查验记录）+ 分层上下文
    */
   private async assembleSystemPrompt(options: {
+    prompts?: FrozenPrompts;
     scenario: AgentScenario;
     player: PlayerWithGame;
     memories: ActiveMemory[];
     experience: { lessons: ActiveMemory[]; playerModels: ActiveMemory[] };
-    globalPatterns: ActivePattern[];
+    globalPatterns: Pick<ActivePattern, 'title' | 'content'>[];
     knowledgeHits: KnowledgeHit[];
     context: LayeredContext;
     additionalContext?: string;
@@ -900,12 +970,16 @@ export class AgentRuntimeService {
 
     // 获取游戏的技能版本
     const skillVersion = player.game.skillVersion || 'v1';
+    const experiment = readExperiment(player.game.experiment);
+    const loadSkill = async (id: string) => {
+      if (!experiment) return this.skillLoader.loadRequiredSkill(id, skillVersion);
+      const content = experiment.skills[id];
+      if (content === undefined) throw new ExperimentInvalidError(`实验快照缺少 skill: ${id}`);
+      return { content };
+    };
 
     // 当前板子规则（按 rulesetId 加载，例如 rulesets/standard6p）
-    const rulesetSkill = await this.skillLoader.loadRequiredSkill(
-      `rulesets/${player.game.rulesetId}`,
-      skillVersion,
-    );
+    const rulesetSkill = await loadSkill(`rulesets/${player.game.rulesetId}`);
     const rulesetRules = rulesetSkill.content;
 
     // 场景指令（根据当前 scenario 加载）
@@ -917,14 +991,11 @@ export class AgentRuntimeService {
       [AGENT_SCENARIOS.SHERIFF_DECIDE_ORDER]: 'scenarios/sheriff-decide-order',
     };
     const scenarioSkillId = scenarioMap[scenario];
-    const scenarioSkill = await this.skillLoader.loadRequiredSkill(scenarioSkillId, skillVersion);
+    const scenarioSkill = await loadSkill(scenarioSkillId);
     const scenarioPrompt = scenarioSkill.content;
 
     // 角色玩法正文（按 player.role 条件加载，例如 roles/werewolf）
-    const roleSkill = await this.skillLoader.loadRequiredSkill(
-      `roles/${player.role}`,
-      skillVersion,
-    );
+    const roleSkill = await loadSkill(`roles/${player.role}`);
     const roleSkillContent = roleSkill.content;
 
     // 基础角色信息（只告诉玩家自己的身份）
@@ -994,23 +1065,27 @@ export class AgentRuntimeService {
     }
 
     // 组合完整 System Prompt（渐进式披露），骨架模板走 PromptService 便于在线调整
-    const fullPrompt = await this.promptService.render(PROMPT_NAMES.agentSystemPrompt, {
-      roleView,
-      teammateInfo,
-      scenarioPrompt,
-      roleSkill: roleSkillContent,
-      additionalContext: additionalContext ? `\n${additionalContext}\n` : '',
-      rulesetRules,
-      persona: personaMemory || '暂无',
-      strategy: strategyMemory || '暂无',
-      globalPattern: globalPatternSection || '暂无',
-      experience: experienceSection || '暂无',
-      knowledge: knowledgeSection || '暂无',
-      roleSpecificInfo,
-      critical: context.critical,
-      recent: context.recent,
-      history: context.history,
-    });
+    const fullPrompt = await this.promptService.render(
+      PROMPT_NAMES.agentSystemPrompt,
+      {
+        roleView,
+        teammateInfo,
+        scenarioPrompt,
+        roleSkill: roleSkillContent,
+        additionalContext: additionalContext ? `\n${additionalContext}\n` : '',
+        rulesetRules,
+        persona: personaMemory || '暂无',
+        strategy: strategyMemory || '暂无',
+        globalPattern: globalPatternSection || '暂无',
+        experience: experienceSection || '暂无',
+        knowledge: knowledgeSection || '暂无',
+        roleSpecificInfo,
+        critical: context.critical,
+        recent: context.recent,
+        history: context.history,
+      },
+      options.prompts ?? experiment?.prompts,
+    );
 
     return fullPrompt.text;
   }

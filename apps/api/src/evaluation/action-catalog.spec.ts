@@ -29,13 +29,34 @@ describe('行为目录', () => {
     ).toBe('女巫未使用解药');
   });
 
-  it('弃票不算决策', () => {
+  it('弃票不算独立决策，但在上下文中明确显示为弃票', () => {
     expect(isJudgeableAction(ACTION_TYPES.VOTE, { targetSeatNo: 0 })).toBe(false);
     expect(isJudgeableAction(ACTION_TYPES.VOTE, {})).toBe(false);
+    expect(
+      renderActionLine(
+        ACTION_TYPES.VOTE,
+        { voterSeatNo: 5, targetSeatNo: 0, voteRound: 0 },
+        VISIBILITY_TYPES.PUBLIC,
+      ),
+    ).toBe('5号位弃票');
   });
 
-  it('狼刀不逐条送评（事件无 actorId），但渲染进上下文', () => {
-    expect(isJudgeableAction(ACTION_TYPES.WOLF_KILL, { targetSeatNo: 3 })).toBe(false);
+  it('系统发言顺序公告进入上下文，但不单独评分', () => {
+    const content = {
+      speechOrder: [2, 3, 4, 5, 6, 1],
+      startSeatNo: 2,
+      direction: 'clockwise',
+      reason: 'time_rule_25_clockwise',
+      message: '今天的发言顺序: 2 → 3 → 4 → 5 → 6 → 1',
+    };
+    expect(isJudgeableAction(ACTION_TYPES.SPEECH_ORDER_DETERMINED, content)).toBe(false);
+    expect(
+      renderActionLine(ACTION_TYPES.SPEECH_ORDER_DETERMINED, content, VISIBILITY_TYPES.PUBLIC),
+    ).toBe(content.message);
+  });
+
+  it('狼刀作为团队决策送评，并渲染进上下文', () => {
+    expect(isJudgeableAction(ACTION_TYPES.WOLF_KILL, { targetSeatNo: 3 })).toBe(true);
     expect(
       renderActionLine(ACTION_TYPES.WOLF_KILL, { targetSeatNo: 3 }, VISIBILITY_TYPES.WOLF_KILL),
     ).toBe('狼人刀了 3号位');

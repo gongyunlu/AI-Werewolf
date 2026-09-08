@@ -7,6 +7,7 @@ export const PROMPT_NAMES = {
   agentReasoning: 'agent/reasoning',
   agentSpeechThinking: 'agent/speech-thinking',
   agentSpeechContent: 'agent/speech-content',
+  agentActionSystem: 'agent/action-system',
   agentDecisionSystem: 'agent/decision-system',
   agentDecisionUser: 'agent/decision-user',
   judgeSystem: 'judge/system',
@@ -51,7 +52,7 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
 
     ## 狼人杀基础规则
     - 游戏目标：好人阵营投出所有狼人；狼人阵营屠边（杀光所有神职或所有平民）或好人数量 ≤ 狼人数量
-    - 昼夜流程：夜晚狼人刀人 → 预言家查验 → 女巫用药；白天公布死讯 → 发言讨论 → 投票放逐
+    - 昼夜流程：夜晚狼人刀人 → 女巫用药（先解药、后毒药，同夜只能用一种）→ 预言家查验；白天公布死讯 → 发言讨论 → 投票放逐
     - 胜负判定：狼人全部出局 → 好人胜；好人数量 ≤ 狼人数量 → 狼人胜
 
     ## 核心术语
@@ -108,6 +109,14 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     请基于以上思考，输出你的发言内容。直接输出发言正文，不要重复自我介绍，不要任何前缀、标题、JSON 或额外解释。
   `,
 
+  [PROMPT_NAMES.agentActionSystem]: `
+    {{systemPrompt}}
+
+    ## 本次决策输出
+    本次以此结构化输出要求为准：在同一个结果中提交 reasoning（最终动作的简明理由）和 decision（合法动作）。
+    先核对本局事实、合法候选与阵营收益，再形成一致的理由和动作；不要另外生成一份等待转换的行动计划。
+    若选择不用药或弃权，理由必须解释这一最终选择，不能一边决定救人一边提交 skip。
+  `,
   [PROMPT_NAMES.agentDecisionSystem]: `
     {{systemPrompt}}
 
@@ -244,6 +253,7 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
        - trigger：什么局面下这条经验适用（下一局靠它匹配场景，必须是可复现的局面描述）
        - action：该局面下具体怎么做
        - evidence：本局支撑该结论的事实
+       - conditions：把 trigger 必需的事实写为结构化条件数组，如 first_night、after_first_night、public_discussion、has_saved、has_check、has_wolf_check、antidote_unused、poison_unused、self_targeted；具体含义以当前角色可见事件为准
        - role：这条经验适用于哪个角色，填英文枚举（villager/seer/witch/hunter/guard/werewolf 等）；只有对任何身份都成立才填 any
        - scenario：这条经验在哪个场景适用（vote=投票/day_speech=白天发言/night_action=夜间行动/last_words=遗言/sheriff_decide_order=警长定序）；跨场景才填 any
     3. playerModels：对每个同桌对手的建模，覆盖此前的旧建模。
@@ -253,6 +263,8 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     - trigger 必须是局面条件，不能是「我应该更谨慎」这类没有触发条件的空话
     - role 角色专属的经验（「预言家带队」「女巫用药」）必须填具体角色，不能填 any，否则会错误注入给别的角色
     - playerModels 里的 agentName 只能取自给出的同桌名单，写的是这个对手的稳定倾向（发言风格、悍跳习惯、投票偏好），不是他这一局拿了什么牌
+    - 触发条件必须在行动之前成立，不能根据死者遗言决定此前的首夜救人；公开讨论/救人/查验尚未发生时，不得使用其结果。
+    - 银水不等于金水，银水被查杀不能直接证明预言家为假；历史角色行为不证明下一局随机身份。
     - 没有把握的少写，写错的经验会持续污染后续对局
   `,
 
@@ -348,7 +360,7 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
  */
 export function renderTemplate(template: string, variables?: Record<string, string>): string {
   if (!variables) return template;
-  return template.replace(/\{\{(\w+)\}\}/g, (_match, key: string) => variables[key] ?? '');
+  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_match, key: string) => variables[key] ?? '');
 }
 
 /**

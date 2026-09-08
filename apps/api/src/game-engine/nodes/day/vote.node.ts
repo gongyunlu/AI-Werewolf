@@ -118,20 +118,8 @@ export class VoteNode {
 
       const threadId = getPlayerThreadId(state.gameId, voter.id);
 
-      // 1. 推理
-      const reasoning = await this.agentRuntime.streamReasoning(
+      const { decision } = await this.agentRuntime.decide<VoteDecision>(
         contextData,
-        threadId,
-        context.signal,
-        (_token) => {
-          // 投票推理不对外广播
-        },
-      );
-
-      // 2. 决策
-      const decision = await this.agentRuntime.generateDecision<VoteDecision>(
-        contextData,
-        reasoning,
         buildVoteSchema(legalSeatNos),
         context.signal,
         threadId,

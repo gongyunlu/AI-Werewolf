@@ -15,6 +15,10 @@ const envSchema = z.object({
   ARK_DEFAULT_MODEL: z.string().min(1),
   ARK_EMBEDDING_MODEL: z.string().min(1).default('doubao-embedding-vision'), // Memory 向量化模型
   JUDGE_MODEL: emptyToUndefined, // 决策质量评估模型，缺省回退 ARK_DEFAULT_MODEL
+  KNOWLEDGE_INJECTION: z.preprocess(
+    (v) => (typeof v === 'string' ? v.toLowerCase() === 'true' : v),
+    z.boolean().default(true),
+  ), // 攻略知识库注入开关，off 时决策链跳过攻略检索（A/B 对照实验用）
   GAME_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(1),
   SKILLS_DIR: z.string().optional(),
   PROMPTS_DIR: z.string().optional(),

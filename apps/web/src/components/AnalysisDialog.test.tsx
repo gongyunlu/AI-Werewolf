@@ -64,6 +64,30 @@ describe('AnalysisDialog', () => {
     });
   });
 
+  it('A/B 入口提供独立评分和反思操作，说明不写回经验', async () => {
+    render(<AnalysisDialog gameId="ab-game" experiment onOpenChange={vi.fn()} />);
+    await screen.findByText('4 / 4');
+    expect(screen.getByText(/不写回经验、对手建模或全局记忆/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '开始分析' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'A/B 反思' }));
+    await waitFor(() =>
+      expect(apiClientMock.analyzeGame).toHaveBeenCalledWith('ab-game', {
+        judge: false,
+        reflect: true,
+        force: true,
+      }),
+    );
+    await screen.findByText(/已投递/);
+    fireEvent.click(screen.getByRole('button', { name: 'A/B 评分' }));
+    await waitFor(() =>
+      expect(apiClientMock.analyzeGame).toHaveBeenCalledWith('ab-game', {
+        judge: true,
+        reflect: false,
+        force: true,
+      }),
+    );
+  });
+
   it('重跑反思只投反思并强制重跑', async () => {
     render(<AnalysisDialog gameId="game-1" onOpenChange={vi.fn()} />);
     await screen.findByText('4 / 4');

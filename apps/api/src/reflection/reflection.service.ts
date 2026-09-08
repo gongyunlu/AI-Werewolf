@@ -57,9 +57,15 @@ export class ReflectionService {
    * 为单个玩家生成反思并写入记忆。
    *
    * @param force - 已生成时是否重跑；重跑会先软删除本局旧记忆，避免新旧两套经验并存
+   * @param writeLearning - 实验任务为 false，仅保存该局的反思报告
    * @returns 写入的记忆条数，跳过时为 0
    */
-  async reflect(gameId: string, playerId: string, force = false): Promise<number> {
+  async reflect(
+    gameId: string,
+    playerId: string,
+    force = false,
+    writeLearning = true,
+  ): Promise<number> {
     const player = await this.prisma.player.findUnique({
       where: { id: playerId },
       select: {
@@ -189,6 +195,18 @@ export class ReflectionService {
         promptVersion: userPrompt.version,
       });
 
+      if (!writeLearning) {
+        // 实验反思仅作该局分析材料，原子合并 metadata，不进入经验、建模或向量库。
+        await this.prisma.$executeRaw`
+          UPDATE agent_performances
+          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{experimentReflection}', ${JSON.stringify(output)}::jsonb),
+              reflection_generated = true
+          WHERE game_id = ${gameId}::uuid AND player_id = ${playerId}::uuid
+            AND (${force} OR reflection_generated = false)
+        `;
+        return 0;
+      }
+
       // 只接受名单内的对手，防止模型编造出不存在的 Agent
       const validModels = output.playerModels.filter((model) =>
         opponentByName.has(model.agentName),
@@ -222,6 +240,7 @@ export class ReflectionService {
             evidence: lesson.evidence,
             role: lesson.role,
             scenario: lesson.scenario,
+            conditions: lesson.conditions,
           },
         })),
         ...validModels.map((model) => ({

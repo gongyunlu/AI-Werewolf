@@ -44,12 +44,48 @@ function makeRow(overrides: Record<string, unknown> = {}) {
     content: '当预言家遇到悍跳狼，状态、逻辑、警徽流三点',
     article_title: '当预言家遇上悍跳狼怎么办',
     section_title: '不慌不忙，表明立场',
+    source_file: String(overrides.id ?? 'source'),
+    applicability: {
+      reviewed: true,
+      rulesets: ['standard6p'],
+      actionTypes: ['seer_check'],
+      allFacts: [],
+    },
     similarity: 0.72,
     ...overrides,
   };
 }
 
 describe('KnowledgeService', () => {
+  it('实验检索成功但审计落库失败时仍返回实际检索结果', async () => {
+    const db = {
+      $queryRaw: jest.fn().mockResolvedValue([makeRow()]),
+      knowledgeRetrieval: { create: jest.fn().mockRejectedValue(new Error('audit unavailable')) },
+    };
+    const embedding = createMockEmbeddingService();
+    (embedding.embedText as jest.Mock).mockResolvedValue([1]);
+    const strictService = new KnowledgeService(db as never, embedding);
+    await expect(
+      strictService.retrieve('查验', 'seer', 'night_action', {
+        strict: true,
+        gameId: 'g',
+        playerId: 'p',
+        situation: { rulesetId: 'standard6p', actionType: 'seer_check', facts: [] },
+      }),
+    ).resolves.toEqual([expect.objectContaining({ id: makeRow().id, action: makeRow().action })]);
+  });
+  it('实验严格检索在 embedding 失败时抛错，不返回空攻略', async () => {
+    const db = createMockPrisma();
+    const embedding = createMockEmbeddingService();
+    (embedding.embedText as jest.Mock).mockRejectedValue(new Error('embedding timeout'));
+    const strictService = new KnowledgeService(db, embedding);
+    await expect(
+      strictService.retrieve('查验', 'seer', 'night_action', {
+        strict: true,
+        situation: { rulesetId: 'standard6p', actionType: 'seer_check', facts: [] },
+      }),
+    ).rejects.toThrow('embedding timeout');
+  });
   let prisma: ReturnType<typeof createMockPrisma>;
   let embeddingService: ReturnType<typeof createMockEmbeddingService>;
   let service: KnowledgeService;
@@ -74,7 +110,9 @@ describe('KnowledgeService', () => {
     ];
     (prisma.$queryRaw as jest.Mock).mockResolvedValue(rows);
 
-    const result = await service.retrieve('我是女巫，夜里该不该救刀口', 'witch', 'night_action');
+    const result = await service.retrieve('选择查验', 'seer', 'night_action', {
+      situation: { rulesetId: 'standard6p', actionType: 'seer_check', facts: [] },
+    });
 
     // 服务按 SQL 返回顺序（已降序）保序过滤 + 截取前 4，不重排
     expect(result.map((hit) => hit.id)).toEqual(['a', 'c', 'd', 'e']);

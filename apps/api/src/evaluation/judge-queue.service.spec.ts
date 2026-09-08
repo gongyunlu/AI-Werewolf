@@ -13,6 +13,7 @@ const GAME_ID = '00000000-0000-4000-8000-000000000001';
 function createHarness() {
   const queue = { add: jest.fn(), getJobs: jest.fn(), getJob: jest.fn() };
   const judge = {
+    beginEvaluation: jest.fn(),
     findJudgeableEvents: jest.fn().mockResolvedValue(['event-1']),
     findSpeakingPlayers: jest.fn().mockResolvedValue(['player-1']),
   };
@@ -36,7 +37,7 @@ describe('JudgeQueueService', () => {
       expect.objectContaining({
         name: JUDGE_JOB_NAMES.complete,
         queueName: JUDGE_QUEUE_NAME,
-        data: { gameId: GAME_ID },
+        data: expect.objectContaining({ gameId: GAME_ID, runId: `${GAME_ID}_initial` }),
         opts: expect.objectContaining({ jobId: buildJudgeCompleteJobId(GAME_ID) }),
         children: [
           expect.objectContaining({
@@ -63,7 +64,7 @@ describe('JudgeQueueService', () => {
     expect(flowProducer.add).not.toHaveBeenCalled();
     expect(queue.add).toHaveBeenCalledWith(
       JUDGE_JOB_NAMES.complete,
-      { gameId: GAME_ID },
+      { gameId: GAME_ID, runId: `${GAME_ID}_initial` },
       expect.objectContaining({ jobId: buildJudgeCompleteJobId(GAME_ID) }),
     );
   });

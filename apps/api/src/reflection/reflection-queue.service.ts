@@ -20,6 +20,7 @@ export const REFLECT_JOB_NAMES = {
 } as const;
 
 export interface ReflectFanoutJobData {
+  evaluationRunId?: string;
   gameId: string;
   force?: boolean;
   /** 只反思指定玩家；缺省反思全部玩家 */

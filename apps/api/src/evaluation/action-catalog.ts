@@ -16,7 +16,7 @@ interface ActionMeta {
   /**
    * 该事件是否作为独立决策逐条送评。
    * 不填 = 不评（系统播报与流程事件）；填函数以排除「未用药」这类空行动。
-   * 发言不在此列：发言按玩家整局批量评分，不逐条进队列。
+   * 发言不在此列：队列按玩家调度，每条发言单独评分。
    */
   judgeable?: (content: EventContent) => boolean;
   /** 渲染成决策上下文的一行；返回 null 表示该事件不进上下文 */
@@ -51,7 +51,14 @@ const ACTION_CATALOG: Record<string, ActionMeta> = {
   [ACTION_TYPES.VOTE]: {
     label: '投票',
     judgeable: (c) => typeof c.targetSeatNo === 'number' && c.targetSeatNo > 0,
-    render: (c) => `${c.voterSeatNo}号位投票给 ${c.targetSeatNo}号位`,
+    render: (c) =>
+      c.targetSeatNo === 0
+        ? `${c.voterSeatNo}号位弃票`
+        : `${c.voterSeatNo}号位投票给 ${c.targetSeatNo}号位`,
+  },
+
+  [ACTION_TYPES.SPEECH_ORDER_DETERMINED]: {
+    render: (c) => (typeof c.message === 'string' ? c.message : null),
   },
 
   [ACTION_TYPES.SHERIFF_DECIDE_ORDER]: {
@@ -79,20 +86,34 @@ const ACTION_CATALOG: Record<string, ActionMeta> = {
 
   [ACTION_TYPES.WITCH_SAVE]: {
     label: '使用解药',
-    judgeable: (c) => c.saved === true,
+    judgeable: (c) =>
+      c.saved === true ||
+      (c.saved === false && typeof c.thinking === 'string' && c.thinking.trim().length > 0),
     render: (c) => (c.saved ? `女巫使用解药救了 ${c.targetSeatNo}号位` : '女巫未使用解药'),
   },
 
   [ACTION_TYPES.WITCH_POISON]: {
     label: '使用毒药',
-    judgeable: (c) => c.used === true,
+    judgeable: (c) =>
+      c.used === true ||
+      (c.used === false && typeof c.thinking === 'string' && c.thinking.trim().length > 0),
     render: (c) => (c.used ? `女巫使用毒药毒了 ${c.targetSeatNo}号位` : '女巫未使用毒药'),
   },
 
-  // 狼刀是狼队集体决策，事件 actorId 为 null，无法归属到单个玩家，故不逐条送评
+  // 狼刀按狼队集体决策送评，结果保存为团队分。
   [ACTION_TYPES.WOLF_KILL]: {
     label: '狼刀',
+    judgeable: () => true,
     render: (c) => (c.targetSeatNo != null ? `狼人刀了 ${c.targetSeatNo}号位` : '狼人空刀'),
+  },
+
+  [ACTION_TYPES.WOLF_EXPLODE]: {
+    label: '自爆选择',
+    judgeable: (c) => c.action === 'explode' || c.action === 'hold',
+    render: (c) => `${c.seatNo}号位选择${c.action === 'explode' ? '自爆' : '保留白天'}`,
+  },
+  [ACTION_TYPES.WOLF_PROPOSAL]: {
+    render: (c) => `${c.seatNo}号位提议刀 ${c.targetSeatNo}号位`,
   },
 
   [ACTION_TYPES.IDIOT_FLIP]: {
@@ -138,6 +159,15 @@ export function renderActionLine(
   actionType: string,
   content: EventContent,
   visibility: string,
+  options?: { fullSpeech: boolean },
 ): string | null {
+  if (
+    options?.fullSpeech &&
+    actionType === ACTION_TYPES.SPEECH &&
+    typeof content?.speech === 'string' &&
+    content.speech.trim()
+  ) {
+    return `${content.seatNo}号位${visibility === VISIBILITY_TYPES.WOLF ? '狼队商议' : '发言'}：${content.speech.trim()}`;
+  }
   return ACTION_CATALOG[actionType]?.render?.(content ?? {}, visibility) ?? null;
 }

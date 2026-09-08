@@ -32,7 +32,7 @@ type WitchPoisonDecision =
     };
 
 /**
- * 女巫毒药节点（两阶段版本）
+ * 女巫毒药节点（理由与动作一并生成）
  */
 @Injectable()
 export class WitchPoisonNode {
@@ -77,24 +77,13 @@ export class WitchPoisonNode {
           witch.id,
           'night_action' as any,
           `你今晚只能毒以下存活玩家之一：${legalSeatNos.join('号、')}号。`,
+          'witch_poison',
         );
 
         const threadId = getPlayerThreadId(state.gameId, witch.id);
 
-        // 阶段1：流式推理
-        const reasoning = await this.agentRuntime.streamReasoning(
+        const { reasoning, decision } = await this.agentRuntime.decide<WitchPoisonDecision>(
           contextData,
-          threadId,
-          context.signal,
-          (_token) => {
-            // 可选：SSE 推送推理过程
-          },
-        );
-
-        // 阶段2：生成决策
-        const decision = await this.agentRuntime.generateDecision<WitchPoisonDecision>(
-          contextData,
-          reasoning,
           buildWitchPoisonSchema(legalSeatNos),
           context.signal,
           threadId,

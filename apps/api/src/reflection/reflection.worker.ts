@@ -40,16 +40,23 @@ export class ReflectionWorkerService extends WorkerHost {
     const { gameId, playerId, force, suffix, refreshRewards } = job.data;
 
     try {
+      if (job.data.evaluationRunId)
+        await this.judgeService.completeEvaluation(gameId, job.data.evaluationRunId);
+      const game = await this.prisma.game.findUnique({
+        where: { id: gameId },
+        select: { experiment: true },
+      });
+      const writeLearning = !game?.experiment;
       if (job.name === REFLECT_JOB_NAMES.player) {
         if (!playerId) throw new Error(`玩家反思任务缺少 playerId: ${job.id}`);
-        await this.reflectionService.reflect(gameId, playerId, force ?? false);
+        await this.reflectionService.reflect(gameId, playerId, force ?? false, writeLearning);
         return;
       }
 
       // player 子任务全部完成后触发的聚合父任务；依赖关系本身就是完成信号。
       if (job.name === REFLECT_JOB_NAMES.complete) {
         // 全部玩家反思落库后，按局序触发记忆分层维护；幂等投递，重复调用复用已存在任务。
-        await this.maintenanceService.enqueueForGame(gameId);
+        if (writeLearning) await this.maintenanceService.enqueueForGame(gameId);
         return;
       }
 
@@ -67,7 +74,7 @@ export class ReflectionWorkerService extends WorkerHost {
       // 全局 pattern 晋升：幂等，无论本次还是上次重试生成的复盘，都从已存 narrative 取回聚类。
       // 放在 reviewCompleted 检查点之外，避免 reviewGame 成功但后续步骤失败重试时漏跑晋升。
       const review = await this.gameReviewService.loadReview(gameId);
-      if (review) {
+      if (review && writeLearning) {
         await this.globalMemoryService.promotePatterns(gameId, review.patterns);
       }
 

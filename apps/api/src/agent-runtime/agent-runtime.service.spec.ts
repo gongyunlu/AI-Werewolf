@@ -47,6 +47,7 @@ describe('AgentRuntimeService memory retrieval', () => {
         findMany: jest.fn().mockResolvedValue([{ agentId: 'agent-2', seatNo: 2 }]),
       },
       event: { findMany: jest.fn().mockResolvedValue([]) },
+      decisionContext: { upsert: jest.fn() },
     } as unknown as PrismaService;
     const memoryService = {
       retrieveActiveMemories: jest.fn().mockResolvedValue([]),
@@ -76,7 +77,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       }),
     } as unknown as SpeechSummarizerService;
     const service = new AgentRuntimeService(
-      {} as ConfigService<Env, true>,
+      { get: jest.fn().mockReturnValue(true) } as unknown as ConfigService<Env, true>,
       prisma,
       memoryService,
       globalMemoryService,
@@ -84,7 +85,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       {} as SkillLoaderService,
       speechSummarizer,
       {} as LangfuseService,
-      {} as PromptService,
+      { captureSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
       {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;
@@ -111,6 +112,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       label: 'default',
       opponentAgentIds: ['agent-2'],
       query: expect.stringContaining('投票'),
+      facts: expect.any(Array),
       role: ROLES.VILLAGER,
       scenario: AGENT_SCENARIOS.VOTE,
     });
@@ -120,6 +122,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       expect.stringContaining('投票'),
       ROLES.VILLAGER,
       AGENT_SCENARIOS.VOTE,
+      expect.objectContaining({ situation: expect.objectContaining({ actionType: 'vote' }) }),
     );
 
     await service.recordExperienceUsages(contextData, {
@@ -165,6 +168,7 @@ describe('AgentRuntimeService memory retrieval', () => {
         findMany: jest.fn().mockResolvedValue([{ agentId: 'agent-2', seatNo: 2 }]),
       },
       event: { findMany: jest.fn().mockResolvedValue([]) },
+      decisionContext: { upsert: jest.fn() },
     } as unknown as PrismaService;
     const memoryService = {
       retrieveActiveMemories: jest.fn().mockResolvedValue([]),
@@ -175,21 +179,19 @@ describe('AgentRuntimeService memory retrieval', () => {
       retrieveActivePatterns: jest.fn().mockResolvedValue([]),
     } as unknown as GlobalMemoryService;
     const knowledgeService = {
-      retrieve: jest
-        .fn()
-        .mockResolvedValue([
-          {
-            id: 'chunk-1',
-            role: 'seer',
-            scenario: 'day_speech',
-            trigger: 't',
-            action: 'a',
-            content: 'c',
-            articleTitle: '攻略',
-            sectionTitle: null,
-            similarity: 0.8,
-          },
-        ]),
+      retrieve: jest.fn().mockResolvedValue([
+        {
+          id: 'chunk-1',
+          role: 'seer',
+          scenario: 'day_speech',
+          trigger: 't',
+          action: 'a',
+          content: 'c',
+          articleTitle: '攻略',
+          sectionTitle: null,
+          similarity: 0.8,
+        },
+      ]),
       recordUsages: jest.fn().mockResolvedValue(undefined),
     } as unknown as KnowledgeService;
     const speechSummarizer = {
@@ -201,7 +203,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       }),
     } as unknown as SpeechSummarizerService;
     const service = new AgentRuntimeService(
-      {} as ConfigService<Env, true>,
+      { get: jest.fn().mockReturnValue(true) } as unknown as ConfigService<Env, true>,
       prisma,
       memoryService,
       globalMemoryService,
@@ -209,7 +211,7 @@ describe('AgentRuntimeService memory retrieval', () => {
       {} as SkillLoaderService,
       speechSummarizer,
       {} as LangfuseService,
-      {} as PromptService,
+      { captureSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
       {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;

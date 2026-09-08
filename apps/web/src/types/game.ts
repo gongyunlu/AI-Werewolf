@@ -59,6 +59,7 @@ export interface Game {
 
 // 对局列表项
 export interface GameListItem {
+  experimentArm?: 'on' | 'off' | null;
   id: string;
   status: string;
   rulesetId: string;

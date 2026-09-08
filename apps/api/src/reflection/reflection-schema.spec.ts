@@ -10,6 +10,7 @@ function validLesson(overrides: Record<string, unknown> = {}) {
     importance: 0.5,
     role: 'seer',
     scenario: 'vote',
+    conditions: ['public_discussion'],
     ...overrides,
   };
 }
@@ -29,7 +30,7 @@ describe('ReflectionOutputSchema.lessons', () => {
     };
 
     expect(schema.properties.lessons.items.required).toEqual(
-      expect.arrayContaining(['role', 'scenario']),
+      expect.arrayContaining(['role', 'scenario', 'conditions']),
     );
   });
 
@@ -57,6 +58,17 @@ describe('ReflectionOutputSchema.lessons', () => {
 
   it('拒绝非法 scenario', () => {
     expect(parseWithLessons([validLesson({ scenario: 'not_a_scenario' })]).success).toBe(false);
+  });
+
+  it('新经验必须给出可核验条件，不接受自由文本条件', () => {
+    const { conditions: _conditions, ...missing } = validLesson();
+    expect(parseWithLessons([missing]).success).toBe(false);
+    expect(parseWithLessons([validLesson({ conditions: ['我认为银水必为好人'] })]).success).toBe(
+      false,
+    );
+    expect(
+      parseWithLessons([validLesson({ conditions: ['after_first_night', 'has_saved'] })]).success,
+    ).toBe(true);
   });
 });
 

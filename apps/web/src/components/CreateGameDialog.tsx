@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import styles from './CreateGameDialog.module.css';
 import { apiClient } from '@/lib/api-client';
 import type { Ruleset, Agent } from '@/lib/api-client';
@@ -19,11 +19,12 @@ interface AgentCheckboxProps {
 }
 
 function AgentCheckbox({ agent, checked, onToggle }: AgentCheckboxProps) {
+  const id = useId();
   const handleChange = useCallback(() => onToggle(agent.id), [agent.id, onToggle]);
   return (
-    <label htmlFor={`agent-${agent.id}`} className={styles.agentCheckbox}>
+    <label htmlFor={id} className={styles.agentCheckbox}>
       <input
-        id={`agent-${agent.id}`}
+        id={id}
         type="checkbox"
         checked={checked}
         onChange={handleChange}
@@ -37,9 +38,11 @@ function AgentCheckbox({ agent, checked, onToggle }: AgentCheckboxProps) {
 
 interface Props {
   onCreated: (gameId: string) => void;
+  mode?: 'normal' | 'ab';
 }
 
-export function CreateGameDialog({ onCreated }: Props) {
+export function CreateGameDialog({ onCreated, mode = 'normal' }: Props) {
+  const selectId = useId();
   const [open, setOpen] = useState(false);
   const [rulesets, setRulesets] = useState<Ruleset[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -90,34 +93,48 @@ export function CreateGameDialog({ onCreated }: Props) {
     }
     try {
       setLoading(true);
-      const result = await apiClient.createGame({ rulesetId, agentIds: selectedAgentIds });
+      const dto = { rulesetId, agentIds: selectedAgentIds };
+      const gameId =
+        mode === 'ab'
+          ? (await apiClient.startAbGames(dto)).gameIds[0]
+          : (await apiClient.createGame(dto)).id;
       setOpen(false);
-      onCreated(result.id);
+      onCreated(gameId);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '创建失败，请重试');
     } finally {
       setLoading(false);
     }
-  }, [rulesetId, requiredCount, selectedAgentIds, onCreated]);
+  }, [rulesetId, requiredCount, selectedAgentIds, onCreated, mode]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className={styles.createButton}>创建对局</Button>
+        <Button className={styles.createButton}>
+          {mode === 'ab' ? '开始 A/B 对局' : '创建对局'}
+        </Button>
       </DialogTrigger>
       <DialogContent className={styles.dialog}>
         <DialogHeader>
-          <DialogTitle className={styles.dialogTitle}>创建新对局</DialogTitle>
+          <DialogTitle className={styles.dialogTitle}>
+            {mode === 'ab' ? '开始 A/B 对局' : '创建新对局'}
+          </DialogTitle>
         </DialogHeader>
 
         <div className={styles.body}>
+          {mode === 'ab' && (
+            <p>
+              将启动 1 对、共 2 局 ON/OFF；两局使用相同
+              Agent、模型、角色与座次。赛后自动评分，反思可手动运行且不写回经验。
+            </p>
+          )}
           {/* 规则集 */}
           <div className={styles.section}>
-            <label htmlFor="ruleset-select" className={styles.sectionLabel}>
+            <label htmlFor={selectId} className={styles.sectionLabel}>
               规则集
             </label>
             <select
-              id="ruleset-select"
+              id={selectId}
               value={rulesetId}
               onChange={handleRulesetChange}
               className={styles.select}
@@ -171,7 +188,7 @@ export function CreateGameDialog({ onCreated }: Props) {
               取消
             </Button>
             <Button onClick={handleSubmit} disabled={loading} className={styles.createButton}>
-              {loading ? '创建中...' : '创建对局'}
+              {loading ? '创建中...' : mode === 'ab' ? '启动 2 局' : '创建对局'}
             </Button>
           </div>
         </div>

@@ -13,6 +13,7 @@ import {
   JUDGE_JOB_OPTIONS,
   JUDGE_QUEUE_NAME,
   JudgeQueueService,
+  buildEvaluationRunId,
 } from '../evaluation/judge-queue.service';
 import { SettlementService } from '../evaluation/settlement.service';
 import { JudgeService } from '../evaluation/judge.service';
@@ -107,16 +108,17 @@ export class GameAnalysisService {
   ): Promise<AnalyzeGameResult> {
     const { playerId, force = false } = options;
     const judge = options.judge ?? true;
-    const reflect = options.reflect ?? true;
 
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
-      select: { status: true, _count: { select: { players: true } } },
+      select: { status: true, experiment: true, _count: { select: { players: true } } },
     });
     if (!game) throw new NotFoundException(`对局 ${gameId} 不存在`);
     if (game.status !== GAME_STATUSES.FINISHED) {
       throw new BadRequestException(`对局 ${gameId} 尚未结束，无法分析`);
     }
+    // 自动结算时实验只评分；手动入口显式传 reflect 才生成实验分析。
+    const reflect = options.reflect ?? !game.experiment;
     if (!judge && !reflect) {
       throw new BadRequestException('judge 与 reflect 至少要开启一项');
     }
@@ -207,6 +209,7 @@ export class GameAnalysisService {
         name: REFLECT_JOB_NAMES.fanout,
         queueName: REFLECT_QUEUE_NAME,
         data: {
+          evaluationRunId: buildEvaluationRunId(gameId, suffix),
           gameId,
           force: refreshDerivedArtifacts,
           playerId,
@@ -233,12 +236,9 @@ export class GameAnalysisService {
     }
 
     if (judge) {
+      const progress = await this.judgeService.getEvaluationProgress(gameId);
       if (!force) {
-        const [judgeableCount, judgedCount] = await Promise.all([
-          this.judgeService.countJudgeableTargets(gameId),
-          this.prisma.decisionJudgment.count({ where: { gameId } }),
-        ]);
-        if (judgedCount >= judgeableCount) {
+        if (progress.complete) {
           // 不需要重评，但仍严格刷新一次 reward，修复旧 completion 可能遗漏的派生数据。
           await this.judgeService.backfillRewards(gameId);
           await this.judgeService.aggregatePlayerScores(gameId);
@@ -250,7 +250,8 @@ export class GameAnalysisService {
       const stableJudgeState = force
         ? null
         : await this.judgeQueueService.getCompletionState(gameId);
-      const suffix = !force && stableJudgeState !== null ? `_resume_${Date.now()}` : '';
+      const suffix =
+        !force && (stableJudgeState !== null || progress.runId) ? `_resume_${Date.now()}` : '';
       await lease.assertOwned();
       const judged = force
         ? await this.judgeQueueService.rejudgeGame(gameId)
@@ -299,9 +300,8 @@ export class GameAnalysisService {
     playerId: string | undefined,
     expectedReflections: number,
   ): Promise<AnalysisProgress> {
-    const [judgeableCount, judgedCount, reflectedCount, summary] = await Promise.all([
-      this.judgeService.countJudgeableTargets(gameId),
-      this.prisma.decisionJudgment.count({ where: { gameId } }),
+    const [evaluation, reflectedCount, summary] = await Promise.all([
+      this.judgeService.getEvaluationProgress(gameId),
       this.prisma.agentPerformance.count({
         where: {
           gameId,
@@ -313,15 +313,18 @@ export class GameAnalysisService {
     ]);
 
     const narrativeReady = !!summary?.narrative;
-    const judgeComplete = judgedCount >= judgeableCount;
     const reflectComplete = narrativeReady && reflectedCount >= expectedReflections;
 
     return {
-      judgeComplete,
+      judgeComplete: evaluation.complete,
       reflectComplete,
       narrativeReady,
       reflectedCount,
-      hasArtifacts: judgedCount > 0 || reflectedCount > 0 || narrativeReady,
+      hasArtifacts:
+        Boolean(evaluation.runId) ||
+        evaluation.judgedCount > 0 ||
+        reflectedCount > 0 ||
+        narrativeReady,
     };
   }
 
@@ -329,17 +332,16 @@ export class GameAnalysisService {
     const game = await this.prisma.game.findUnique({ where: { id: gameId }, select: { id: true } });
     if (!game) throw new NotFoundException(`对局 ${gameId} 不存在`);
 
-    const [judgeableCount, judgedCount, playerCount, reflectedCount, summary] = await Promise.all([
-      this.judgeService.countJudgeableTargets(gameId),
-      this.prisma.decisionJudgment.count({ where: { gameId } }),
+    const [evaluation, playerCount, reflectedCount, summary] = await Promise.all([
+      this.judgeService.getEvaluationProgress(gameId),
       this.prisma.player.count({ where: { gameId } }),
       this.prisma.agentPerformance.count({ where: { gameId, reflectionGenerated: true } }),
       this.prisma.gameSummary.findUnique({ where: { gameId }, select: { narrative: true } }),
     ]);
 
     return {
-      judgedCount,
-      judgeableCount,
+      judgedCount: evaluation.judgedCount,
+      judgeableCount: evaluation.judgeableCount,
       reflectedCount,
       playerCount,
       narrativeReady: !!summary?.narrative,

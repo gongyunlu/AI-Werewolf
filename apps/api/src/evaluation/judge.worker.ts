@@ -24,17 +24,23 @@ export class JudgeWorkerService extends WorkerHost {
         // completion 只有在全部评分 child 成功后才会运行；回填失败必须重试，不能静默留下旧 reward。
         await this.judgeService.backfillRewards(gameId);
         await this.judgeService.aggregatePlayerScores(gameId);
+        if (job.data.runId) await this.judgeService.completeEvaluation(gameId, job.data.runId);
         return;
       }
 
       if (job.name === JUDGE_JOB_NAMES.speeches) {
         if (!playerId) throw new Error(`发言评估任务缺少 playerId: ${job.id}`);
-        await this.judgeService.judgeSpeeches(gameId, playerId);
+        await this.judgeService.judgeSpeeches(
+          gameId,
+          playerId,
+          undefined,
+          job.data.runId ?? job.id,
+        );
         return;
       }
 
       if (!eventId) throw new Error(`决策评估任务缺少 eventId: ${job.id}`);
-      await this.judgeService.judgeEvent(gameId, eventId);
+      await this.judgeService.judgeEvent(gameId, eventId, job.data.runId ?? job.id);
     } catch (error) {
       this.logger.error(
         {

@@ -32,7 +32,7 @@ type WitchAntidoteDecision =
     };
 
 /**
- * 女巫解药节点（两阶段版本）
+ * 女巫解药节点（理由与动作一并生成）
  */
 @Injectable()
 export class WitchAntidoteNode {
@@ -85,24 +85,13 @@ export class WitchAntidoteNode {
           witch.id,
           'night_action' as any,
           wolfTargetInfo,
+          'witch_save',
         );
 
         const threadId = getPlayerThreadId(state.gameId, witch.id);
 
-        // 阶段1：流式推理
-        const reasoning = await this.agentRuntime.streamReasoning(
+        const { reasoning, decision } = await this.agentRuntime.decide<WitchAntidoteDecision>(
           contextData,
-          threadId,
-          context.signal,
-          (_token) => {
-            // 可选：SSE 推送推理过程
-          },
-        );
-
-        // 阶段2：生成决策
-        const decision = await this.agentRuntime.generateDecision<WitchAntidoteDecision>(
-          contextData,
-          reasoning,
           buildWitchAntidoteSchema([targetPlayer.seatNo]),
           context.signal,
           threadId,
@@ -110,7 +99,7 @@ export class WitchAntidoteNode {
 
         if (decision.action === 'antidote') {
           const target = state.players.find((p) => p.seatNo === decision.targetSeatNo);
-          if (!target) {
+          if (!target || target.id !== targetPlayer.id) {
             throw new Error(
               `[女巫解药] 数据一致性错误：未找到目标玩家 ${decision.targetSeatNo}号位`,
             );

@@ -5,6 +5,7 @@ import {
   type SpeechOrderConfig,
 } from '@/game-engine/utils/speech-order.utils';
 import type { TypedRuleset } from '@/prisma/typed-models';
+import { readExperiment } from '@/evaluation/experiment-snapshot';
 
 /**
  * 计算发言顺序节点（无警长）
@@ -41,10 +42,17 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
     };
 
     // 计算发言顺序
+    const game = await context.prisma.game.findUnique({
+      where: { id: state.gameId },
+      select: { experiment: true },
+    });
+    const experiment = readExperiment(game?.experiment);
     const orderResult = calculateSpeechOrder({
       state,
       config,
-      currentTime: new Date(),
+      currentTime: experiment
+        ? new Date(Date.parse(experiment.capturedAt) + (state.currentDay - 1) * 60_000)
+        : new Date(),
     });
 
     // 写入 Event（记录发言顺序）

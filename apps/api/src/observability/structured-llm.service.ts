@@ -134,11 +134,6 @@ export class StructuredLlmService {
 
     const first = await this.invoke(firstOptions);
 
-    // TODO(反思环演进)：当前固定反思一次，不循环。若后续要升级成「检测驱动的反思环」，
-    // 可在 judge-schema 里定义 verdict→score 的确定性映射（如 good∈[70,100]、fair∈[40,69]、
-    // poor∈[0,39]），用它做停止条件：初评不一致才触发反思、反思后仍不一致且未达上限（如 2 次）
-    // 才继续、一致或达上限即停。停止信号落在确定性规则而非 LLM 自评，避免无 ground truth 下的
-    // 无界循环；语义层问题无确定性信号，仍靠本次固定反思压制。
     const refined = await this.invoke({
       ...firstOptions,
       system: refineSystem,

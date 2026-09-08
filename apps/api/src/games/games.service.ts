@@ -10,6 +10,7 @@ import type { CreateGameDto } from './dto/create-game.dto';
 import type { QueryGamesDto } from './dto/query-games.dto';
 import { RulesetDefinitionSchema } from './ruleset-definition';
 import { assignRolesAndSeats } from '../game-engine/rules/role-assignment';
+import { readExperiment, type ExperimentSnapshot } from '../evaluation/experiment-snapshot';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GameExecutorService } from '../game-executor/game-executor.service';
@@ -45,6 +46,7 @@ export class GamesService {
     const [items, total] = await Promise.all([
       this.prisma.game.findMany({
         where,
+        omit: { experiment: true },
         skip,
         take: pageSize,
         orderBy: { [sortBy]: sortOrder },
@@ -76,9 +78,20 @@ export class GamesService {
       select: { gameId: true },
     });
     const analyzedIds = new Set(analyzed.map((row) => row.gameId));
+    // 仅取分组标签，避免把包含向量与提示词的整个实验快照发送到列表。
+    const experimentArms = await this.prisma.$queryRaw<Array<{ id: string; arm: string }>>`
+      SELECT id, experiment->>'arm' AS arm FROM games
+      WHERE id = ANY(${items.map((game) => game.id)}::uuid[]) AND experiment IS NOT NULL
+    `;
+    const armById = new Map(experimentArms.map((row) => [row.id, row.arm]));
 
     return {
-      items: items.map((game) => Object.assign(game, { analyzed: analyzedIds.has(game.id) })),
+      items: items.map((game) =>
+        Object.assign(game, {
+          analyzed: analyzedIds.has(game.id),
+          experimentArm: armById.get(game.id) ?? null,
+        }),
+      ),
       total,
       page,
       pageSize,
@@ -93,7 +106,7 @@ export class GamesService {
    * @returns 创建的游戏记录，包含所有玩家信息（角色未分配）
    * @throws {BadRequestException} 当规则集不存在、Agent数量不匹配、Agent重复或Agent不存在/已停用时抛出
    */
-  async createGame(dto: CreateGameDto) {
+  async createGame(dto: CreateGameDto, experiment?: ExperimentSnapshot) {
     // 1. 校验 Ruleset
     const ruleset = await this.prisma.ruleset.findUnique({ where: { id: dto.rulesetId } });
     if (!ruleset) {
@@ -134,8 +147,10 @@ export class GamesService {
 
     // 创建对局和玩家记录（不分配座次和角色）
     return this.prisma.game.create({
+      omit: { experiment: true },
       data: {
         rulesetId: ruleset.id,
+        ...(experiment ? { experiment: JSON.parse(JSON.stringify(experiment)) } : {}),
         skillVersion: SKILL_VERSION,
         status: GAME_STATUSES.CREATED, // 状态：已创建
         players: {
@@ -147,8 +162,12 @@ export class GamesService {
               role: null, // 未分配角色
               faction: null, // 未分配阵营
               displayName: agent.name,
-              modelName: agent.defaultModelName,
-              memoryLabelSnapshot: agent.memoryLabel,
+              modelName:
+                experiment?.assignments.find((a) => a.agentId === agentId)?.modelName ??
+                agent.defaultModelName,
+              memoryLabelSnapshot:
+                experiment?.assignments.find((a) => a.agentId === agentId)?.memoryLabel ??
+                agent.memoryLabel,
             };
           }),
         },
@@ -198,7 +217,9 @@ export class GamesService {
 
     // 3. 随机分配座次和角色
     const agentIds = game.players.map((p) => p.agent.id);
-    const assignments = assignRolesAndSeats(roleAssignments, agentIds);
+    const assignments =
+      readExperiment(game.experiment)?.assignments ??
+      assignRolesAndSeats(roleAssignments, agentIds);
 
     // 4. 批量更新 Player 记录 + 更新 Game 状态（事务内保证原子性）
     return this.prisma.$transaction(async (tx) => {
@@ -220,6 +241,7 @@ export class GamesService {
       return tx.game.update({
         where: { id: gameId },
         data: { status: GAME_STATUSES.INITIALIZED },
+        omit: { experiment: true },
         include: {
           players: {
             orderBy: { seatNo: 'asc' },
@@ -240,6 +262,7 @@ export class GamesService {
   async getGameById(id: string) {
     const game = await this.prisma.game.findUnique({
       where: { id },
+      omit: { experiment: true },
       include: {
         ruleset: { select: { id: true, name: true } },
         players: {
@@ -293,7 +316,9 @@ export class GamesService {
         throw new BadRequestException(`Ruleset ${game.ruleset.id} 的 definition 结构非法`);
       }
       const agentIds = game.players.map((p) => p.agent.id);
-      const assignments = assignRolesAndSeats(parsed.data.roles, agentIds);
+      const assignments =
+        readExperiment(game.experiment)?.assignments ??
+        assignRolesAndSeats(parsed.data.roles, agentIds);
       await this.prisma.$transaction(async (tx) => {
         const claimed = await tx.game.updateMany({
           where: { id: gameId, status: GAME_STATUSES.CREATED },
@@ -336,6 +361,7 @@ export class GamesService {
     // 5. 返回启动后的完整对局
     return this.prisma.game.findUniqueOrThrow({
       where: { id: gameId },
+      omit: { experiment: true },
       include: {
         players: { orderBy: { seatNo: 'asc' }, include: { agent: true } },
       },

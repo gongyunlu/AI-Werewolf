@@ -33,7 +33,7 @@ export class PkSpeechNode {
         let contentDurationMs = 0;
 
         try {
-          const extraInfo = `你正在进行PK发言。这是第${state.pkRound}轮PK，你需要为自己辩护，说服其他玩家不要投你。`;
+          const extraInfo = `你正在进行PK发言。这是第${Math.max(1, state.pkRound)}轮PK，候选人只有${state.pkCandidates!.join('、')}号位。下一轮只允许候选人以外的存活玩家在这些候选人中投票，候选人不能投票，也不能把票改到台外玩家。请结合上一轮公开票型为自己辩护。`;
 
           const contextData = await this.agentRuntime.prepareContextPublic(
             state.gameId,
