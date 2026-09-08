@@ -1,0 +1,15 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "testRegex": "learning\\.integration-spec\\.ts$",
+  "testTimeout": 30000,
+  "transform": {
+    "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": { "rootDir": ".." } }]
+  },
+  "moduleNameMapper": {
+    "^@/(.*)$": "<rootDir>/../src/$1",
+    "^langfuse-langchain$": "<rootDir>/../src/testing/mocks/langfuse-langchain.ts",
+    "^(\\.{1,2}/.*)\\.js$": "$1"
+  }
+}

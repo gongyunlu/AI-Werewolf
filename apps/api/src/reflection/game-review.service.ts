@@ -5,6 +5,7 @@ import { StructuredLlmService } from '../observability/structured-llm.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { GameReviewOutputSchema, type GameReviewOutput } from './reflection-schema';
 import { buildGameReviewVariables, type ReviewPlayer } from './reflection-prompt';
+import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 
 /** 复盘结果，作为各玩家反思的共同输入 */
 export interface GameReviewResult {
@@ -90,7 +91,7 @@ export class GameReviewService {
         select: { day: true, seatNo: true, summary: true },
       }),
       this.prisma.decisionJudgment.findMany({
-        where: { gameId },
+        where: { gameId, evaluationVersion: EVALUATION_VERSION },
         select: {
           playerId: true,
           actionType: true,

@@ -3,9 +3,9 @@ import type { EmbeddingService } from './embedding.service';
 import { GlobalMemoryService } from './global-memory.service';
 
 function createMockPrisma() {
-  return {
+  const prisma = {
     patternCandidate: {
-      findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       update: jest.fn(),
       create: jest.fn(),
     },
@@ -15,8 +15,10 @@ function createMockPrisma() {
     },
     $queryRaw: jest.fn(),
     $executeRaw: jest.fn(),
-    $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
-  } as unknown as PrismaService;
+    $transaction: jest.fn(),
+  };
+  prisma.$transaction.mockImplementation((callback: (tx: unknown) => unknown) => callback(prisma));
+  return prisma as unknown as PrismaService;
 }
 
 function createMockEmbeddingService() {
@@ -55,6 +57,7 @@ describe('GlobalMemoryService', () => {
   it('同一认知在第 3 场对局出现时晋升为全局记忆', async () => {
     (prisma.$queryRaw as jest.Mock)
       .mockResolvedValueOnce([{ count: 0 }]) // 幂等检查
+      .mockResolvedValueOnce([{ count: 0 }]) // 锁内重新检查
       .mockResolvedValueOnce([{ id: 'cand-1', similarity: 0.9 }]) // 相似候选
       .mockResolvedValueOnce([
         {
@@ -62,11 +65,11 @@ describe('GlobalMemoryService', () => {
           title: pattern.title,
           content: pattern.content,
           importance: pattern.importance,
-          sourceGameIds: ['g1', 'g2', 'g3'],
+          source_game_ids: ['g1', 'g2', 'g3'],
         },
       ]); // ready 候选
     (embeddingService.embedTexts as jest.Mock).mockResolvedValue([vector]);
-    (prisma.patternCandidate.findUnique as jest.Mock).mockResolvedValue({
+    (prisma.patternCandidate.findUniqueOrThrow as jest.Mock).mockResolvedValue({
       sourceGameIds: ['g1', 'g2'],
     });
     (prisma.patternCandidate.update as jest.Mock).mockResolvedValue({});
@@ -98,13 +101,16 @@ describe('GlobalMemoryService', () => {
     });
   });
 
-  it('同一认知只出现 2 场时不晋升', async () => {
+  it('相似度恰好0.85可归簇，同一认知只出现2场时不晋升', async () => {
     (prisma.$queryRaw as jest.Mock)
       .mockResolvedValueOnce([{ count: 0 }]) // 幂等检查
-      .mockResolvedValueOnce([{ id: 'cand-1', similarity: 0.9 }]) // 相似候选
+      .mockResolvedValueOnce([{ count: 0 }]) // 锁内重新检查
+      .mockResolvedValueOnce([{ id: 'cand-1', similarity: 0.85 }]) // 相似候选
       .mockResolvedValueOnce([]); // 无 ready 候选
     (embeddingService.embedTexts as jest.Mock).mockResolvedValue([vector]);
-    (prisma.patternCandidate.findUnique as jest.Mock).mockResolvedValue({ sourceGameIds: ['g1'] });
+    (prisma.patternCandidate.findUniqueOrThrow as jest.Mock).mockResolvedValue({
+      sourceGameIds: ['g1'],
+    });
     (prisma.patternCandidate.update as jest.Mock).mockResolvedValue({});
 
     await expect(service.promotePatterns('g2', [pattern])).resolves.toBe(0);
@@ -121,6 +127,7 @@ describe('GlobalMemoryService', () => {
   it('相似度低于阈值时新建候选并写入 embedding', async () => {
     (prisma.$queryRaw as jest.Mock)
       .mockResolvedValueOnce([{ count: 0 }]) // 幂等检查
+      .mockResolvedValueOnce([{ count: 0 }]) // 锁内重新检查
       .mockResolvedValueOnce([]) // 无相似候选
       .mockResolvedValueOnce([]); // 无 ready 候选
     (embeddingService.embedTexts as jest.Mock).mockResolvedValue([vector]);
@@ -138,7 +145,7 @@ describe('GlobalMemoryService', () => {
         sourceGameIds: ['g1'],
       },
     });
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
   });
 
   it('检索已晋升的全局 pattern', async () => {

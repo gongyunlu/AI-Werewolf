@@ -12,7 +12,6 @@ function createMockPrisma() {
     },
     memoryUsage: {
       createMany: jest.fn(),
-      findMany: jest.fn(),
     },
     decisionJudgment: { groupBy: jest.fn() },
     $queryRaw: jest.fn(),
@@ -313,8 +312,8 @@ describe('MemoryService', () => {
           similarity: 0,
         },
       ])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ count: 0 }]);
-    (prisma.memoryUsage.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.decisionJudgment.groupBy as jest.Mock).mockResolvedValue([]);
 
     const result = await service.retrieveExperience({
@@ -378,8 +377,8 @@ describe('MemoryService', () => {
           metadata: { conditions: ['first_night'] },
         },
       ])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ count: 0 }]);
-    (prisma.memoryUsage.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.decisionJudgment.groupBy as jest.Mock).mockResolvedValue([]);
     const result = await service.retrieveExperience({
       agentId: '5b12e37c-62ca-491a-a46d-a649d08416fd',

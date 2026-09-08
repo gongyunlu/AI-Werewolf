@@ -7,6 +7,8 @@ import { Prisma } from '../generated/prisma/client';
 import { EmbeddingService } from './embedding.service';
 import { computeLessonCandidateScore, computeLessonRank, type LessonHit } from './lesson-rank';
 import { retrieveFrozenMemories, type FrozenMemory } from '../evaluation/experiment-snapshot';
+import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
+import { CURRENT_LEARNING_USAGE_FILTER } from './learning-usage-filter';
 
 export type ActiveMemory = Prisma.MemoryGetPayload<{
   select: {
@@ -113,10 +115,14 @@ export class MemoryService {
         >`
         SELECT u.memory_id AS "memoryId", m.agent_id AS "agentId", u.action_type AS "actionType", u.reward_score AS reward
         FROM memory_usages u JOIN memories m ON m.id = u.memory_id
-        WHERE m.agent_id IN (${Prisma.join(agentIds)}) AND m.type = 'lesson' AND u.trigger_matched AND u.reward_score IS NOT NULL
+        WHERE m.agent_id IN (${Prisma.join(agentIds)}) AND m.type = 'lesson'
+          ${CURRENT_LEARNING_USAGE_FILTER}
       `;
         const baselines = await tx.decisionJudgment.groupBy({
-          where: { game: { experiment: { equals: Prisma.DbNull } } },
+          where: {
+            evaluationVersion: EVALUATION_VERSION,
+            game: { experiment: { equals: Prisma.DbNull } },
+          },
           by: ['actionType'],
           _avg: { score: true },
         });
@@ -326,12 +332,17 @@ export class MemoryService {
 
     // 命中样本 + 全局基线 + 该 agent 命中总数，一次并行取回
     const [hits, baselineRows, totalHitsRow] = await Promise.all([
-      this.prisma.memoryUsage.findMany({
-        where: { memoryId: { in: candidateIds }, triggerMatched: true, rewardScore: { not: null } },
-        select: { memoryId: true, actionType: true, rewardScore: true },
-      }),
+      this.prisma.$queryRaw<Array<{ memoryId: string; actionType: string; rewardScore: number }>>`
+        SELECT u.memory_id AS "memoryId", u.action_type AS "actionType", u.reward_score AS "rewardScore"
+        FROM memory_usages u
+        WHERE u.memory_id IN (${Prisma.join(candidateIds)})
+          ${CURRENT_LEARNING_USAGE_FILTER}
+      `,
       this.prisma.decisionJudgment.groupBy({
-        where: { game: { experiment: { equals: Prisma.DbNull } } },
+        where: {
+          evaluationVersion: EVALUATION_VERSION,
+          game: { experiment: { equals: Prisma.DbNull } },
+        },
         by: ['actionType'],
         _avg: { score: true },
       }),
@@ -341,8 +352,7 @@ export class MemoryService {
         JOIN memories m ON m.id = u.memory_id
         WHERE m.agent_id = ${agentId}::uuid
           AND m.type = 'lesson'
-          AND u.trigger_matched = true
-          AND u.reward_score IS NOT NULL
+          ${CURRENT_LEARNING_USAGE_FILTER}
       `,
     ]);
 

@@ -9,6 +9,7 @@ import { ACTION_TYPES } from '@ai-werewolf/shared';
 import { ReflectionOutputSchema } from './reflection-schema';
 import { buildReflectionVariables, type TrustMisread } from './reflection-prompt';
 import { GameReviewService } from './game-review.service';
+import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 
 const MEMORY_TYPE: Record<'reflection' | 'lesson' | 'playerModel', MemoryType> = {
   reflection: 'reflection',
@@ -116,7 +117,7 @@ export class ReflectionService {
       await Promise.all([
         this.loadOpponents(gameId, playerId),
         this.prisma.decisionJudgment.findMany({
-          where: { gameId, playerId },
+          where: { gameId, playerId, evaluationVersion: EVALUATION_VERSION },
           select: {
             playerId: true,
             actionType: true,

@@ -5,6 +5,7 @@ import { StructuredLlmService } from '../observability/structured-llm.service';
 import { MemoryService, type CreateMemoryInput } from '../memory/memory.service';
 import { GameReviewService } from './game-review.service';
 import { FACTIONS, ROLES } from '@ai-werewolf/shared';
+import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 
 /** 事务回调拿到的 tx，只覆盖反思用到的写面 */
 function createMockTx() {
@@ -142,6 +143,11 @@ describe('ReflectionService', () => {
     expect(inputs.map((i) => i.type)).toEqual(['reflection', 'lesson', 'player_model']);
     expect(inputs.every((i) => i.label === 'label-v1')).toBe(true);
     expect(inputs.every((i) => i.gameId === 'g1' && i.agentId === 'a1')).toBe(true);
+    expect(mocks.prisma.decisionJudgment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { gameId: 'g1', playerId: 'p1', evaluationVersion: EVALUATION_VERSION },
+      }),
+    );
   });
 
   it('lesson 正文含 trigger/action 供匹配与执行，但不含 evidence（避免座位绑定污染下一局）', async () => {

@@ -2,6 +2,9 @@ import { config as loadEnv } from 'dotenv';
 import { resolve } from 'node:path';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
+import { EVALUATION_VERSION } from './evaluation-version';
+import { CURRENT_LEARNING_USAGE_FILTER } from '../memory/learning-usage-filter';
+import { loadKnowledgeScoredEvents } from './learning-knowledge-comparison';
 
 const repositoryRoot = resolve(__dirname, '../../../..');
 
@@ -46,12 +49,6 @@ interface LessonRow {
   content: string;
 }
 
-interface KnowledgeUsageRow {
-  eventId: string | null;
-  actionType: string;
-  rewardScore: number;
-}
-
 const SPEECH = 'speech';
 
 /** 判定为好人 = trustScore>=50 且未标记可疑；否则判定为狼人。 */
@@ -75,10 +72,11 @@ function print(line = ''): void {
 }
 
 /** 按条数加权的均分（avgScore 已是按 actionType 聚合的均分）。 */
-function avgQuality(rows: QualityRow[]): number {
-  return (
-    rows.reduce((s, r) => s + r.avgScore * r.cnt, 0) / (rows.reduce((s, r) => s + r.cnt, 0) || 1)
-  );
+function avgQuality(rows: QualityRow[]): string {
+  const count = rows.reduce((s, r) => s + r.cnt, 0);
+  return count === 0
+    ? '  -  '
+    : (rows.reduce((s, r) => s + r.avgScore * r.cnt, 0) / count).toFixed(1);
 }
 
 async function main(): Promise<void> {
@@ -95,6 +93,7 @@ async function main(): Promise<void> {
       SELECT id, started_at AS "startedAt", winner_faction AS "winnerFaction"
       FROM games
       WHERE status = 'finished'
+        AND (experiment IS NULL OR experiment = 'null'::jsonb)
       ORDER BY started_at
     `;
 
@@ -102,6 +101,9 @@ async function main(): Promise<void> {
       print('没有已完成的对局，无法度量。');
       return;
     }
+    print(
+      `普通学习度量：评分版本 v${EVALUATION_VERSION}，历史评分与实验局不参与评分和 lift 统计。`,
+    );
 
     // 误判行：判断者对发言者的信任判断 × 发言者真实阵营 × 判断者角色
     const misjudgments = await prisma.$queryRaw<MisjudgmentRow[]>`
@@ -118,6 +120,7 @@ async function main(): Promise<void> {
       JOIN players speaker ON speaker.game_id = aj.game_id AND speaker.seat_no = aj.speaker_seat_no
       JOIN players judger  ON judger.game_id  = aj.game_id AND judger.agent_id  = aj.agent_id
       JOIN games g ON g.id = aj.game_id AND g.status = 'finished'
+      WHERE g.experiment IS NULL OR g.experiment = 'null'::jsonb
     `;
 
     // 决策/发言质量：按局 × 行为类型聚合
@@ -130,37 +133,33 @@ async function main(): Promise<void> {
         avg(dj.score) AS "avgScore"
       FROM decision_judgments dj
       JOIN games g ON g.id = dj.game_id AND g.status = 'finished'
+      WHERE dj.evaluation_version = ${EVALUATION_VERSION}
+        AND (g.experiment IS NULL OR g.experiment = 'null'::jsonb)
       GROUP BY dj.game_id, g.started_at, dj.action_type
       ORDER BY g.started_at
     `;
 
     // lesson lift 原始数据：命中样本（trigger 匹配且有 reward）+ 各 actionType 基线
-    const [liftHits, baselines, lessons, knowledgeHits] = await Promise.all([
+    const [liftHits, baselines, lessons] = await Promise.all([
       prisma.$queryRaw<LiftHit[]>`
-        SELECT mu.memory_id AS "memoryId", mu.action_type AS "actionType", mu.reward_score AS "rewardScore"
-        FROM memory_usages mu
-        JOIN memories m ON m.id = mu.memory_id
-        WHERE mu.trigger_matched = true
-          AND mu.reward_score IS NOT NULL
-          AND m.type = 'lesson'
+        SELECT u.memory_id AS "memoryId", u.action_type AS "actionType", u.reward_score AS "rewardScore"
+        FROM memory_usages u
+        JOIN memories m ON m.id = u.memory_id
+        WHERE m.type = 'lesson'
           AND m.is_active = true
+          ${CURRENT_LEARNING_USAGE_FILTER}
       `,
       prisma.$queryRaw<Array<{ actionType: string; avgScore: number }>>`
-        SELECT action_type AS "actionType", avg(score) AS "avgScore"
-        FROM decision_judgments
-        GROUP BY action_type
+        SELECT j.action_type AS "actionType", avg(j.score) AS "avgScore"
+        FROM decision_judgments j JOIN games g ON g.id = j.game_id
+        WHERE j.evaluation_version = ${EVALUATION_VERSION}
+          AND (g.experiment IS NULL OR g.experiment = 'null'::jsonb)
+        GROUP BY j.action_type
       `,
       prisma.$queryRaw<LessonRow[]>`
         SELECT id, content
         FROM memories
         WHERE type = 'lesson' AND is_active = true
-      `,
-      // 已注入攻略的决策：以 rewardScore 非空代表该行为已被 judge 评分
-      prisma.$queryRaw<KnowledgeUsageRow[]>`
-        SELECT DISTINCT ku.event_id AS "eventId", ku.action_type AS "actionType", ku.reward_score AS "rewardScore"
-        FROM knowledge_usages ku
-        WHERE ku.event_id IS NOT NULL
-          AND ku.reward_score IS NOT NULL
       `,
     ]);
 
@@ -245,6 +244,7 @@ async function main(): Promise<void> {
       bucket.n += row.cnt;
     }
     print('对局(短id)            决策均分(次)  发言均分(次)');
+    if (qualities.length === 0) print(`暂无普通局 v${EVALUATION_VERSION} 评分。`);
     for (const [gameId, e] of [...byGame.entries()].toSorted(
       (a, b) => a[1].startedAt.getTime() - b[1].startedAt.getTime(),
     )) {
@@ -285,7 +285,7 @@ async function main(): Promise<void> {
       }
     };
     if (ranked.length === 0) {
-      print('暂无带 reward 的命中样本。');
+      print(`暂无匹配 v${EVALUATION_VERSION} 评分的命中样本。`);
     } else {
       print('— Top 10（lift 最高）—');
       printRank(ranked.slice(0, 10));
@@ -337,14 +337,14 @@ async function main(): Promise<void> {
     const warmM = splitMisjudge(warmGames);
     print(`                冷启动(前${half}局)    当前(后${games.length - half}局)`);
     print(
-      `决策质量均分   ${coldQ.decisionAvg.toFixed(1).padStart(8)}(n=${String(coldQ.decisionN).padStart(2)})${warmQ.decisionAvg
-        .toFixed(1)
-        .padStart(12)}(n=${String(warmQ.decisionN).padStart(2)})`,
+      `决策质量均分   ${coldQ.decisionAvg.padStart(8)}(n=${String(coldQ.decisionN).padStart(2)})${warmQ.decisionAvg.padStart(
+        12,
+      )}(n=${String(warmQ.decisionN).padStart(2)})`,
     );
     print(
-      `发言质量均分   ${coldQ.speechAvg.toFixed(1).padStart(8)}(n=${String(coldQ.speechN).padStart(2)})${warmQ.speechAvg
-        .toFixed(1)
-        .padStart(12)}(n=${String(warmQ.speechN).padStart(2)})`,
+      `发言质量均分   ${coldQ.speechAvg.padStart(8)}(n=${String(coldQ.speechN).padStart(2)})${warmQ.speechAvg.padStart(
+        12,
+      )}(n=${String(warmQ.speechN).padStart(2)})`,
     );
     print(
       `识人误判率     ${pct(coldM.wrong, coldM.judged).padStart(8)}(n=${String(coldM.judged).padStart(2)})${pct(
@@ -357,22 +357,13 @@ async function main(): Promise<void> {
     // ============ 五、攻略注入 vs 未注入 质量对比 ============
     print('========== 五、攻略注入 vs 未注入 质量对比 ==========');
     // knowledge_usages 记录了注入过攻略的决策事件；对比这些事件 vs 其余 judge 评分事件的分数
-    const scoredEvents = await prisma.$queryRaw<
-      Array<{ eventId: string; score: number; actionType: string }>
-    >`
-      SELECT dj.event_id AS "eventId", dj.score AS score, dj.action_type AS "actionType"
-      FROM decision_judgments dj
-      WHERE dj.score IS NOT NULL
-    `;
-    const injectedEventIds = new Set(
-      knowledgeHits.map((h) => h.eventId).filter((e): e is string => !!e),
-    );
+    const scoredEvents = await loadKnowledgeScoredEvents(prisma);
     let injectedSum = 0;
     let injectedN = 0;
     let nonInjectedSum = 0;
     let nonInjectedN = 0;
     for (const row of scoredEvents) {
-      if (injectedEventIds.has(row.eventId)) {
+      if (row.injected) {
         injectedSum += row.score;
         injectedN += 1;
       } else {
@@ -389,7 +380,7 @@ async function main(): Promise<void> {
       ).padStart(2)})`,
     );
     if (injectedN === 0) {
-      print('暂无已注入攻略且被评分的决策（需先用 judge 跑出分数）。');
+      print(`暂无已注入攻略且匹配 v${EVALUATION_VERSION} 评分的普通局决策。`);
     }
     print('');
 

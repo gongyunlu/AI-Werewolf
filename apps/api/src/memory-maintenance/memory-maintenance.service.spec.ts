@@ -101,7 +101,10 @@ describe('MemoryMaintenanceService', () => {
   });
 
   it('任务已存在时跳过重复投递', async () => {
-    queue.getJob.mockResolvedValue({ id: 'job-1' });
+    queue.getJob.mockResolvedValue({
+      id: 'job-1',
+      getState: jest.fn().mockResolvedValue('completed'),
+    });
     await service.enqueueForGame('g1');
     expect(queue.add).not.toHaveBeenCalled();
   });
@@ -114,5 +117,13 @@ describe('MemoryMaintenanceService', () => {
       { gameId: 'g1' },
       expect.objectContaining({ jobId: 'maintenance_g1' }),
     );
+  });
+
+  it('恢复耗尽重试的失败任务，保留同一个 jobId', async () => {
+    const job = { getState: jest.fn().mockResolvedValue('failed'), retry: jest.fn() };
+    queue.getJob.mockResolvedValue(job);
+    await service.enqueueForGame('g1');
+    expect(job.retry).toHaveBeenCalledWith('failed');
+    expect(queue.add).not.toHaveBeenCalled();
   });
 });

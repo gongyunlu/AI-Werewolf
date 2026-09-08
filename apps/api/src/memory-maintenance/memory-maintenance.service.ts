@@ -87,7 +87,11 @@ export class MemoryMaintenanceService {
   /** 幂等投递：同局维护任务只入队一次，重复调用直接复用已存在任务 */
   async enqueueForGame(gameId: string): Promise<void> {
     const jobId = `maintenance_${gameId}`;
-    if (await this.queue.getJob(jobId)) return;
+    const existing = await this.queue.getJob(jobId);
+    if (existing) {
+      if ((await existing.getState()) === 'failed') await existing.retry('failed');
+      return;
+    }
     await this.queue.add('run', { gameId }, { jobId, ...MAINTENANCE_JOB_OPTIONS });
   }
 
@@ -114,7 +118,7 @@ export class MemoryMaintenanceService {
     };
 
     for (const { agentId, label, playerId } of groups.values()) {
-      const gameCount = await this.countGames(agentId, label);
+      const gameCount = await this.countGames(agentId, label, gameId);
       const plan = maintenancePlan(gameCount);
       if (plan.decay) result.decayed += await this.decayImportance(agentId, label, gameCount);
       if (plan.archive) result.archived += await this.archiveColdMemories(agentId, label);
@@ -127,15 +131,20 @@ export class MemoryMaintenanceService {
     return result;
   }
 
-  /** 该 (agent, label) 名下已完成的局数；维护的「局序」信号以它为准 */
-  private async countGames(agentId: string, label: string): Promise<number> {
+  /** 按触发局结束时间及 id 固定普通局序，排队和重试不随后续已完成对局漂移。 */
+  private async countGames(agentId: string, label: string, gameId: string): Promise<number> {
     const rows = await this.prisma.$queryRaw<Array<{ count: number }>>`
       SELECT count(DISTINCT p.game_id)::int AS count
       FROM players p
       JOIN games g ON g.id = p.game_id
+      JOIN games target ON target.id = ${gameId}::uuid
       WHERE p.agent_id = ${agentId}::uuid
         AND p.memory_label_snapshot = ${label}
         AND g.status = ${GAME_STATUSES.FINISHED}
+        AND (g.experiment IS NULL OR g.experiment = 'null'::jsonb)
+        AND target.status = ${GAME_STATUSES.FINISHED}
+        AND (target.experiment IS NULL OR target.experiment = 'null'::jsonb)
+        AND (g.ended_at, g.id) <= (target.ended_at, target.id)
     `;
     return rows[0]?.count ?? 0;
   }
@@ -156,7 +165,7 @@ export class MemoryMaintenanceService {
             jsonb_set(
               COALESCE(metadata, '{}'::jsonb),
               '{maintenance}',
-              '{}'::jsonb,
+              COALESCE(metadata->'maintenance', '{}'::jsonb),
               true
             ),
             '{maintenance,lastDecayedGameCount}',
@@ -168,7 +177,7 @@ export class MemoryMaintenanceService {
         AND label = ${label}
         AND is_active = true
         AND type = 'lesson'
-        AND (metadata->'maintenance'->>'lastDecayedGameCount')::int IS DISTINCT FROM ${gameCount}
+        AND COALESCE((metadata->'maintenance'->>'lastDecayedGameCount')::int, 0) < ${gameCount}
     `;
   }
 
@@ -254,7 +263,7 @@ export class MemoryMaintenanceService {
     return deduped;
   }
 
-  /** 固化：role='any' 的通用 lesson 聚类（≥3 条、相似度 ≥0.7）后提炼为一条 strategy */
+  /** 固化：无角色、场景和事实条件限制的 lesson 聚类（≥3 条、相似度 >0.7）后提炼为 strategy */
   private async consolidate(
     agentId: string,
     label: string,
@@ -378,7 +387,9 @@ export class MemoryMaintenanceService {
     roleFilter?: string,
   ): Promise<Array<{ idA: string; idB: string }>> {
     const roleSql = roleFilter
-      ? Prisma.sql`AND a.metadata->>'role' = ${roleFilter} AND b.metadata->>'role' = ${roleFilter}`
+      ? Prisma.sql`AND a.metadata->>'role' = ${roleFilter} AND b.metadata->>'role' = ${roleFilter}
+          AND a.metadata->>'scenario' = 'any' AND b.metadata->>'scenario' = 'any'
+          AND a.metadata->'conditions' = '[]'::jsonb AND b.metadata->'conditions' = '[]'::jsonb`
       : Prisma.empty;
     const rows = await this.prisma.$queryRaw<Array<{ id_a: string; id_b: string }>>`
       SELECT a.id AS id_a, b.id AS id_b
@@ -394,6 +405,9 @@ export class MemoryMaintenanceService {
         AND b.embedding IS NOT NULL
         AND b.embedding_model = ${this.embeddingService.model}
         AND b.embedding_dimension = ${this.embeddingService.dimension}
+        AND a.metadata->>'role' = b.metadata->>'role'
+        AND a.metadata->>'scenario' = b.metadata->>'scenario'
+        AND a.metadata->'conditions' IS NOT DISTINCT FROM b.metadata->'conditions'
         ${roleSql}
         AND 1 - (a.embedding <=> b.embedding) > ${threshold}
     `;
@@ -406,7 +420,10 @@ export class MemoryMaintenanceService {
     label: string,
     roleFilter?: string,
   ): Promise<ActiveLesson[]> {
-    const roleSql = roleFilter ? Prisma.sql`AND metadata->>'role' = ${roleFilter}` : Prisma.empty;
+    const roleSql = roleFilter
+      ? Prisma.sql`AND metadata->>'role' = ${roleFilter}
+          AND metadata->>'scenario' = 'any' AND metadata->'conditions' = '[]'::jsonb`
+      : Prisma.empty;
     const rows = await this.prisma.$queryRaw<
       Array<{ id: string; title: string; content: string; importance: number; confidence: number }>
     >`
