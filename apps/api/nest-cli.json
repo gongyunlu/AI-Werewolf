@@ -5,6 +5,6 @@
   "compilerOptions": {
     "deleteOutDir": true,
     "assets": ["skills/**/*.md", "role-contexts/**/*.md"],
-    "watchAssets": true
+    "watchAssets": false
   }
 }

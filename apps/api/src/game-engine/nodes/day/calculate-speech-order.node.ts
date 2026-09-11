@@ -1,5 +1,6 @@
 import type { GameGraphState } from '@/game-engine/core/types';
 import type { NodeFactory } from '@/game-engine/nodes/node.types';
+import { saveNodeValue } from '../node.types';
 import {
   calculateSpeechOrder,
   type SpeechOrderConfig,
@@ -47,13 +48,15 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
       select: { experiment: true },
     });
     const experiment = readExperiment(game?.experiment);
-    const orderResult = calculateSpeechOrder({
-      state,
-      config,
-      currentTime: experiment
-        ? new Date(Date.parse(experiment.capturedAt) + (state.currentDay - 1) * 60_000)
-        : new Date(),
-    });
+    const orderResult = await saveNodeValue(context, 'speech-order', () =>
+      calculateSpeechOrder({
+        state,
+        config,
+        currentTime: experiment
+          ? new Date(Date.parse(experiment.capturedAt) + (state.currentDay - 1) * 60_000)
+          : new Date(),
+      }),
+    );
 
     // 写入 Event（记录发言顺序）
     const event = await context.eventWriter.writeSpeechOrderDeterminedEvent({

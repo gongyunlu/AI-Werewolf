@@ -72,6 +72,7 @@ export function buildGameReviewVariables(input: GameReviewPromptInput): GameRevi
   const byPlayerId = new Map(players.map((p) => [p.playerId, p]));
   const summaryByKey = new Map(speechSummaries.map((s) => [`${s.day}:${s.seatNo}`, s.summary]));
   const emittedSummaryKeys = new Set<string>();
+  const summaryLines: string[] = [];
 
   const timeline = events
     .toSorted((a, b) => a.sequence - b.sequence)
@@ -90,19 +91,27 @@ export function buildGameReviewVariables(input: GameReviewPromptInput): GameRevi
             ? `${e.day}:${actor.seatNo}`
             : undefined;
         const summary = summaryKey ? summaryByKey.get(summaryKey) : undefined;
-        // SpeechSummary 已经聚合同一玩家当天的全部公开发言，只在时间线出现一次；
-        // 若逐事件替换会把同一段摘要重复 N 次，并伪装成每次 PK/遗言都说了相同内容。
+        // 整日摘要单列，不能放在第一条发言的位置冒充当时的原话。
         if (summary && summaryKey) {
           if (emittedSummaryKeys.has(summaryKey)) return null;
           emittedSummaryKeys.add(summaryKey);
+          summaryLines.push(`${dayPrefix}${who}公开发言摘要：${summary}`);
+          return null;
         }
-        return `${dayPrefix}${who}${kind}：${summary ?? truncate(speech, SPEECH_FALLBACK_LIMIT)}`;
+        return `${dayPrefix}${who}${kind}：${truncate(speech, SPEECH_FALLBACK_LIMIT)}`;
       }
 
       const line = renderActionLine(e.actionType, e.content ?? {}, e.visibility);
       return line ? `${dayPrefix}${line}` : null;
     })
     .filter((line): line is string => line !== null);
+
+  if (summaryLines.length) {
+    timeline.push(
+      '【公开发言摘要：按日聚合的赛后概括，不是逐字原话，不用于还原某次发言时点的已知信息】',
+      ...summaryLines,
+    );
+  }
 
   const roster = players
     .toSorted((a, b) => (a.seatNo ?? 0) - (b.seatNo ?? 0))

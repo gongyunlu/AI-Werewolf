@@ -195,6 +195,26 @@ describe('computePlayerMetrics', () => {
 });
 
 describe('selectKeyEvents', () => {
+  it('夜间直接终局仍识别首血，平安结算不占用首血', () => {
+    const result = selectKeyEvents([
+      event({ actionType: 'night_resolved', content: { deaths: [] } }),
+      event({ actionType: 'night_resolved', content: { deaths: [{ seatNo: 2 }] } }),
+      event({ actionType: 'game_ended', content: { winner: 'villager' } }),
+    ]);
+    expect(result).toEqual([
+      { day: 1, type: 'first_blood', seatNo: 2 },
+      { day: 1, type: 'game_end', winner: 'villager' },
+    ]);
+  });
+
+  it('同一死亡的内部结算与次日公告不会重复记首血', () => {
+    expect(
+      selectKeyEvents([
+        event({ actionType: 'night_resolved', content: { deaths: [{ seatNo: 2 }] } }),
+        event({ actionType: 'player_died', content: { deaths: [{ seatNo: 2 }] } }),
+      ]),
+    ).toEqual([{ day: 1, type: 'first_blood', seatNo: 2 }]);
+  });
   it('抽取首血/放逐/终局并保持顺序', () => {
     const events = [
       event({

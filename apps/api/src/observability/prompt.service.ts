@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Langfuse } from 'langfuse-langchain';
 import type { Env } from '../config/env.validation';
@@ -12,11 +12,15 @@ import {
   type PromptName,
 } from './prompt-templates';
 
+import turnRelease from './turn-prompt-release.json';
+import { RedisService } from '../redis/redis.service';
+
 // prompt 渲染结果
 export interface RenderedPrompt {
   text: string;
   name: PromptName;
   version: number | null;
+  source?: 'langfuse' | 'local_release' | 'local_default';
 }
 
 // 在线 prompt 的本地缓存 TTL（秒）：在 Langfuse 面板修改 prompt 后，最多等待该时长即生效
@@ -31,7 +35,12 @@ export class PromptService {
   private readonly logger = new Logger(PromptService.name);
   private readonly langfuse: Langfuse | null;
 
-  constructor(private readonly configService: ConfigService<Env, true>) {
+  private readonly localSnapshots = new Map<string, Promise<FrozenPrompts>>();
+
+  constructor(
+    private readonly configService: ConfigService<Env, true>,
+    @Optional() private readonly redis?: RedisService,
+  ) {
     const publicKey = this.configService.get('LANGFUSE_PUBLIC_KEY');
     const secretKey = this.configService.get('LANGFUSE_SECRET_KEY');
     const baseUrl = this.configService.get('LANGFUSE_HOST');
@@ -58,7 +67,31 @@ export class PromptService {
   ): Promise<RenderedPrompt> {
     const template = frozen ? frozen[name] : await this.loadTemplate(name);
     if (!template) throw new ExperimentInvalidError(`实验快照缺少 prompt: ${name}`);
-    return { text: renderTemplate(template.text, variables), name, version: template.version };
+    return { ...template, text: renderTemplate(template.text, variables), name };
+  }
+
+  /** 使用 SET NX 决定同局唯一版本，避免并发玩家各自获取 production。 */
+  async captureGameSnapshot(gameId: string, names: PromptName[]): Promise<FrozenPrompts> {
+    if (!this.redis) {
+      let pending = this.localSnapshots.get(gameId);
+      if (!pending) {
+        pending = this.captureSnapshot(names).catch((error) => {
+          this.localSnapshots.delete(gameId);
+          throw error;
+        });
+        this.localSnapshots.set(gameId, pending);
+      }
+      return structuredClone(await pending);
+    }
+    const key = 'game:' + gameId + ':player-prompts';
+    const existing = await this.redis.get(key);
+    if (existing) return JSON.parse(existing) as FrozenPrompts;
+    const snapshot = await this.captureSnapshot(names);
+    // 和事件/快照一同保留，不设置会在长局中途过期的 TTL。
+    if (await this.redis.set(key, JSON.stringify(snapshot), 'NX')) return snapshot;
+    const winner = await this.redis.get(key);
+    if (!winner) throw new Error('对局 Prompt 快照写入后不可读取');
+    return JSON.parse(winner) as FrozenPrompts;
   }
 
   async captureSnapshot(
@@ -73,10 +106,24 @@ export class PromptService {
   }
 
   private async loadTemplate(name: PromptName): Promise<RenderedPrompt> {
-    const fallback = FALLBACK_TEMPLATES[name];
+    const candidate = (turnRelease.prompts as FrozenPrompts)[name];
+    const released =
+      candidate &&
+      REQUIRED_PROMPT_VARIABLES[name].every((variable) =>
+        extractPromptVariables(candidate.text).includes(variable),
+      )
+        ? candidate
+        : undefined;
+    const fallback = released?.text ?? FALLBACK_TEMPLATES[name];
+    const local: RenderedPrompt = {
+      text: fallback,
+      name,
+      version: released?.version ?? null,
+      source: released ? 'local_release' : 'local_default',
+    };
 
     if (!this.langfuse) {
-      return { text: fallback, name, version: null };
+      return local;
     }
 
     try {
@@ -93,12 +140,12 @@ export class PromptService {
         throw new Error(`production 版本缺少必需变量: ${missingVariables.join(', ')}`);
       }
 
-      return { text: client.prompt, name, version: client.version };
+      return { text: client.prompt, name, version: client.version, source: 'langfuse' };
     } catch (error) {
       this.logger.warn(
-        `prompt "${name}" 拉取或校验失败，降级本地默认模板: ${error instanceof Error ? error.message : String(error)}`,
+        `prompt "${name}" 拉取或校验失败，使用本地副本: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return { text: fallback, name, version: null };
+      return local;
     }
   }
 }

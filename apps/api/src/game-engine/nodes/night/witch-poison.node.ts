@@ -1,3 +1,5 @@
+import { ModelCallError } from '@/llm/model-call-guard';
+import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
@@ -6,7 +8,6 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建女巫毒药决策 Schema（值域动态收敛到存活玩家）
@@ -62,7 +63,7 @@ export class WitchPoisonNode {
       });
       await context.eventBus?.publish(nightPromptEvent);
 
-      // 计算合法毒药目标：存活玩家（女巫不可自救，排除自己）
+      // 毒药只能用于其他存活玩家；以前用过解药不限制后续夜晚用毒。
       const legalSeatNos = state.players
         .filter((p) => p.isAlive && p.id !== witch.id)
         .map((p) => p.seatNo);
@@ -71,14 +72,21 @@ export class WitchPoisonNode {
         return {};
       }
 
+      let effectStarted = false;
       try {
-        const contextData = await this.agentRuntime.prepareContextPublic(
-          state.gameId,
-          witch.id,
-          'night_action' as any,
-          `你今晚只能毒以下存活玩家之一：${legalSeatNos.join('号、')}号。`,
-          'witch_poison',
-        );
+        const contextData = await this.agentRuntime.prepareContextPublic({
+          gameId: state.gameId,
+          playerId: witch.id,
+          scenario: 'night_action',
+          actionType: 'witch_poison',
+          position: {
+            day: state.currentDay,
+            phase: '女巫毒药',
+            round: 0,
+            aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+          },
+          additionalContext: `你今晚只能毒以下存活玩家之一：${legalSeatNos.join('号、')}号。`,
+        });
 
         const threadId = getPlayerThreadId(state.gameId, witch.id);
 
@@ -91,23 +99,11 @@ export class WitchPoisonNode {
 
         if (decision.action === 'poison') {
           const targetPlayer = state.players.find((p) => p.seatNo === decision.targetSeatNo);
-          if (!targetPlayer || !targetPlayer.isAlive || targetPlayer.id === witch.id) {
-            gameLogger.warn(
-              `[女巫毒药] 目标座位号 ${decision.targetSeatNo} 非法，降级为不使用毒药`,
-            );
-            const skipEvent = await context.eventWriter.writeWitchPoisonEvent({
-              gameId: state.gameId,
-              day: state.currentDay,
-              actorId: witch.id,
-              targetId: witch.id,
-              targetSeatNo: 0,
-              thinking: reasoning,
-            });
-            await this.agentRuntime.recordExperienceUsages(contextData, skipEvent);
-            await context.eventBus?.publish(skipEvent);
-            return {};
+          if (!targetPlayer || !legalSeatNos.includes(targetPlayer.seatNo)) {
+            throw new ModelCallError('invalid_output');
           }
 
+          effectStarted = true;
           const poisonEvent = await context.eventWriter.writeWitchPoisonEvent({
             gameId: state.gameId,
             day: state.currentDay,
@@ -126,6 +122,7 @@ export class WitchPoisonNode {
             ),
           };
         } else {
+          effectStarted = true;
           const poisonEvent = await context.eventWriter.writeWitchPoisonEvent({
             gameId: state.gameId,
             day: state.currentDay,
@@ -140,9 +137,9 @@ export class WitchPoisonNode {
           return {};
         }
       } catch (error) {
-        if (isAbortError(error, context.signal)) {
-          throw error;
-        }
+        if (effectStarted) failAfterEffect(error);
+
+        await allowModelFallback(error, context, 'poison');
         gameLogger.error(
           `[女巫毒药] Agent 执行异常，降级为不使用: ${error instanceof Error ? error.message : String(error)}`,
         );

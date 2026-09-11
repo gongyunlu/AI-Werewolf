@@ -361,67 +361,6 @@ async function main() {
         });
       }
     }
-
-    // ========== 测试游戏数据 ==========
-
-    // 使用固定的 UUID 作为测试游戏 ID
-    const testGameId = '00000000-0000-0000-0000-000000000001';
-
-    // 删除旧的测试游戏（如果存在）
-    await prisma.game.deleteMany({
-      where: { id: testGameId },
-    });
-
-    // 创建测试游戏
-    const testGame = await prisma.game.create({
-      data: {
-        id: testGameId,
-        rulesetId: 'standard6p',
-        skillVersion: 'v1',
-        status: 'in_progress',
-        totalDays: 1,
-        startedAt: new Date(),
-      },
-    });
-
-    // 获取前 6 个 Agent（阿三到阿八）
-    const agents = await prisma.agent.findMany({
-      where: { name: { in: ['阿三', '阿四', '阿五', '阿六', '阿七', '阿八'] } },
-      orderBy: { name: 'asc' },
-      take: 6,
-    });
-
-    if (agents.length < 6) {
-      throw new Error(`[seed] Agent 数量不足，需要 6 个，实际找到 ${agents.length} 个`);
-    }
-
-    // 创建 6 个玩家：2 狼人 + 1 预言家 + 1 女巫 + 2 平民
-    const playerRoles = [
-      { role: 'werewolf', faction: 'werewolf' },
-      { role: 'werewolf', faction: 'werewolf' },
-      { role: 'seer', faction: 'villager' },
-      { role: 'witch', faction: 'villager' },
-      { role: 'villager', faction: 'villager' },
-      { role: 'villager', faction: 'villager' },
-    ];
-
-    for (let i = 0; i < 6; i++) {
-      await prisma.player.create({
-        data: {
-          gameId: testGame.id,
-          agentId: agents[i].id,
-          seatNo: i + 1,
-          role: playerRoles[i].role,
-          faction: playerRoles[i].faction,
-          displayName: agents[i].name,
-          modelName: agents[i].defaultModelName,
-          memoryLabelSnapshot: agents[i].memoryLabel,
-          deathDay: null,
-          deathCause: null,
-          isSheriff: false,
-        },
-      });
-    }
   } finally {
     await prisma.$disconnect();
   }

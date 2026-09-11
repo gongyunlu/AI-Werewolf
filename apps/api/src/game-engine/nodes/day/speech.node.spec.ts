@@ -1,3 +1,4 @@
+import { ModelCallError } from '@/llm/model-call-guard';
 import { SpeechNode } from './speech.node';
 import { createGameState, createPlayer } from '../../testing/test-utils';
 import type { NodeContext } from '../node.types';
@@ -39,7 +40,7 @@ describe('SpeechNode', () => {
   it('发言失败时仍关闭已打开的场景', async () => {
     const agentRuntime = {
       prepareContextPublic: jest.fn().mockResolvedValue({}),
-      streamSpeech: jest.fn().mockRejectedValue(new Error('model failed')),
+      streamSpeech: jest.fn().mockRejectedValue(new ModelCallError('transient')),
     };
     const context = createContext();
     const node = new SpeechNode(agentRuntime as never).create()(context);

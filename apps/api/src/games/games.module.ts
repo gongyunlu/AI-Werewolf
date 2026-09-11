@@ -6,11 +6,13 @@ import { GameExecutorModule } from '../game-executor/game-executor.module';
 import { GameQueueModule } from '../game-queue/game-queue.module';
 import { SseModule } from '../sse/sse.module';
 import { GameLaunchService } from './game-launch.service';
+import { GameResumeService } from './game-resume.service';
+import { GameRecoveryModule } from '../game-recovery/game-recovery.module';
 
 @Module({
-  imports: [GameExecutorModule, GameQueueModule, SseModule],
+  imports: [GameExecutorModule, GameQueueModule, SseModule, GameRecoveryModule],
   controllers: [GamesController, GameStreamController],
-  providers: [GamesService, GameLaunchService],
+  providers: [GamesService, GameLaunchService, GameResumeService],
   exports: [GamesService, GameLaunchService],
 })
 export class GamesModule {}

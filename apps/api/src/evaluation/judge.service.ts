@@ -131,7 +131,7 @@ export class JudgeService {
       playerSeatNo: player.seatNo,
       playerRole: player.role ?? '',
       playerFaction: player.faction ?? '',
-      isAlive: player.deathDay === null || (event.day ?? 0) <= player.deathDay,
+      deathDay: player.deathDay,
       teammates,
       decision: {
         sequence: event.sequence,

@@ -16,7 +16,8 @@ export const ACTION_TYPES = {
   SPEECH: 'speech', // 发言(狼队商议为 visibility='wolf' 的同类事件)
   VOTE: 'vote', // 投票
   PLAYER_EXECUTED: 'player_executed', // 投票放逐结算
-  PLAYER_DIED: 'player_died', // 死亡结算/公布死讯(可能因守卫/女巫抵消而无此事件)
+  NIGHT_RESOLVED: 'night_resolved', // 系统内部夜间结算，与死亡状态同事务记录
+  PLAYER_DIED: 'player_died', // 次日公开死讯
   PEACEFUL_NIGHT: 'peaceful_night', // 平安夜（无死亡公告）
 
   // —— 夜间角色技能 ——

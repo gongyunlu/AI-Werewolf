@@ -116,7 +116,11 @@ describe('buildGameReviewVariables 上帝视角复盘', () => {
       judgments: [],
     });
 
-    expect(vars.timeline).toContain('第1天 1号位(agent-1/seer)发言：自称预言家');
+    expect(vars.timeline).toContain('第1天 1号位(agent-1/seer)公开发言摘要：自称预言家');
+    expect(vars.timeline).not.toContain('发言：自称预言家');
+    expect(vars.timeline.indexOf('公开发言摘要：自称预言家')).toBeGreaterThan(
+      vars.timeline.indexOf('第3天'),
+    );
     expect(vars.timeline.match(/自称预言家/g)).toHaveLength(1);
     expect(vars.timeline).not.toContain('这是第一天的原文');
     expect(vars.timeline).not.toContain('这是同一天的第二次公开发言');

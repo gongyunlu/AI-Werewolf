@@ -61,6 +61,7 @@ export function knowledgeEmbeddingText(chunk: {
 
 export function buildKnowledgeFacts(input: {
   day: number;
+  role?: string | null;
   playerId: string;
   seatNo: number | null;
   events: Array<{
@@ -95,8 +96,10 @@ export function buildKnowledgeFacts(input: {
     }
   }
   if (saved) facts.push('has_saved');
-  else facts.push('antidote_unused');
-  if (!poisoned) facts.push('poison_unused');
+  if (input.role === 'witch') {
+    if (!saved) facts.push('antidote_unused');
+    if (!poisoned) facts.push('poison_unused');
+  }
   const latestKill = input.events.findLast(
     (e) => e.actionType === 'wolf_kill' && e.day === input.day,
   );

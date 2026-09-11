@@ -1,10 +1,11 @@
+import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import type { GameGraphState, GameGraphUpdate } from '../../core/types';
 import type { NodeContext, GameNode } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
+import { throwIfAborted } from '@/llm/abort.utils';
 
 /**
  * 遗言节点（流式版本）
@@ -20,18 +21,16 @@ export class LastWordsNode {
           return {};
         }
 
-        const deadLastNight = await context.prisma.player.findMany({
-          where: {
-            gameId: state.gameId,
-            deathDay: 1,
-          },
-          orderBy: { seatNo: 'asc' },
-        });
+        const deadLastNight = state.players
+          .filter((p) => !p.isAlive && p.deathDay === 1)
+          .toSorted((a, b) => a.seatNo - b.seatNo);
 
         if (deadLastNight.length === 0) {
           return {};
         }
 
+        const completedSeats: number[] = [];
+        const skippedSeats: number[] = [];
         for (const player of deadLastNight) {
           throwIfAborted(context.signal);
           const sceneId = `last-words-${state.gameId}-${state.currentDay}-${player.id}`;
@@ -39,13 +38,24 @@ export class LastWordsNode {
           let thinkingDurationMs = 0;
           let contentDurationMs = 0;
 
+          let effectStarted = false;
           try {
-            const contextData = await this.agentRuntime.prepareContextPublic(
-              state.gameId,
-              player.id,
-              'last_words' as any,
-              undefined,
-            );
+            const position = {
+              day: state.currentDay,
+              phase: '首夜死亡遗言',
+              order: deadLastNight.map((p) => p.seatNo),
+              completedSeats: [...completedSeats],
+              skippedSeats: [...skippedSeats],
+              round: 0,
+              aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+            };
+            const contextData = await this.agentRuntime.prepareContextPublic({
+              gameId: state.gameId,
+              playerId: player.id,
+              scenario: 'last_words',
+              actionType: 'speech',
+              position,
+            });
 
             const threadId = getPlayerThreadId(state.gameId, player.id);
 
@@ -83,8 +93,12 @@ export class LastWordsNode {
             thinkingDurationMs = result.thinkingDurationMs;
             contentDurationMs = result.contentDurationMs;
 
-            if (player.seatNo !== null) {
+            if (content) {
+              effectStarted = true;
               const event = await context.eventWriter.writePlayerSpeechEvent({
+                turn: { phase: position.phase, round: position.round },
+                sceneId,
+                sceneType: 'last_words',
                 gameId: state.gameId,
                 day: state.currentDay,
                 actorId: player.id,
@@ -93,11 +107,15 @@ export class LastWordsNode {
                 thinking,
               });
               await this.agentRuntime.recordExperienceUsages(contextData, event);
+              completedSeats.push(player.seatNo);
+            } else {
+              skippedSeats.push(player.seatNo);
             }
           } catch (error) {
-            if (isAbortError(error, context.signal)) {
-              throw error;
-            }
+            if (effectStarted) failAfterEffect(error);
+
+            await allowModelFallback(error, context, player.id);
+            skippedSeats.push(player.seatNo);
             gameLogger.error(
               `[遗言阶段] ${player.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,
             );

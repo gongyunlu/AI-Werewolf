@@ -153,7 +153,6 @@ describe('resolveNightActions - 夜晚结算逻辑', () => {
           guardTarget: null,
           witchAntidoteTarget: 'witch', // 女巫试图自救
           witchPoisonTarget: null,
-          witchPlayerId: 'witch',
         }),
       ).toThrow('女巫不能自救');
     });
@@ -311,52 +310,21 @@ describe('resolveNightActions - 夜晚结算逻辑', () => {
       expect(result.poisonUsed).toBe(false);
     });
 
-    it('女巫解药和毒药不能对同一人使用（解药在前）', () => {
+    it('女巫可以在后续夜晚毒此前救过的目标', () => {
       const witch = createPlayer('witch', 3, {
         role: 'witch',
-        antidoteUsedOn: 'p1', // 之前对 p1 使用过解药
+        antidoteUsedOn: 'p1',
         hasAntidoteUsed: true,
       });
-      const players = [
-        createPlayer({ id: 'p1', seatNo: 1, role: 'villager', faction: 'villager' }),
-        createPlayer({ id: 'p2', seatNo: 2, role: 'villager', faction: 'villager' }),
-        witch,
-      ];
-
-      expect(() =>
-        resolveNightActions({
-          players,
-          wolfTarget: null,
-          guardTarget: null,
-          witchAntidoteTarget: null,
-          witchPoisonTarget: 'p1', // 尝试对 p1 使用毒药
-          witchPlayerId: 'witch',
-        }),
-      ).toThrow('女巫解药和毒药不能对同一人使用');
-    });
-
-    it('女巫解药和毒药不能对同一人使用（毒药在前）', () => {
-      const witch = createPlayer('witch', 3, {
-        role: 'witch',
-        poisonUsedOn: 'p1', // 之前对 p1 使用过毒药
-        hasPoisonUsed: true,
+      const result = resolveNightActions({
+        players: [createPlayer('p1', 1, 'villager', 'villager'), witch],
+        wolfTarget: null,
+        guardTarget: null,
+        witchAntidoteTarget: null,
+        witchPoisonTarget: 'p1',
       });
-      const players = [
-        createPlayer({ id: 'p1', seatNo: 1, role: 'villager', faction: 'villager' }),
-        createPlayer({ id: 'p2', seatNo: 2, role: 'villager', faction: 'villager' }),
-        witch,
-      ];
-
-      expect(() =>
-        resolveNightActions({
-          players,
-          wolfTarget: 'p1',
-          guardTarget: null,
-          witchAntidoteTarget: 'p1', // 尝试对 p1 使用解药
-          witchPoisonTarget: null,
-          witchPlayerId: 'witch',
-        }),
-      ).toThrow('女巫解药和毒药不能对同一人使用');
+      expect(result.deaths).toEqual([{ playerId: 'p1', cause: 'witch_poison' }]);
+      expect(result.poisonUsed).toBe(true);
     });
 
     it('女巫可以对不同的人分别使用解药和毒药', () => {
@@ -377,7 +345,6 @@ describe('resolveNightActions - 夜晚结算逻辑', () => {
         guardTarget: null,
         witchAntidoteTarget: null,
         witchPoisonTarget: 'p2', // 对 p2 使用毒药（不同于 p1）
-        witchPlayerId: 'witch',
       });
 
       expect(result.deaths).toHaveLength(1);

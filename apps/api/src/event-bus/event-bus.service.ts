@@ -141,14 +141,43 @@ export class EventBusService {
    * @param event 已持久化的事件记录
    */
   async publish(event: Event): Promise<void> {
+    this.publishRecord(event);
+  }
+
+  async restore(gameId: string): Promise<void> {
+    if (!this.sseBroadcaster) return;
+    const [events, players] = await Promise.all([
+      this.prisma.event.findMany({ where: { gameId }, orderBy: { sequence: 'asc' } }),
+      this.prisma.player.findMany({ where: { gameId, deathDay: { not: null } } }),
+    ]);
+    this.sseBroadcaster.complete(gameId);
+    this.sseBroadcaster.getOrCreate(gameId);
+    for (const event of events) this.publishRecord(event, true);
+    for (const player of players) {
+      if (player.deathDay !== null && player.deathCause)
+        this.sseBroadcaster.emit(gameId, {
+          type: 'player.died',
+          playerId: player.id,
+          deathDay: player.deathDay,
+          deathCause: player.deathCause,
+        });
+    }
+    this.sseBroadcaster.markRestored(gameId);
+  }
+
+  private publishRecord(event: Event, restoreSpeech = false): void {
     if (!this.sseBroadcaster) return;
 
-    const sceneType = ACTION_TO_SCENE_TYPE[event.actionType];
+    const content = event.content as Record<string, unknown>;
+    const speech = restoreSpeech && event.actionType === ACTION_TYPES.SPEECH;
+    const sceneType = speech
+      ? ((content.sceneType as SceneType | undefined) ?? 'speech')
+      : ACTION_TO_SCENE_TYPE[event.actionType];
     if (!sceneType) return;
 
     const visibility: SceneVisibility =
       (event.visibility as SceneVisibility) ?? VISIBILITY_TYPES.PUBLIC;
-    const sceneId = event.id;
+    const sceneId = speech && typeof content.sceneId === 'string' ? content.sceneId : event.id;
     const metadata = extractMetadata(event);
 
     this.sseBroadcaster.emit(event.gameId, {
@@ -160,6 +189,14 @@ export class EventBusService {
       initialContent: formatContent(event),
       metadata,
     });
+
+    if (speech && typeof content.thinking === 'string')
+      this.sseBroadcaster.emit(event.gameId, {
+        type: 'scene.append',
+        sceneId,
+        token: content.thinking,
+        contentType: 'thinking',
+      });
 
     this.sseBroadcaster.emit(event.gameId, {
       type: 'scene.close',

@@ -1,3 +1,4 @@
+import { createAgentRuntime } from '../testing/agent-runtime.fixture';
 import {
   abortExperiment,
   assertExperimentConfiguration,
@@ -5,7 +6,6 @@ import {
 } from './experiment-integrity';
 import type { ExperimentSnapshot } from './experiment-snapshot';
 import type { PrismaService } from '../prisma/prisma.service';
-import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import { SeerCheckNode } from '../game-engine/nodes/night/seer-check.node';
 import { createGameState, createPlayer } from '../game-engine/testing/test-utils';
 
@@ -41,10 +41,19 @@ it('冻结记忆检索异常穿过 runtime 和预言家节点，不产生随机�
     $executeRaw: jest.fn().mockResolvedValue(1),
     event: { findMany: jest.fn().mockResolvedValue([]) },
   };
-  const runtime = new AgentRuntimeService(
-    ...([{}, prisma, {}, {}, {}, {}, {}, {}, {}, {}] as unknown as ConstructorParameters<
-      typeof AgentRuntimeService
-    >),
+  const runtime = createAgentRuntime(
+    ...([
+      { get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)) },
+      prisma,
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+    ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   jest
     .spyOn(runtime as any, 'prepareContext')
@@ -70,14 +79,31 @@ it('冻结记忆检索异常穿过 runtime 和预言家节点，不产生随机�
 
 it('普通上下文错误保持原异常，不因对局属于实验而读取状态或标记失效', async () => {
   const prisma = { game: { findUnique: jest.fn() }, $executeRaw: jest.fn() };
-  const runtime = new AgentRuntimeService(
-    ...([{}, prisma, {}, {}, {}, {}, {}, {}, {}, {}] as unknown as ConstructorParameters<
-      typeof AgentRuntimeService
-    >),
+  const runtime = createAgentRuntime(
+    ...([
+      { get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)) },
+      prisma,
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+    ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   const error = new Error('temporary context error');
   jest.spyOn(runtime as any, 'prepareContext').mockRejectedValue(error);
-  await expect(runtime.prepareContextPublic('g', 'p', 'vote')).rejects.toBe(error);
+  await expect(
+    runtime.prepareContextPublic({
+      gameId: 'g',
+      playerId: 'p',
+      scenario: 'vote',
+      actionType: 'vote',
+      position: { day: 1, phase: 'vote', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+    }),
+  ).rejects.toBe(error);
   expect(prisma.game.findUnique).not.toHaveBeenCalled();
   expect(prisma.$executeRaw).not.toHaveBeenCalled();
 });

@@ -1,8 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  ExecutionOwnershipError,
+  GameRecoveryService,
+  type RecoveryManifest,
+} from '../game-recovery/game-recovery.service';
+import { decodeRecoveryValue } from '../game-recovery/recovery-value';
+import { recoveryFingerprint } from '../game-recovery/recovery-manifest';
+import { PLAYER_TURN_PROMPT_NAMES, PROMPT_NAMES } from '../observability/prompt-templates';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import { EventWriterService } from '../game-engine/events/event-writer.service';
-import { GameEngine } from '../game-engine/core/game-engine';
+import { GameEngineFactory } from './game-engine.factory';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import type { GameGraphState, PlayerState } from '../game-engine/core/types';
 import { ConfigService } from '@nestjs/config';
@@ -14,10 +22,7 @@ import {
 } from '../game-engine/core/game-engine.exception';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import { EventBusService } from '../event-bus/event-bus.service';
-import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
-import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import { GameAnalysisService } from '../reflection/game-analysis.service';
-import { LangfuseService } from '../observability/langfuse.service';
 import { PromptService } from '../observability/prompt.service';
 import { PostGameAnalysisError } from './game-executor.exception';
 
@@ -31,7 +36,10 @@ import { PostGameAnalysisError } from './game-executor.exception';
 @Injectable()
 export class GameExecutorService {
   private readonly logger = new Logger(GameExecutorService.name);
-  private abortControllers = new Map<string, AbortController>(); // 存储每个游戏的 AbortController
+  private abortControllers = new Map<
+    string,
+    { controller: AbortController; generation?: number }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -39,12 +47,11 @@ export class GameExecutorService {
     private readonly eventWriter: EventWriterService,
     private readonly configService: ConfigService<Env, true>,
     private readonly broadcaster: SseBroadcasterService,
-    private readonly nodeRegistrar: NodeRegistrar,
     private readonly eventBus: EventBusService,
-    private readonly speechSummarizer: SpeechSummarizerService,
     private readonly gameAnalysisService: GameAnalysisService,
-    private readonly langfuse: LangfuseService,
     private readonly promptService: PromptService,
+    private readonly engineFactory: GameEngineFactory,
+    @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
   /**
@@ -53,7 +60,7 @@ export class GameExecutorService {
    * @param gameId - 游戏对局ID
    * @returns 游戏最终状态
    */
-  async executeGame(gameId: string): Promise<GameGraphState> {
+  async executeGame(gameId: string, generation?: number): Promise<GameGraphState> {
     // 1. 查询对局数据
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
@@ -74,7 +81,7 @@ export class GameExecutorService {
       );
     }
 
-    const initialState = this.buildInitialState(game);
+    let initialState = this.buildInitialState(game);
     const preset = ALL_PRESETS[game.ruleset.id];
     if (!preset) {
       throw new Error(`ruleset ${game.ruleset.id} 不支持，请检查数据一致性`);
@@ -89,27 +96,60 @@ export class GameExecutorService {
     // 初始化 Redis sequence 计数器（处理 Redis 重启或游戏恢复场景）
     await this.eventWriter.initializeSequenceCounter(gameId);
 
+    // 旧对局没有执行记录，不能通过重新初始化来冒充恢复。
+    let execution;
+    if (this.recovery && game.rulesetId === 'standard6p' && !game.experiment) {
+      execution = await this.prisma.gameExecution.findUnique({ where: { gameId } });
+      if (!execution) {
+        if (await this.prisma.event.count({ where: { gameId } }))
+          throw new ConflictException('已有事件的历史对局缺少执行检查点，不能从第一夜重新执行');
+        execution = await this.recovery.create(
+          gameId,
+          initialState,
+          {
+            version: 1,
+            fingerprint: recoveryFingerprint(this.configService, game.ruleset.definition),
+            prompts: await this.promptService.captureGameSnapshot(gameId, [
+              ...PLAYER_TURN_PROMPT_NAMES,
+              PROMPT_NAMES.summarizerGlobalSummary,
+              PROMPT_NAMES.summarizerJudgmentHuman,
+            ]),
+          },
+          new Date(Date.now() + this.configService.get('GAME_MAX_DURATION_MS')),
+        );
+      }
+    }
+    if (execution) {
+      if (generation !== undefined && execution.generation !== generation)
+        throw new ExecutionOwnershipError();
+      const manifest = decodeRecoveryValue<RecoveryManifest>(execution.manifest);
+      if (manifest.fingerprint !== recoveryFingerprint(this.configService, game.ruleset.definition))
+        throw new ConflictException('执行记录与当前运行版本不一致');
+      initialState = decodeRecoveryValue<GameGraphState>(execution.initialState);
+    }
+
     // 3. 创建游戏引擎
-    const engine = new GameEngine(
-      this.agentRuntime,
-      this.prisma,
-      this.eventWriter,
-      this.broadcaster,
-      this.nodeRegistrar,
-      this.eventBus,
-      this.configService,
-      this.speechSummarizer,
-      this.langfuse,
-      this.promptService,
-    );
+    const engine = this.engineFactory.create();
 
     // 4. 创建 AbortController（用于中断游戏）
+    if (this.abortControllers.has(gameId)) throw new ExecutionOwnershipError();
     const abortController = new AbortController();
-    this.abortControllers.set(gameId, abortController);
+    this.abortControllers.set(gameId, {
+      controller: abortController,
+      generation: execution?.generation,
+    });
 
     // 5. 运行游戏
     try {
-      const finalState = await engine.run(initialState, preset, abortController.signal);
+      const run = async (signal: AbortSignal) => {
+        if (execution && execution.generation > 1) await this.eventBus.restore(gameId);
+        else this.broadcaster.getOrCreate(gameId);
+        return engine.run(initialState, preset, signal);
+      };
+      const finalState =
+        execution && this.recovery
+          ? await this.recovery.run(execution, abortController.signal, run)
+          : await run(abortController.signal);
 
       // 6. 投递赛后分析。用显式错误类型告诉 Worker「引擎已完整返回，只需重试分析」，
       // 不能再靠数据库恰好已是 FINISHED 来猜测错误发生在哪个阶段。
@@ -134,6 +174,16 @@ export class GameExecutorService {
     }
   }
 
+  async recoveryFingerprintForGame(gameId: string): Promise<string> {
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+      include: { ruleset: true },
+    });
+    if (!game || game.rulesetId !== 'standard6p' || game.experiment)
+      throw new ConflictException('当前恢复入口仅支持普通标准六人局');
+    return recoveryFingerprint(this.configService, game.ruleset.definition);
+  }
+
   /** 为已经 FINISHED 的对局执行幂等结算并投递分析，供正常结束与队列重试共用。 */
   async analyzeFinishedGame(gameId: string): Promise<void> {
     try {
@@ -154,12 +204,24 @@ export class GameExecutorService {
    * @returns 是否成功中断
    */
   abortGame(gameId: string): boolean {
-    const abortController = this.abortControllers.get(gameId);
+    const abortController = this.abortControllers.get(gameId)?.controller;
     if (abortController) {
       abortController.abort();
       return true;
     }
     return false;
+  }
+
+  async interruptActiveGames(): Promise<void> {
+    await Promise.all(
+      [...this.abortControllers].map(async ([gameId, { controller, generation }]) => {
+        try {
+          await this.recovery?.interrupt(gameId, generation);
+        } finally {
+          controller.abort(new ExecutionOwnershipError());
+        }
+      }),
+    );
   }
 
   /**

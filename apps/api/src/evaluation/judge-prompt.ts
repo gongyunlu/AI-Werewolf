@@ -1,5 +1,5 @@
-import { ACTION_TYPES, ROLES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
-import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
+import { ACTION_TYPES } from '@ai-werewolf/shared';
+import { getHistoricallyVisibleEvents } from '../game-engine/rules/visibility';
 import { getActionLabel, renderActionLine } from './action-catalog';
 import {
   FALLBACK_TEMPLATES,
@@ -34,7 +34,7 @@ export interface JudgePromptInput {
   playerSeatNo: number | null;
   playerRole: string;
   playerFaction: string;
-  isAlive: boolean; // 决策时点是否存活（影响女巫刀口可见性）
+  deathDay: number | null; // 还原观察当时的权限，保留死亡前已知的信息
   teammates: number[]; // 同阵营队友座位号（狼人互为队友）
   decision: JudgeDecisionInput;
   events: JudgeEventInput[]; // 全量事件，内部按 sequence < decision.sequence 截断
@@ -87,26 +87,6 @@ export type JudgePromptVariables = {
 };
 
 /**
- * 女巫交药后对刀口的「累积知识」：交药前看过的刀口事件（WOLF_KILL）对她仍可见。
- *
- * getVisibleVisibilitiesForRole 是「当前可见性」语义（交药后女巫不再被唤醒看刀口，
- * 游戏引擎据此判断实时可见性是对的），但 judge 视角还原要重建「该玩家在此刻知道什么」，
- * 必须补回交药前看过的刀口（女巫在交药前被唤醒看到过这些刀口事件）。
- */
-function isWitchRetainedKill(
-  role: string,
-  event: JudgeEventInput,
-  antidoteSeq: number | undefined,
-): boolean {
-  return (
-    role === ROLES.WITCH &&
-    event.visibility === VISIBILITY_TYPES.WOLF_KILL &&
-    antidoteSeq !== undefined &&
-    event.sequence < antidoteSeq
-  );
-}
-
-/**
  * 计算 judge prompt 的渲染变量（视角还原 + 事件渲染 + 决策描述）。
  *
  * 与模板文本解耦：变量计算保持纯函数可单测，模板渲染由调用方走 PromptService。
@@ -117,37 +97,18 @@ export function buildJudgePromptVariables(input: JudgePromptInput): JudgePromptV
     playerSeatNo,
     playerRole,
     playerFaction,
-    isAlive,
+    deathDay,
     teammates,
     decision,
     events,
   } = input;
 
-  // 女巫是否已用过解药：只看决策之前的 witch_save（本人）。同时记下交药 sequence——
-  // 交药后不再被唤醒看刀口，但仍保留交药前看过的刀口（累积知识），judge 视角还原需补回，
-  // 否则会把「女巫报自己救的银水」误判成凭空捏造。
-  const antidoteEvent = events.find(
-    (e) =>
-      e.sequence < decision.sequence &&
-      e.actionType === ACTION_TYPES.WITCH_SAVE &&
-      e.actorId === playerId &&
-      e.content.saved === true,
+  const visibleEvents = getHistoricallyVisibleEvents(
+    { id: playerId, role: playerRole, deathDay },
+    events.filter((e) => e.sequence < decision.sequence),
   );
-  const hasUsedAntidote = antidoteEvent !== undefined;
-  const antidoteSeq = antidoteEvent?.sequence;
-
-  const visible = getVisibleVisibilitiesForRole({
-    role: playerRole,
-    isAlive,
-    hasUsedAntidote,
-  });
-
-  const contextLines = events
+  const contextLines = visibleEvents
     .filter((e) => {
-      if (e.sequence >= decision.sequence) return false;
-      if (!visible.includes(e.visibility) && !isWitchRetainedKill(playerRole, e, antidoteSeq)) {
-        return false;
-      }
       // 投票是并发「同时举票」：评估投票决策时排除本轮及之后的投票，保留同 day 已结束轮次，避免视角泄漏假象
       if (
         decision.actionType === ACTION_TYPES.VOTE &&
@@ -215,37 +176,25 @@ export function buildSpeechJudgePromptVariables(input: SpeechJudgePromptInput): 
 
   const lines: string[] = [];
   const targets: SpeechJudgeTarget[] = [];
-  let hasUsedAntidote = false;
 
-  for (const e of events.toSorted((a, b) => a.sequence - b.sequence)) {
-    const isAlive = deathDay === null || (e.day ?? 0) <= deathDay;
-    const visible = getVisibleVisibilitiesForRole({ role: playerRole, isAlive, hasUsedAntidote });
+  for (const e of getHistoricallyVisibleEvents(
+    { id: playerId, role: playerRole, deathDay },
+    events,
+  ).toSorted((a, b) => a.sequence - b.sequence)) {
+    const dayPrefix = e.day != null ? `第${e.day}天 ` : '';
+    const isOwnSpeech = e.actionType === ACTION_TYPES.SPEECH && e.actorId === playerId;
 
-    if (visible.includes(e.visibility)) {
-      const dayPrefix = e.day != null ? `第${e.day}天 ` : '';
-      const isOwnSpeech = e.actionType === ACTION_TYPES.SPEECH && e.actorId === playerId;
-
-      if (isOwnSpeech) {
-        const speech = typeof e.content.speech === 'string' ? e.content.speech.trim() : '';
-        if (speech) {
-          targets.push({ index: targets.length + 1, sequence: e.sequence, day: e.day });
-          lines.push(`[发言#${targets.length}] ${dayPrefix}我的发言：${speech}`);
-        }
-      } else {
-        const line = renderActionLine(e.actionType, e.content ?? {}, e.visibility, {
-          fullSpeech: true,
-        });
-        if (line) lines.push(`${dayPrefix}${line}`);
+    if (isOwnSpeech) {
+      const speech = typeof e.content.speech === 'string' ? e.content.speech.trim() : '';
+      if (speech) {
+        targets.push({ index: targets.length + 1, sequence: e.sequence, day: e.day });
+        lines.push(`[发言#${targets.length}] ${dayPrefix}我的发言：${speech}`);
       }
-    }
-
-    // 解药状态在事件之后才生效：解药事件本身对女巫可见
-    if (
-      e.actionType === ACTION_TYPES.WITCH_SAVE &&
-      e.actorId === playerId &&
-      e.content.saved === true
-    ) {
-      hasUsedAntidote = true;
+    } else {
+      const line = renderActionLine(e.actionType, e.content ?? {}, e.visibility, {
+        fullSpeech: true,
+      });
+      if (line) lines.push(`${dayPrefix}${line}`);
     }
   }
 

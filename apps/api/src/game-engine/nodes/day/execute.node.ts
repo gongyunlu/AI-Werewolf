@@ -40,8 +40,8 @@ export const createExecuteNode: NodeFactory = (context) => {
       return p;
     });
 
-    // 写入 Event 表
-    const event = await context.eventWriter.writePlayerExiledEvent({
+    context.signal?.throwIfAborted();
+    const event = await context.eventWriter.commitExile({
       gameId: state.gameId,
       day: state.currentDay,
       targetId: target.id,
@@ -49,15 +49,6 @@ export const createExecuteNode: NodeFactory = (context) => {
       voteCount: state.exileVoteCount || 0,
     });
     await context.eventBus?.publish(event);
-
-    // 同步死亡状态到数据库
-    await context.prisma.player.update({
-      where: { id: target.id },
-      data: {
-        deathDay: state.currentDay,
-        deathCause: DEATH_CAUSES.EXECUTION,
-      },
-    });
 
     // 广播放逐死亡状态，供前端实时更新头像状态
     context.broadcaster?.emit(state.gameId, {

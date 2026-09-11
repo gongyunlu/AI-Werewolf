@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
 import { PrismaService } from '@/prisma/prisma.service';
 import { type Prisma, type Event } from '@/generated/prisma/client';
 import {
@@ -6,6 +7,8 @@ import {
   GAME_STATUSES,
   VISIBILITY_TYPES,
   PHASES,
+  DEATH_CAUSES,
+  type DeathCause,
   type SeerCheckResult,
 } from '@ai-werewolf/shared';
 import { RedisService } from '@/redis/redis.service';
@@ -30,7 +33,36 @@ export class EventWriterService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
+
+  /** 夜间结算与全部死亡状态同事务；即使当夜终局也保留内部结算事实。 */
+  async commitNightResolution(options: {
+    gameId: string;
+    day: number;
+    deaths: Array<{ playerId: string; seatNo: number; cause: DeathCause }>;
+  }): Promise<Event> {
+    return this.createEventWithSequence(
+      options.gameId,
+      {
+        day: options.day,
+        phase: PHASES.NIGHT,
+        actionType: ACTION_TYPES.NIGHT_RESOLVED,
+        visibility: VISIBILITY_TYPES.SYSTEM,
+        actorId: null,
+        targetIds: options.deaths.map((death) => death.playerId),
+        content: { deaths: options.deaths },
+      },
+      async (tx) => {
+        for (const death of options.deaths) {
+          await tx.player.update({
+            where: { id: death.playerId, gameId: options.gameId },
+            data: { deathDay: options.day, deathCause: death.cause },
+          });
+        }
+      },
+    );
+  }
 
   /**
    * 写入预言家查验事件
@@ -229,6 +261,10 @@ export class EventWriterService {
     seatNo: number;
     content: string;
     thinking?: string; // AI 的推理过程
+    sceneId?: string;
+    sceneType?: 'speech' | 'last_words';
+    /** 保留实际发言窗口与轮次，避免历史 PK、遗言被当成普通发言。 */
+    turn?: { phase: string; round: number };
   }): Promise<Event> {
     const { gameId, day, actorId, seatNo, content, thinking } = options;
 
@@ -243,6 +279,9 @@ export class EventWriterService {
         seatNo,
         speech: content,
         thinking,
+        sceneId: options.sceneId,
+        sceneType: options.sceneType,
+        turn: options.turn,
       },
     });
 
@@ -260,6 +299,7 @@ export class EventWriterService {
     content: string;
     round: number; // 讨论轮次
     thinking?: string;
+    sceneId?: string;
   }): Promise<Event> {
     const { gameId, day, actorId, seatNo, content, round, thinking } = options;
 
@@ -275,6 +315,8 @@ export class EventWriterService {
         speech: content,
         round,
         thinking,
+        sceneId: options.sceneId,
+        sceneType: 'night_action',
       },
     });
 
@@ -312,9 +354,9 @@ export class EventWriterService {
   }
 
   /**
-   * 写入放逐执行事件
+   * 原子提交放逐事件与玩家死亡状态
    */
-  async writePlayerExiledEvent(options: {
+  async commitExile(options: {
     gameId: string;
     day: number;
     targetId: string;
@@ -323,19 +365,28 @@ export class EventWriterService {
   }): Promise<Event> {
     const { gameId, day, targetId, targetSeatNo, voteCount } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
-      day,
-      phase: PHASES.EXECUTE,
-      actionType: ACTION_TYPES.PLAYER_EXECUTED,
-      visibility: VISIBILITY_TYPES.PUBLIC,
-      actorId: null,
-      targetIds: [targetId],
-      content: {
-        targetSeatNo,
-        voteCount,
-        message: `${targetSeatNo}号位被放逐出局`,
+    const event = await this.createEventWithSequence(
+      gameId,
+      {
+        day,
+        phase: PHASES.EXECUTE,
+        actionType: ACTION_TYPES.PLAYER_EXECUTED,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [targetId],
+        content: {
+          targetSeatNo,
+          voteCount,
+          message: `${targetSeatNo}号位被放逐出局`,
+        },
       },
-    });
+      async (tx) => {
+        await tx.player.update({
+          where: { id: targetId, gameId },
+          data: { deathDay: day, deathCause: DEATH_CAUSES.EXECUTION },
+        });
+      },
+    );
 
     return event;
   }
@@ -455,6 +506,36 @@ export class EventWriterService {
     totalDays: number;
     endedAt?: Date;
   }): Promise<Event> {
+    if (this.recovery?.current) {
+      return this.recovery.effect('game-end', async (tx) => {
+        const previous = await tx.event.findFirst({
+          where: { gameId: params.gameId },
+          orderBy: { sequence: 'desc' },
+          select: { sequence: true },
+        });
+        const event = await tx.event.create({
+          data: {
+            gameId: params.gameId,
+            sequence: (previous?.sequence ?? 0) + 1,
+            day: 0,
+            phase: PHASES.SYSTEM,
+            actionType: ACTION_TYPES.GAME_ENDED,
+            visibility: VISIBILITY_TYPES.PUBLIC,
+            content: { winner: params.winner },
+          },
+        });
+        await tx.game.update({
+          where: { id: params.gameId },
+          data: {
+            status: GAME_STATUSES.FINISHED,
+            winnerFaction: params.winnerFaction,
+            totalDays: params.totalDays,
+            endedAt: params.endedAt ?? new Date(),
+          },
+        });
+        return event;
+      });
+    }
     const key = `game:${params.gameId}:event_seq`;
     const persist = (sequence: number) =>
       this.prisma.$transaction(async (tx) => {
@@ -579,14 +660,35 @@ export class EventWriterService {
   private async createEventWithSequence(
     gameId: string,
     data: Omit<Prisma.EventUncheckedCreateInput, 'gameId' | 'sequence'>,
+    updateState?: (tx: Prisma.TransactionClient) => Promise<void>,
   ): Promise<Event> {
+    const write = async (tx: Prisma.TransactionClient, sequence: number) => {
+      const event = await tx.event.create({ data: { ...data, gameId, sequence } });
+      await updateState?.(tx);
+      return event;
+    };
+    if (this.recovery?.current) {
+      return this.recovery.effect(
+        `event/${data.actionType}/${data.actorId ?? 'system'}`,
+        async (tx) => {
+          const previous = await tx.event.findFirst({
+            where: { gameId },
+            orderBy: { sequence: 'desc' },
+            select: { sequence: true },
+          });
+          return write(tx, (previous?.sequence ?? 0) + 1);
+        },
+      );
+    }
+    const persist = (sequence: number) =>
+      updateState
+        ? this.prisma.$transaction((tx) => write(tx, sequence))
+        : write(this.prisma, sequence);
     const key = `game:${gameId}:event_seq`;
     const sequence = await this.redis.incr(key);
 
     try {
-      return await this.prisma.event.create({
-        data: { ...data, gameId, sequence },
-      });
+      return await persist(sequence);
     } catch (error) {
       // Redis 计数器与 DB 失同步（典型：对局中途 Redis 重启导致计数器归零）→ 撞 @@unique([gameId, sequence])。
       // 从 DB 读最大 sequence 重建计数器后重试一次。事件溯源允许序列空洞，仅兜底唯一约束冲突。
@@ -600,9 +702,7 @@ export class EventWriterService {
       });
       await this.redis.set(key, lastEvent?.sequence || 0);
       const nextSequence = await this.redis.incr(key);
-      return this.prisma.event.create({
-        data: { ...data, gameId, sequence: nextSequence },
-      });
+      return persist(nextSequence);
     }
   }
 }

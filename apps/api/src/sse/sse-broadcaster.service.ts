@@ -19,6 +19,7 @@ export class SseBroadcasterService {
   private readonly subjects = new Map<string, Subject<SseMessage>>();
   private readonly sequences = new Map<string, number>();
   private readonly histories = new Map<string, SequencedSseMessage[]>();
+  private readonly restoredScenes = new Map<string, Set<string>>();
 
   /** 获取或创建游戏的 Subject，调用方负责 complete */
   getOrCreate(gameId: string): Subject<SseMessage> {
@@ -34,6 +35,7 @@ export class SseBroadcasterService {
   emit(gameId: string, message: SseEmitPayload): void {
     const subject = this.subjects.get(gameId);
     if (!subject) return;
+    if ('sceneId' in message && this.restoredScenes.get(gameId)?.has(message.sceneId)) return;
     const seq = this.sequences.get(gameId)! + 1;
     this.sequences.set(gameId, seq);
     const msg = { ...message, sequence: seq } as SequencedSseMessage;
@@ -50,6 +52,17 @@ export class SseBroadcasterService {
   /** 检查游戏是否有活跃的广播流，控制器可用此方法做 404 前置校验 */
   exists(gameId: string): boolean {
     return this.subjects.has(gameId);
+  }
+
+  markRestored(gameId: string): void {
+    this.restoredScenes.set(
+      gameId,
+      new Set(
+        (this.histories.get(gameId) ?? []).flatMap((message) =>
+          message.type === 'scene.close' ? [message.sceneId] : [],
+        ),
+      ),
+    );
   }
 
   /** 建立无漏帧的恢复快照 + 实时流。 */
@@ -172,5 +185,6 @@ export class SseBroadcasterService {
     this.subjects.delete(gameId);
     this.sequences.delete(gameId);
     this.histories.delete(gameId);
+    this.restoredScenes.delete(gameId);
   }
 }

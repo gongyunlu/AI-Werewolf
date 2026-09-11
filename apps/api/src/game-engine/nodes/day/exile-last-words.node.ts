@@ -1,3 +1,4 @@
+import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { DEATH_CAUSES } from '@ai-werewolf/shared';
 import type { GameGraphState, GameGraphUpdate } from '../../core/types';
@@ -5,7 +6,7 @@ import type { NodeContext, GameNode } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError, throwIfAborted } from '@/agent-runtime/abort.utils';
+import { throwIfAborted } from '@/llm/abort.utils';
 
 /**
  * 被放逐者遗言节点（流式版本）
@@ -34,13 +35,24 @@ export class ExileLastWordsNode {
         let thinkingDurationMs = 0;
         let contentDurationMs = 0;
 
+        let effectStarted = false;
         try {
-          const contextData = await this.agentRuntime.prepareContextPublic(
-            state.gameId,
-            exiledPlayer.id,
-            'last_words' as any,
-            undefined,
-          );
+          const position = {
+            day: state.currentDay,
+            phase: '白天放逐遗言',
+            order: [exiledPlayer.seatNo],
+            completedSeats: [],
+            skippedSeats: [],
+            round: 0,
+            aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+          };
+          const contextData = await this.agentRuntime.prepareContextPublic({
+            gameId: state.gameId,
+            playerId: exiledPlayer.id,
+            scenario: 'last_words',
+            actionType: 'speech',
+            position,
+          });
 
           const threadId = getPlayerThreadId(state.gameId, exiledPlayer.id);
 
@@ -78,7 +90,11 @@ export class ExileLastWordsNode {
           thinkingDurationMs = result.thinkingDurationMs;
           contentDurationMs = result.contentDurationMs;
 
+          effectStarted = true;
           const event = await context.eventWriter.writePlayerSpeechEvent({
+            turn: { phase: position.phase, round: position.round },
+            sceneId,
+            sceneType: 'last_words',
             gameId: state.gameId,
             day: state.currentDay,
             actorId: exiledPlayer.id,
@@ -88,9 +104,9 @@ export class ExileLastWordsNode {
           });
           await this.agentRuntime.recordExperienceUsages(contextData, event);
         } catch (error) {
-          if (isAbortError(error, context.signal)) {
-            throw error;
-          }
+          if (effectStarted) failAfterEffect(error);
+
+          await allowModelFallback(error, context, 'exile-last-words');
           gameLogger.error(
             `[被放逐者遗言] ${exiledPlayer.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,
           );

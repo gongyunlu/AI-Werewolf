@@ -1,4 +1,4 @@
-import { AgentRuntimeService } from './agent-runtime.service';
+import { createAgentRuntime } from '../testing/agent-runtime.fixture';
 
 it.each(['on', 'off'])(
   '实验 %s 使用冻结记忆，覆盖进程开关，记录 OFF 输入但不更新普通记忆',
@@ -41,14 +41,14 @@ it.each(['on', 'off'])(
     const globalMemory = { retrieveActivePatterns: jest.fn() };
     const knowledge = { retrieve: jest.fn().mockResolvedValue([]), recordUsages: jest.fn() };
     const summary = {
-      summarizeForAgent: jest.fn().mockResolvedValue({
+      readPersonalJudgments: jest.fn().mockResolvedValue({
         recentSpeeches: [],
         olderSpeechesSummary: [],
         recentJudgments: [],
         olderJudgmentsSummary: [],
       }),
     };
-    const service = new AgentRuntimeService(
+    const service = createAgentRuntime(
       ...([
         { get: jest.fn((key) => (key === 'ARK_EMBEDDING_MODEL' ? 'embed' : arm === 'off')) },
         prisma,
@@ -60,25 +60,22 @@ it.each(['on', 'off'])(
         {},
         {},
         {},
-      ] as unknown as ConstructorParameters<typeof AgentRuntimeService>),
+      ] as unknown as Parameters<typeof createAgentRuntime>),
     );
     const runtime = service as unknown as {
-      buildLayeredContext: jest.Mock;
       assembleSystemPrompt: jest.Mock;
-      getCurrentRound: jest.Mock;
     };
-    runtime.buildLayeredContext = jest
-      .fn()
-      .mockResolvedValue({ critical: '', recent: '', history: '' });
+
     runtime.assembleSystemPrompt = jest.fn().mockResolvedValue('input');
-    runtime.getCurrentRound = jest.fn().mockResolvedValue(1);
-    const context = await service.prepareContextPublic(
-      'g',
-      'p',
-      'night_action',
-      '选择查验',
-      'seer_check',
-    );
+
+    const context = await service.prepareContextPublic({
+      gameId: 'g',
+      playerId: 'p',
+      scenario: 'night_action',
+      actionType: 'seer_check',
+      position: { day: 1, phase: 'night_action', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+      additionalContext: '选择查验',
+    });
     await service.recordExperienceUsages(context, {
       id: 'e',
       gameId: 'g',
@@ -143,11 +140,26 @@ it.each(['on', 'off'])(
         content: { voteRound: 1, voterSeatNo: 2, targetSeatNo: 4 },
       },
     ]);
-    const pk = await service.prepareContextPublic('g', 'p', 'vote', 'PK', undefined, 1);
+    const pk = await service.prepareContextPublic({
+      gameId: 'g',
+      playerId: 'p',
+      scenario: 'vote',
+      actionType: 'vote',
+      position: { day: 1, phase: 'vote', round: 1, aliveSeats: [1, 2, 3, 4, 5, 6] },
+      additionalContext: 'PK',
+    });
     expect(pk.replay?.evidence).toEqual([expect.objectContaining({ id: 'old-vote' })]);
 
     memory.retrieveFrozen.mockRejectedValue(new Error('embedding unavailable'));
-    await expect(service.prepareContextPublic('g', 'p', 'night_action')).rejects.toMatchObject({
+    await expect(
+      service.prepareContextPublic({
+        gameId: 'g',
+        playerId: 'p',
+        scenario: 'night_action',
+        actionType: 'seer_check',
+        position: { day: 1, phase: 'night_action', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+      }),
+    ).rejects.toMatchObject({
       name: 'AbortError',
       message: '实验冻结记忆检索失败',
     });

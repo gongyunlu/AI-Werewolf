@@ -24,7 +24,7 @@ describe('buildJudgePrompt 视角还原', () => {
     playerSeatNo: 2,
     playerRole: ROLES.WEREWOLF,
     playerFaction: FACTIONS.WEREWOLF,
-    isAlive: true,
+    deathDay: null,
     teammates: [5],
     decision: {
       sequence: 100,

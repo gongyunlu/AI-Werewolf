@@ -1,12 +1,12 @@
+import { settleGameActions } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
-import type { NodeContext, NodeFactory } from '../node.types';
+import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { resolveVotes } from '../../rules/vote-resolution';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 function buildPkVoteSchema(legalSeatNos: number[]) {
   return z.object({
@@ -48,91 +48,54 @@ export class PkVoteNode {
       }
 
       const votePromises = voters.map(async (player) => {
-        try {
-          const extraInfo = `这是PK投票，你只能投给以下候选人之一: ${state.pkCandidates!.join(', ')}号位。不能弃票。`;
+        const extraInfo = `这是PK投票，你只能投给以下候选人之一: ${state.pkCandidates!.join(', ')}号位。不能弃票。`;
 
-          const contextData = await this.agentRuntime.prepareContextPublic(
-            state.gameId,
-            player.id,
-            'vote' as any,
-            extraInfo,
-            undefined,
-            Math.max(1, state.pkRound),
-          );
-
-          const threadId = getPlayerThreadId(state.gameId, player.id);
-
-          const { decision } = await this.agentRuntime.decide<VoteDecision>(
-            contextData,
-            buildPkVoteSchema(state.pkCandidates!),
-            context.signal,
-            threadId,
-          );
-
-          // 验证投票目标是否在PK候选人中
-          if (!state.pkCandidates!.includes(decision.targetSeatNo)) {
-            gameLogger.warn(
-              `[PK投票] ${player.seatNo}号位投票目标 ${decision.targetSeatNo} 不在PK候选人中，视为无效投票`,
-            );
-            const event = await context.eventWriter.writePlayerVoteEvent({
-              gameId: state.gameId,
-              day: state.currentDay,
-              actorId: player.id,
-              voteRound: Math.max(1, state.pkRound),
-              voterSeatNo: player.seatNo,
-              targetSeatNo: 0,
-            });
-            await this.agentRuntime.recordExperienceUsages(contextData, event);
-            await context.eventBus?.publish(event);
-            return null;
-          }
-
-          const event = await context.eventWriter.writePlayerVoteEvent({
-            gameId: state.gameId,
+        const contextData = await this.agentRuntime.prepareContextPublic({
+          gameId: state.gameId,
+          playerId: player.id,
+          scenario: 'vote',
+          actionType: 'vote',
+          position: {
             day: state.currentDay,
-            actorId: player.id,
-            voteRound: Math.max(1, state.pkRound),
-            voterSeatNo: player.seatNo!,
-            targetSeatNo: decision.targetSeatNo,
-          });
-          await this.agentRuntime.recordExperienceUsages(contextData, event);
-          await context.eventBus?.publish(event);
+            phase: 'PK投票',
+            round: Math.max(1, state.pkRound),
+            aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+          },
+          additionalContext: extraInfo,
+        });
 
-          return {
-            voterId: player.id,
-            voterSeatNo: player.seatNo!,
-            targetSeatNo: decision.targetSeatNo,
-          };
-        } catch (error) {
-          if (isAbortError(error, context.signal)) {
-            throw error;
-          }
-          gameLogger.error(
-            `[PK投票] ${player.seatNo}号位投票出错: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          const event = await context.eventWriter.writePlayerVoteEvent({
-            gameId: state.gameId,
-            day: state.currentDay,
-            actorId: player.id,
-            voteRound: Math.max(1, state.pkRound),
-            voterSeatNo: player.seatNo,
-            targetSeatNo: 0,
-          });
-          await context.eventBus?.publish(event);
-          return null;
+        const threadId = getPlayerThreadId(state.gameId, player.id);
+
+        const { decision } = await this.agentRuntime.decide<VoteDecision>(
+          contextData,
+          buildPkVoteSchema(state.pkCandidates!),
+          context.signal,
+          threadId,
+        );
+
+        // 验证投票目标是否在PK候选人中
+        if (!state.pkCandidates!.includes(decision.targetSeatNo)) {
+          throw new Error('PK 投票目标非法，停止本批结算');
         }
+        const event = await context.eventWriter.writePlayerVoteEvent({
+          gameId: state.gameId,
+          day: state.currentDay,
+          actorId: player.id,
+          voteRound: Math.max(1, state.pkRound),
+          voterSeatNo: player.seatNo!,
+          targetSeatNo: decision.targetSeatNo,
+        });
+        await this.agentRuntime.recordExperienceUsages(contextData, event);
+        await context.eventBus?.publish(event);
+
+        return {
+          voterId: player.id,
+          voterSeatNo: player.seatNo!,
+          targetSeatNo: decision.targetSeatNo,
+        };
       });
 
-      const voteResults = await Promise.all(votePromises);
-      const votes = voteResults.filter(
-        (v): v is { voterId: string; voterSeatNo: number; targetSeatNo: number } => v !== null,
-      );
-
-      // 降级策略：如果没有有效投票，随机从PK候选人中选一个
-      if (votes.length === 0) {
-        gameLogger.warn('[PK投票] 无有效投票，启用降级策略：随机选择一个PK候选人放逐');
-        return this.fallbackToRandomExile(state, context, 'no_valid_votes');
-      }
+      const votes = await settleGameActions(votePromises);
 
       // 构建投票数据结构：targetId → voterIds[]
       const votesMap = new Map<string, string[]>();
@@ -147,8 +110,8 @@ export class PkVoteNode {
       }
 
       if (votesMap.size === 0) {
-        gameLogger.warn('[PK投票] 投票数据为空，启用降级策略：随机选择一个PK候选人放逐');
-        return this.fallbackToRandomExile(state, context, 'empty_vote_map');
+        gameLogger.warn('[PK投票] 投票数据为空，停止对局');
+        throw new Error('PK 投票结果无法关联目标，停止对局');
       }
 
       const sheriff = state.players.find((p) => p.isSheriff && p.isAlive);
@@ -193,35 +156,6 @@ export class PkVoteNode {
         pkCandidates: null,
         pkRound: 0,
       };
-    };
-  }
-
-  private async fallbackToRandomExile(state: GameGraphState, context: NodeContext, reason: string) {
-    const candidates = state.pkCandidates ?? [];
-    const randomSeatNo = candidates[Math.floor(Math.random() * candidates.length)];
-    const exiledPlayer = state.players.find((player) => player.seatNo === randomSeatNo);
-
-    if (!exiledPlayer) {
-      throw new Error(`[PK投票] 数据一致性错误：未找到降级放逐目标 ${randomSeatNo}号位`);
-    }
-
-    const event = await context.eventWriter.writeJudgeEvent({
-      gameId: state.gameId,
-      day: state.currentDay,
-      content: `PK投票无有效结果，随机放逐${randomSeatNo}号位。`,
-      metadata: {
-        fallback: 'random_pk_exile',
-        reason,
-        targetSeatNo: randomSeatNo,
-      },
-    });
-    await context.eventBus?.publish(event);
-
-    return {
-      exileTarget: exiledPlayer.id,
-      exileVoteCount: 0,
-      pkCandidates: null,
-      pkRound: 0,
     };
   }
 }

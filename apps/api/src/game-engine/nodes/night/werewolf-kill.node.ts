@@ -1,7 +1,9 @@
+import { allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
+import { saveNodeValue } from '../node.types';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import {
@@ -10,7 +12,6 @@ import {
   wolfVoting,
   selectTargetFromVotes,
 } from './werewolf-collaboration';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 狼人刀人节点（两阶段版本）
@@ -49,14 +50,14 @@ export class WerewolfKillNode {
             proposalEventIds,
           );
         } else {
-          const discussion = await wolfDiscussion(werewolves, state, context);
-          const votes = await wolfVoting(werewolves, state, context, discussion, proposalEventIds);
-          targetPlayerId = selectTargetFromVotes(votes, state);
+          await wolfDiscussion(werewolves, state, context);
+          const votes = await wolfVoting(werewolves, state, context, proposalEventIds);
+          targetPlayerId = await saveNodeValue(context, 'wolf-target', () =>
+            selectTargetFromVotes(votes, state),
+          );
         }
       } catch (error) {
-        if (isAbortError(error, context.signal)) {
-          throw error;
-        }
+        await allowModelFallback(error, context, 'kill');
         gameLogger.error(
           `[狼人刀人] 协作流程异常，降级为随机落刀: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -68,7 +69,11 @@ export class WerewolfKillNode {
         gameLogger.warn('[狼人刀人] Agent 决策失败，降级为随机落刀');
         const nonWerewolves = state.players.filter((p) => p.isAlive && p.role !== ROLES.WEREWOLF);
         if (nonWerewolves.length > 0) {
-          const randomTarget = nonWerewolves[Math.floor(Math.random() * nonWerewolves.length)];
+          const randomTarget = await saveNodeValue(
+            context,
+            'fallback-target',
+            () => nonWerewolves[Math.floor(Math.random() * nonWerewolves.length)],
+          );
           targetPlayerId = randomTarget.id;
         }
       }

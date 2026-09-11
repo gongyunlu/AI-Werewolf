@@ -1,6 +1,5 @@
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { ROLES } from '@ai-werewolf/shared';
 import { resolveNightActions } from '../../rules/night-resolution';
 
 /**
@@ -11,8 +10,6 @@ import { resolveNightActions } from '../../rules/night-resolution';
  */
 export const createNightResolveNode: NodeFactory = (context) => {
   return async (state: GameGraphState) => {
-    const witch = state.players.find((p) => p.role === ROLES.WITCH);
-
     // 统一结算：守卫守护抵消刀人、解药救人、毒药生效、同守同救
     const result = resolveNightActions({
       players: state.players,
@@ -20,7 +17,6 @@ export const createNightResolveNode: NodeFactory = (context) => {
       guardTarget: state.guardTarget,
       witchAntidoteTarget: state.witchAntidoteTarget,
       witchPoisonTarget: state.witchPoisonTarget,
-      witchPlayerId: witch?.id,
     });
 
     const nightDeaths = result.deaths;
@@ -39,18 +35,15 @@ export const createNightResolveNode: NodeFactory = (context) => {
       return p;
     });
 
-    // 更新数据库中的玩家死亡状态
-    const deadPlayers = updatedPlayers.filter((p) => !p.isAlive && p.deathDay === state.currentDay);
-
-    for (const player of deadPlayers) {
-      await context.prisma.player.update({
-        where: { id: player.id },
-        data: {
-          deathDay: player.deathDay,
-          deathCause: player.deathCause,
-        },
-      });
-    }
+    context.signal?.throwIfAborted();
+    await context.eventWriter.commitNightResolution({
+      gameId: state.gameId,
+      day: state.currentDay,
+      deaths: nightDeaths.map((death) => ({
+        ...death,
+        seatNo: state.players.find((player) => player.id === death.playerId)!.seatNo,
+      })),
+    });
 
     // 广播死亡状态，供前端实时更新头像状态
     for (const death of nightDeaths) {

@@ -2,6 +2,16 @@ import { ACTION_TYPES, VISIBILITY_TYPES } from '@ai-werewolf/shared';
 import { getActionLabel, isJudgeableAction, renderActionLine } from './action-catalog';
 
 describe('行为目录', () => {
+  it('内部夜间结算进入全局复盘时间线，但不作为玩家决策评分', () => {
+    const deaths = [{ seatNo: 2, cause: 'witch_poison' }];
+    expect(renderActionLine(ACTION_TYPES.NIGHT_RESOLVED, { deaths }, VISIBILITY_TYPES.SYSTEM)).toBe(
+      '夜间结算：2号位出局（witch_poison）',
+    );
+    expect(
+      renderActionLine(ACTION_TYPES.NIGHT_RESOLVED, { deaths: [] }, VISIBILITY_TYPES.SYSTEM),
+    ).toBe('夜间结算：无人死亡');
+    expect(isJudgeableAction(ACTION_TYPES.NIGHT_RESOLVED, { deaths })).toBe(false);
+  });
   it('登记的决策类行为同时具备判定、文案、渲染三项能力', () => {
     const decisions = [
       { actionType: ACTION_TYPES.VOTE, content: { voterSeatNo: 1, targetSeatNo: 2 } },

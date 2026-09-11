@@ -1,7 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
 import { ConfigService } from '@nestjs/config';
 import { type GameGraphState, type GameGraphUpdate } from './types';
-import { nodeRegistry } from '../nodes/node-registry';
+import type { NodeRegistry } from '../nodes/node-registry';
 import type { NodeContext } from '../nodes/node.types';
 import type { GamePreset } from '../presets/game-presets';
 import { DEFAULT_PRESET } from '../presets/game-presets';
@@ -13,11 +13,11 @@ import { EventBusService } from '@/event-bus/event-bus.service';
 import { GamePausedException, GameAbortedException } from './game-engine.exception';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { gameLogger } from '../utils/game-logger';
-import { NodeRegistrar } from '../nodes/node-registrar.service';
 import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.service';
 import { LangfuseService } from '@/observability/langfuse.service';
 import { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
+import { GameFailurePolicy } from './game-failure-policy';
 import { readExperiment } from '@/evaluation/experiment-snapshot';
 import {
   abortExperiment,
@@ -33,11 +33,11 @@ import {
  * - 执行游戏规则（谁先行动、何时结束）
  * - 调用节点处理具体逻辑
  */
-@Injectable()
 export class GameEngine {
   private nodeContext: NodeContext;
   private preset?: GamePreset;
   private initialized = false;
+  private nodeOrdinal = 0;
   private pauseCheckCache: { status: string; timestamp: number } | null = null;
   private readonly PAUSE_CHECK_CACHE_TTL = 1000; // 1秒缓存
 
@@ -46,12 +46,13 @@ export class GameEngine {
     private readonly prisma: PrismaService,
     private readonly eventWriter: EventWriterService,
     private readonly broadcaster: SseBroadcasterService,
-    private readonly nodeRegistrar: NodeRegistrar,
+    private readonly nodeRegistry: NodeRegistry,
     private readonly eventBus: EventBusService,
     private readonly configService: ConfigService<Env, true>,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly langfuse: LangfuseService,
     private readonly promptService: PromptService,
+    private readonly recovery?: GameRecoveryService,
   ) {
     this.nodeContext = {
       agentRuntime,
@@ -62,6 +63,7 @@ export class GameEngine {
       configService,
       langfuse,
       promptService,
+      recovery,
     };
   }
 
@@ -74,7 +76,13 @@ export class GameEngine {
     signal?: AbortSignal,
   ): Promise<GameGraphState> {
     // 初始化
-    this.initialize(preset, signal);
+    const duration = this.recovery?.current
+      ? this.recovery.current.execution.deadline.getTime() - Date.now()
+      : (this.configService.get('GAME_MAX_DURATION_MS') ?? 3_600_000);
+    if (duration <= 0) throw new Error('对局运行期限已到');
+    const deadline = AbortSignal.timeout(duration);
+    const runSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    this.initialize(preset, runSignal);
 
     gameLogger.log(`[游戏开始] gameId: ${initialState.gameId}`);
 
@@ -85,6 +93,10 @@ export class GameEngine {
         where: { id: state.gameId },
         select: { experiment: true },
       });
+      this.nodeContext.failurePolicy = new GameFailurePolicy(
+        this.configService.get('GAME_MAX_MODEL_FALLBACKS') ?? 2,
+        !!game?.experiment,
+      );
       if (game?.experiment) {
         assertExperimentConfiguration(
           readExperiment(game.experiment)!,
@@ -94,12 +106,18 @@ export class GameEngine {
       state = await this.executeNode('init', state);
 
       // 主循环
+      let phaseCount = 0;
+      const maxDays = this.configService.get('GAME_MAX_DAYS') ?? 20;
       while (!state.isGameOver) {
+        runSignal.throwIfAborted();
+        if (state.currentDay > maxDays || ++phaseCount > maxDays * 2)
+          throw new Error('对局已达到最大轮次，停止执行');
         // 检查暂停/取消
         await this.checkPause(state);
 
         // 执行当前阶段
         state = await this.executePhase(state);
+        runSignal.throwIfAborted();
 
         // 胜负判定
         state = await this.executeNode('checkWin', state);
@@ -127,9 +145,6 @@ export class GameEngine {
 
     this.preset = preset ?? DEFAULT_PRESET;
 
-    // 注册节点（必须在验证配置之前）
-    this.nodeRegistrar.registerAll();
-
     // 验证配置合法性
     this.validatePreset(this.preset);
 
@@ -143,6 +158,7 @@ export class GameEngine {
     this.nodeContext.pauseCheckWrapper = (node) => {
       return async (state: GameGraphState): Promise<GameGraphUpdate> => {
         await this.checkPause(state);
+        this.nodeContext.signal?.throwIfAborted();
         return node(state);
       };
     };
@@ -166,7 +182,7 @@ export class GameEngine {
 
     // 所有节点必须已注册
     const allNodes = [...nightPipeline, ...dayPipeline];
-    const registeredNodes = nodeRegistry.getRegisteredNodes();
+    const registeredNodes = this.nodeRegistry.getRegisteredNodes();
 
     for (const nodeName of allNodes) {
       if (!registeredNodes.includes(nodeName)) {
@@ -295,7 +311,9 @@ export class GameEngine {
    */
   private async generateDaySummaries(gameId: string, day: number): Promise<void> {
     try {
-      await this.speechSummarizer.generateDaySummaries(gameId, day);
+      const generate = () => this.speechSummarizer.generateDaySummaries(gameId, day);
+      if (this.recovery) await this.recovery.value(`summary/${day}`, generate);
+      else await generate();
     } catch (error) {
       gameLogger.error(
         `[日间总结] 生成失败: ${error instanceof Error ? error.message : String(error)}`,
@@ -307,8 +325,20 @@ export class GameEngine {
    * 执行单个节点
    */
   private async executeNode(nodeName: string, state: GameGraphState): Promise<GameGraphState> {
-    const node = nodeRegistry.getNode(nodeName, this.nodeContext);
-    const updates = await node(state);
-    return { ...state, ...updates };
+    this.nodeContext.signal?.throwIfAborted();
+    const execute = async (input: GameGraphState) => {
+      const node = this.nodeRegistry.getNode(nodeName, this.nodeContext);
+      const updates = await node(input);
+      return {
+        state: { ...input, ...updates },
+        fallbacks: this.nodeContext.failurePolicy?.count ?? 0,
+      };
+    };
+    const result = this.recovery
+      ? await this.recovery.node(this.nodeOrdinal++, nodeName, state, execute)
+      : await execute(state);
+    this.nodeContext.failurePolicy?.restore(result.fallbacks);
+    this.nodeContext.signal?.throwIfAborted();
+    return result.state;
   }
 }

@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { GameRecoveryService } from '../game-recovery/game-recovery.service';
+import type { Prisma } from '../generated/prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
@@ -25,15 +27,6 @@ export interface PrivateInfo {
 }
 
 /**
- * 发言记录（完整）
- */
-export interface SpeechRecord {
-  day: number;
-  seatNo: number;
-  speech: string; // 完整原文
-}
-
-/**
  * 发言摘要（LLM 生成，落 SpeechSummary 表，全局共享）
  */
 export interface SpeechSummary {
@@ -52,15 +45,9 @@ export interface JudgmentSummary {
 }
 
 /**
- * 个性化摘要结果（纯读组装，不含 LLM 调用）
+ * 个人历史判断（纯读组装，不含 LLM 调用）
  */
-export interface PersonalSummary {
-  // 近2天完整发言
-  recentSpeeches: SpeechRecord[];
-
-  // 2天以前的发言摘要（读 SpeechSummary 表）
-  olderSpeechesSummary: SpeechSummary[];
-
+export interface PersonalJudgments {
   // 我的主观判断（近2天完整）
   recentJudgments: AgentJudgment[];
 
@@ -75,7 +62,7 @@ const RECENT_WINDOW = 2;
  * Speech Summarizer Service
  *
  * 职责拆分（步骤②：摘要/判断时机搬迁）：
- * 1. `summarizeForAgent` —— 纯读组装：查近2天原文 + SpeechSummary 摘要 + 历史判断，不调 LLM
+ * 1. `readPersonalJudgments` —— 只读个人历史判断；发言原文由授权事件投影提供
  * 2. `generateDaySummaries` —— 白天结束时统一执行：①全局发言摘要 ②逐玩家主观判断
  */
 @Injectable()
@@ -89,36 +76,15 @@ export class SpeechSummarizerService {
     private readonly agentJudgmentService: AgentJudgmentService,
     private readonly promptService: PromptService,
     private readonly langfuse: LangfuseService,
+    @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
-  /**
-   * 为特定 Agent 组装个性化摘要（纯读，不调 LLM）
-   *
-   * @param gameId 对局 ID
-   * @param day 当前天数
-   * @param agentId 当前 Agent ID
-   * @param visiblePlayerSeats 可见的玩家座位号
-   */
-  async summarizeForAgent(
+  /** 历史主观判断与事件事实分别读取，避免摘要再次复述同一条原文。 */
+  async readPersonalJudgments(
     gameId: string,
     day: number,
     agentId: string,
-    visiblePlayerSeats: number[],
-  ): Promise<PersonalSummary> {
-    // 1. 近2天完整发言（原文）
-    const recentSpeeches = await this.loadRecentSpeeches(gameId, day, visiblePlayerSeats);
-
-    // 2. 2天以前的发言摘要（读 SpeechSummary 表）
-    const olderSummaryRecords = await this.prisma.speechSummary.findMany({
-      where: { gameId, day: { lte: day - RECENT_WINDOW - 1 } },
-      orderBy: [{ day: 'asc' }, { seatNo: 'asc' }],
-    });
-    const olderSpeechesSummary: SpeechSummary[] = olderSummaryRecords.map((s) => ({
-      day: s.day,
-      seatNo: s.seatNo,
-      summary: s.summary,
-    }));
-
+  ): Promise<PersonalJudgments> {
     // 3. 历史判断（近2天完整 + 更早压缩）
     const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
       agentId,
@@ -128,8 +94,6 @@ export class SpeechSummarizerService {
     const olderJudgmentsSummary = this.compressOlderJudgments(olderJudgments);
 
     return {
-      recentSpeeches,
-      olderSpeechesSummary,
       recentJudgments,
       olderJudgmentsSummary,
     };
@@ -150,45 +114,8 @@ export class SpeechSummarizerService {
   }
 
   /**
-   * 查询近2天完整发言（原文）
-   */
-  private async loadRecentSpeeches(
-    gameId: string,
-    day: number,
-    visiblePlayerSeats: number[],
-  ): Promise<SpeechRecord[]> {
-    const events = await this.prisma.event.findMany({
-      where: {
-        gameId,
-        actionType: ACTION_TYPES.SPEECH,
-        visibility: VISIBILITY_TYPES.PUBLIC, // 只取公开表水发言，隔离狼队夜间商议
-        day: { gte: day - RECENT_WINDOW, lte: day },
-      },
-      select: { day: true, content: true },
-      orderBy: { sequence: 'asc' },
-    });
-
-    const records: SpeechRecord[] = [];
-    for (const e of events) {
-      const content = e.content as any;
-      if (!content || typeof content !== 'object') continue;
-      const seatNo = content.seatNo;
-      if (typeof seatNo !== 'number') continue;
-      if (!visiblePlayerSeats.includes(seatNo)) continue;
-      records.push({
-        day: e.day ?? 0,
-        seatNo,
-        speech: content.speech || '(未发言)',
-      });
-    }
-    return records;
-  }
-
-  /**
-   * ① 全局发言摘要：为下一天准备 2 天以前的发言摘要，落 SpeechSummary 表
-   *
-   * 边界：day+1 天读取时，`summarizeForAgent` 读 `day <= (day+1) - 3 = day - 2`，
-   * 故此处生成 `speechDay <= day - RECENT_WINDOW` 的发言摘要。
+   * 全局发言摘要用于赛后复盘；玩家回合直接读取授权事件原文。
+   * 按已有窗口生成较早日期的摘要，避免对仍在进行的当天内容提炼。
    */
   private async generateGlobalSpeechSummaries(gameId: string, day: number): Promise<void> {
     const boundary = day - RECENT_WINDOW;
@@ -233,11 +160,15 @@ export class SpeechSummarizerService {
     const summaries = await this.callLLMForSummaries(gameId, Array.from(groups.values()));
 
     for (const s of summaries) {
-      await this.prisma.speechSummary.upsert({
-        where: { gameId_day_seatNo: { gameId, day: s.day, seatNo: s.seatNo } },
-        update: { summary: s.summary },
-        create: { gameId, day: s.day, seatNo: s.seatNo, summary: s.summary },
-      });
+      const persist = (tx: Prisma.TransactionClient) =>
+        tx.speechSummary.upsert({
+          where: { gameId_day_seatNo: { gameId, day: s.day, seatNo: s.seatNo } },
+          update: { summary: s.summary },
+          create: { gameId, day: s.day, seatNo: s.seatNo, summary: s.summary },
+        });
+      if (this.recovery?.current)
+        await this.recovery.effect(`speech-summary/${s.day}/${s.seatNo}`, persist);
+      else await persist(this.prisma);
     }
   }
 
@@ -318,7 +249,13 @@ export class SpeechSummarizerService {
               );
             }
             if (validJudgments.length > 0) {
-              await this.agentJudgmentService.saveJudgments(agentId, gameId, day, validJudgments);
+              if (this.recovery?.current) {
+                await this.recovery.effect(`judgments/${agentId}/${day}`, (tx) =>
+                  this.agentJudgmentService.saveJudgments(agentId, gameId, day, validJudgments, tx),
+                );
+              } else {
+                await this.agentJudgmentService.saveJudgments(agentId, gameId, day, validJudgments);
+              }
             }
           }),
         )),
@@ -412,7 +349,7 @@ export class SpeechSummarizerService {
         recentJudgments: this.formatRecentJudgments(recentJudgments),
         olderJudgments: this.formatOlderJudgments(olderJudgments),
       },
-      experiment?.prompts,
+      experiment?.prompts ?? this.recovery?.current?.manifest.prompts,
     );
 
     const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt.text)];
@@ -422,6 +359,7 @@ export class SpeechSummarizerService {
       const parser = new JsonOutputParser<any>();
       const chain = model.pipe(parser);
       const parsed = await chain.invoke(messages, {
+        signal: this.recovery?.current?.signal,
         ...this.langfuse.trace({
           runName: 'summarizer-judgment',
           gameId,
@@ -522,7 +460,7 @@ export class SpeechSummarizerService {
     const systemPrompt = await this.promptService.render(
       PROMPT_NAMES.summarizerGlobalSummary,
       undefined,
-      experiment?.prompts,
+      experiment?.prompts ?? this.recovery?.current?.manifest.prompts,
     );
 
     const speechesText = groups
@@ -538,6 +476,7 @@ export class SpeechSummarizerService {
       const parser = new JsonOutputParser<{ summaries: SpeechSummary[] }>();
       const chain = model.pipe(parser);
       const parsed = await chain.invoke(messages, {
+        signal: this.recovery?.current?.signal,
         ...this.langfuse.trace({
           runName: 'summarizer-global-summary',
           gameId,

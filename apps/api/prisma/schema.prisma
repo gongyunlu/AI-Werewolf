@@ -50,6 +50,7 @@ model Game {
   memoryUsages      MemoryUsage[]
   patternCandidates PatternCandidate[]
   knowledgeUsages   KnowledgeUsage[]
+  execution         GameExecution?
 
   @@map("games")
 }
@@ -471,6 +472,36 @@ model KnowledgeUsage {
   @@index([eventId])
   @@unique([chunkId, eventId])
   @@map("knowledge_usages")
+}
+
+// 已完成节点和行动记录属于同一执行版本，接管后旧执行者不能继续提交。
+model GameExecution {
+  gameId      String   @id @map("game_id") @db.Uuid
+  generation  Int      @default(1)
+  dispatchPending Boolean @default(false) @map("dispatch_pending")
+  owner       String?  @db.Uuid
+  initialState Json    @map("initial_state") @db.JsonB
+  manifest    Json     @db.JsonB
+  deadline    DateTime @db.Timestamptz
+  heartbeatAt DateTime? @map("heartbeat_at") @db.Timestamptz
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  steps       GameExecutionStep[]
+
+  @@map("game_executions")
+}
+
+model GameExecutionStep {
+  gameId    String   @map("game_id") @db.Uuid
+  key       String   @db.VarChar(240)
+  input     Json?    @db.JsonB
+  output    Json?    @db.JsonB
+  completed Boolean @default(false)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  execution GameExecution @relation(fields: [gameId], references: [gameId], onDelete: Cascade)
+
+  @@id([gameId, key])
+  @@map("game_execution_steps")
 }
 
 // 一次检索的完整候选与过滤记录，零命中和故障也独立记录。

@@ -16,7 +16,7 @@ describe('GameQueueService', () => {
     await expect(service.addGameJob('game-1')).resolves.toBe('game-1');
     expect(queue.add).toHaveBeenCalledWith(
       'run-game',
-      { gameId: 'game-1' },
+      { gameId: 'game-1', generation: 1 },
       expect.objectContaining({
         jobId: 'game-1',
         attempts: 6,

@@ -1,7 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { GameRecoveryService } from '../game-recovery/game-recovery.service';
 import { ConfigService } from '@nestjs/config';
-import { ChatOpenAI } from '@langchain/openai';
-import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  mapChatMessagesToStoredMessages,
+  mapStoredMessagesToChatMessages,
+} from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
@@ -10,23 +14,26 @@ import { GlobalMemoryService, type ActivePattern } from '../memory/global-memory
 import { KnowledgeService, type KnowledgeHit } from '../knowledge/knowledge.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
-import { LangfuseService, type TraceConfig } from '../observability/langfuse.service';
+import type { ModelCallMode } from '../llm/model-call-guard';
+import { throwIfAborted } from '../llm/abort.utils';
+import { ModelCallService } from '../llm/model-call.service';
+import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { PromptService } from '../observability/prompt.service';
-import { PROMPT_NAMES } from '../observability/prompt-templates';
+import { PROMPT_NAMES, PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
-import { resolveStructuredOutputMethod } from '../observability/structured-output-method';
 import { Prisma } from '../generated/prisma/client';
-import { getVisibleVisibilitiesForRole } from '../game-engine/rules/visibility';
+import {
+  getHistoricallyVisibleEvents,
+  getVisibleVisibilitiesForRole,
+} from '../game-engine/rules/visibility';
 import {
   ACTION_TYPES,
   AGENT_SCENARIOS,
   FACTIONS,
   ROLES,
-  SEER_CHECK_RESULTS,
-  VISIBILITY_TYPES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
-import { isAbortError, throwIfAborted } from './abort.utils';
+import { buildTurnContext, type TurnContextRequest } from './turn-context';
 import { formatMemorySection } from './memory-prompt.utils';
 import { buildScenarioQuery } from './scenario-query';
 import { ChatHistoryService } from './chat-history.service';
@@ -53,16 +60,6 @@ type PlayerWithGame = Prisma.PlayerGetPayload<{
 }>;
 
 type EventRecord = Prisma.EventGetPayload<Record<string, never>>;
-type Event = EventRecord;
-
-/**
- * 分层上下文
- */
-interface LayeredContext {
-  critical: string; // 关键信息（当前状态）
-  recent: string; // 最近一轮详细
-  history: string; // 历史摘要
-}
 
 /**
  * Agent 上下文（prepareContext 的产物，贯穿决策与发言）
@@ -81,13 +78,13 @@ interface AgentContext {
   pendingMemoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的攻略使用关系 */
   pendingKnowledgeUsages: Array<{ chunkId: string }>;
+  pendingHistory?: { threadId: string; history: BaseMessage[]; decision: unknown };
 }
 
 /**
  * Agent Runtime Service - 上下文准备、发言与决策
  *
  * 1. prepareContext - 准备上下文
- * 2. buildLayeredContext - 分层记忆
  * 3. assembleSystemPrompt - 组装 System Prompt（包含 Skill）
  * 4. decide - 同次生成理由与结构化动作
  */
@@ -103,41 +100,21 @@ export class AgentRuntimeService {
     private readonly knowledgeService: KnowledgeService,
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
-    private readonly langfuse: LangfuseService,
     private readonly promptService: PromptService,
     private readonly chatHistory: ChatHistoryService,
+    private readonly modelCalls: ModelCallService,
+    private readonly playerTurn: PlayerTurnService,
+    @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
-  /**
-   * 单次自然语言流式调用（不使用 thinking 模式 / reasoning_content / Structured Output）
-   *
-   * @param model 已配置 streaming 的模型实例
-   * @param messages 消息列表
-   * @param signal 中断信号
-   * @param onToken 流式 token 回调（可空，仅用于实时转发）
-   * @param trace 追踪配置（未启用追踪时 callbacks 为空数组）
-   * @returns 完整文本
-   */
-  private async streamPlainChat(
-    model: ChatOpenAI,
-    messages: BaseMessage[],
-    signal: AbortSignal | undefined,
-    onToken?: (token: string) => void,
-    trace?: TraceConfig,
-  ): Promise<string> {
-    let fullContent = '';
-    const stream = await model.stream(messages, { signal, ...trace });
-
-    for await (const chunk of stream) {
-      throwIfAborted(signal);
-
-      if (typeof chunk.content === 'string' && chunk.content) {
-        fullContent += chunk.content;
-        onToken?.(chunk.content);
-      }
-    }
-
-    return fullContent;
+  runModelCall<T>(
+    modelName: string,
+    call: (signal: AbortSignal, reportProgress: () => void) => Promise<T>,
+    signal?: AbortSignal,
+    diagnostics?: Record<string, unknown>,
+    mode: ModelCallMode = 'invoke',
+  ): Promise<T> {
+    return this.modelCalls.run(modelName, call, signal, diagnostics, mode);
   }
 
   /**
@@ -166,90 +143,21 @@ export class AgentRuntimeService {
     thinkingDurationMs: number;
     contentDurationMs: number;
   }> {
-    const { signal, onThinking, onContent } = options;
-    throwIfAborted(signal);
-    const startTime = Date.now();
-    const modelName = context.player.modelName;
-
-    const model = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
-      model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-      streaming: true,
+    let generated = false;
+    const saved = await this.durable(`speech/${context.player.id}`, async () => {
+      generated = true;
+      return {
+        result: await this.playerTurn.speech(context, await this.loadHistory(threadId), options),
+        replay: context.replay,
+      };
     });
-
-    const traceParams = {
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      scenario: context.scenario,
-      seatNo: context.player.seatNo,
-      role: context.player.role,
-    };
-    const history = await this.loadHistory(threadId);
-
-    const thinkingPrompt = await this.promptService.render(
-      PROMPT_NAMES.agentSpeechThinking,
-      undefined,
-      context.prompts,
-    );
-    const thinkingTrace = this.langfuse.trace({
-      runName: 'speech-thinking',
-      ...traceParams,
-      promptName: thinkingPrompt.name,
-      promptVersion: thinkingPrompt.version,
-    });
-    const thinkingMessages = [
-      new SystemMessage(context.systemPrompt),
-      ...history,
-      new HumanMessage(thinkingPrompt.text),
-    ];
-
-    // 阶段1：流式输出思考
-    const thinking = await this.streamPlainChat(
-      model,
-      thinkingMessages,
-      signal,
-      onThinking,
-      thinkingTrace,
-    );
-
-    throwIfAborted(signal);
-    const contentStartTime = Date.now();
-    const contentPrompt = await this.promptService.render(
-      PROMPT_NAMES.agentSpeechContent,
-      {
-        thinking,
-      },
-      context.prompts,
-    );
-    const contentTrace = this.langfuse.trace({
-      runName: 'speech-content',
-      ...traceParams,
-      promptName: contentPrompt.name,
-      promptVersion: contentPrompt.version,
-    });
-    const contentMessages = [
-      new SystemMessage(context.systemPrompt),
-      new HumanMessage(contentPrompt.text),
-    ];
-
-    // 阶段2：流式输出发言正文
-    const content = await this.streamPlainChat(
-      model,
-      contentMessages,
-      signal,
-      onContent,
-      contentTrace,
-    );
-
-    const contentEndTime = Date.now();
-    return {
-      thinking,
-      content,
-      thinkingDurationMs: contentStartTime - startTime,
-      contentDurationMs: contentEndTime - contentStartTime,
-    };
+    throwIfAborted(options.signal);
+    context.replay = saved.replay;
+    if (!generated) {
+      options.onThinking?.(saved.result.thinking);
+      options.onContent?.(saved.result.content);
+    }
+    return saved.result;
   }
 
   /** 在同一次模型调用中形成理由与动作，不再二次转换推理结论。 */
@@ -259,146 +167,36 @@ export class AgentRuntimeService {
     signal?: AbortSignal,
     threadId?: string,
   ): Promise<{ reasoning: string; decision: T }> {
+    const saved = await this.durable(`decision/${context.player.id}`, async () => {
+      const history = threadId ? await this.loadHistory(threadId) : [];
+      const result = await this.playerTurn.decide<T>(context, zodSchema, history, signal);
+      // 历史只能在对应行为事件提交后确认。
+      if (threadId) context.pendingHistory = { threadId, history, decision: result.decision };
+      return {
+        result,
+        replay: context.replay,
+        history: context.pendingHistory
+          ? {
+              ...context.pendingHistory,
+              history: mapChatMessagesToStoredMessages(context.pendingHistory.history),
+            }
+          : undefined,
+      };
+    });
+    context.replay = saved.replay;
     throwIfAborted(signal);
-    const outputSchema = z.object({
-      reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
-      decision: zodSchema,
-    });
-    const history = threadId ? await this.loadHistory(threadId) : [];
-    if (context.replay)
-      Object.assign(context.replay, {
-        schema: z.toJSONSchema(zodSchema),
-        outputSchema: z.toJSONSchema(outputSchema),
-        decisionMode: 'joint',
-        reasoningHistory: history.map((m) => ({ type: m.getType(), content: m.content })),
-      });
-    const modelName = context.player.modelName;
-    const baseModel = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
-      model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-      streaming: false,
-    });
-
-    // GLM 系列不支持 json_schema，须走 functionCalling；其余默认 jsonSchema（见 resolveStructuredOutputMethod）
-    const model = baseModel.withStructuredOutput(outputSchema, {
-      method: resolveStructuredOutputMethod(modelName),
-    });
-
-    const systemPrompt = await this.promptService.render(
-      PROMPT_NAMES.agentActionSystem,
-      { systemPrompt: context.systemPrompt },
-      context.prompts,
-    );
-
-    const trace = this.langfuse.trace({
-      runName: 'decision',
-      gameId: context.player.gameId,
-      playerId: context.player.id,
-      modelName,
-      scenario: context.scenario,
-      seatNo: context.player.seatNo,
-      role: context.player.role,
-      promptName: systemPrompt.name,
-      promptVersion: systemPrompt.version,
-    });
-
-    const baseMessages: BaseMessage[] = [
-      new SystemMessage(systemPrompt.text),
-      ...history,
-      new HumanMessage('请提交本次的 reasoning 和 decision，理由与最终动作必须一致。'),
-    ];
-
-    // function calling 模式下，模型不调用工具会抛异常（而非返回非法对象），
-    // 单次重试兜底，仍失败则抛给上层降级处理。
-    let decision: unknown;
-    try {
-      decision = await model.invoke(baseMessages, { signal, ...trace });
-    } catch (error) {
-      if (isAbortError(error, signal)) {
-        throw error;
-      }
-      this.logger.warn(
-        `[决策] ${modelName} 结构化输出失败，触发单次重试: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      decision = await model.invoke(baseMessages, {
-        signal,
-        ...this.langfuse.trace({
-          runName: 'decision-retry',
-          gameId: context.player.gameId,
-          playerId: context.player.id,
-          modelName,
-          scenario: context.scenario,
-          seatNo: context.player.seatNo,
-          role: context.player.role,
-          promptName: systemPrompt.name,
-          promptVersion: systemPrompt.version,
-        }),
-      });
-    }
-
-    // Zod 兜底校验：结构已由 structured output 层保证，此处仅做字段级校验
-    const result = outputSchema.parse(decision);
-    if (context.replay)
-      Object.assign(context.replay, {
-        reasoning: result.reasoning,
-        decision: result.decision,
-      });
-
-    // 保存决策结论到跨轮记忆（只存结论，不存推理过程）
-    if (threadId) {
-      await this.saveHistory(threadId, [
-        ...history,
-        new AIMessage(`决策结果：${JSON.stringify(result.decision)}`),
-      ]);
-    }
-
-    return { reasoning: result.reasoning, decision: result.decision as T };
+    context.pendingHistory = saved.history
+      ? {
+          ...saved.history,
+          history: mapStoredMessagesToChatMessages(saved.history.history),
+        }
+      : undefined;
+    return saved.result;
   }
 
-  /**
-   * 获取玩家可见的 visibility 列表
-   *
-   * 根据玩家角色返回该玩家有权看到的 Event visibility 类型
-   *
-   * @param player 玩家对象
-   * @param events 事件列表（用于判断女巫是否使用过药物）
-   * @returns 可见的 visibility 列表
-   */
-  private async getVisibleVisibilities(player: PlayerWithGame, events: Event[]): Promise<string[]> {
-    return getVisibleVisibilitiesForRole({
-      role: player.role,
-      isAlive: !player.deathDay, // deathDay 为 null 表示存活
-      hasUsedAntidote: events.some(
-        (e) =>
-          e.actionType === ACTION_TYPES.WITCH_SAVE &&
-          e.actorId === player.id &&
-          (e.content as { saved?: boolean } | null)?.saved === true,
-      ),
-    });
-  }
-
-  /**
-   * 步骤 1: Prepare Context（准备上下文）- 公开版本
-   *
-   * 供外部调用（如 Node 层），用于两阶段模式
-   */
-  async prepareContextPublic(
-    gameId: string,
-    playerId: string,
-    scenario: AgentScenario,
-    additionalContext?: string,
-    actionType?: string,
-    voteRound = 0,
-  ): Promise<AgentContext> {
-    return this.prepareContext({
-      gameId,
-      playerId,
-      scenario,
-      additionalContext,
-      actionType,
-      voteRound,
-    });
+  /** 在当前执行 scope 内物化整份输入，恢复时复用原文与版本。 */
+  async prepareContextPublic(input: TurnContextRequest): Promise<AgentContext> {
+    return this.durable(`context/${input.playerId}`, () => this.prepareContext(input));
   }
 
   /**
@@ -411,9 +209,19 @@ export class AgentRuntimeService {
     context: AgentContext,
     event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
   ): Promise<void> {
+    return this.durable(`experience/${event.actorId}`, () =>
+      this.persistExperienceUsages(context, event),
+    );
+  }
+
+  private async persistExperienceUsages(
+    context: AgentContext,
+    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
+  ): Promise<void> {
     // memory 与 knowledge 任一注入待确认都应继续走到下方各自记录
     if (
       !context.replay &&
+      !context.pendingHistory &&
       context.pendingMemoryUsages.length === 0 &&
       context.pendingKnowledgeUsages.length === 0
     ) {
@@ -435,6 +243,17 @@ export class AgentRuntimeService {
         '记忆使用关系与行为事件不匹配，已跳过记录',
       );
       return;
+    }
+
+    if (context.pendingHistory) {
+      const { threadId, history, decision } = context.pendingHistory;
+      await this.saveHistory(threadId, [
+        ...history,
+        new AIMessage(
+          `第${event.day}天 ${event.actionType} 已记录的决策：${JSON.stringify(decision)}`,
+        ),
+      ]);
+      delete context.pendingHistory;
     }
 
     if (context.replay) {
@@ -529,18 +348,14 @@ export class AgentRuntimeService {
    * 1. 查询 Player + Game
    * 2. 查询 Event 历史（按权限过滤）
    * 3. 查询 Memory（persona, strategy, skill, rule）
-   * 4. 构建分层上下文
+   * 4. 按引擎时点组装授权事件与主观判断
    * 5. 组装 System Prompt
    */
-  private async prepareContext(input: {
-    gameId: string;
-    playerId: string;
-    scenario: AgentScenario;
-    additionalContext?: string;
-    actionType?: string;
-    voteRound?: number;
-  }): Promise<AgentContext> {
-    const { gameId, playerId, scenario, additionalContext } = input;
+  private async prepareContext(input: TurnContextRequest): Promise<AgentContext> {
+    const { gameId, playerId, scenario, additionalContext, position, actionType } = input;
+    const currentDay = position.day;
+    const visibleThrough = this.recovery?.current?.visibleThrough;
+    const eventCutoff = visibleThrough === undefined ? {} : { sequence: { lte: visibleThrough } };
 
     // 1. 查询 Player + Game
     const player = await this.prisma.player.findUnique({
@@ -555,43 +370,28 @@ export class AgentRuntimeService {
     if (experiment)
       assertExperimentConfiguration(experiment, this.configService.get('ARK_EMBEDDING_MODEL'));
 
-    // 2. 查询 Event 历史（按权限过滤）
-    // 女巫需要先查询所有事件来判断是否使用过解药
-    let events: Event[];
-
-    if (player.role === ROLES.WITCH) {
-      // 女巫：先查询所有事件，判断是否使用过解药
-      const allEvents = await this.prisma.event.findMany({
-        where: { gameId },
+    // 先限制角色可读的事件类型，再按观察时点投影历史权限。
+    const candidateVisibilities = getVisibleVisibilitiesForRole({
+      role: player.role,
+      isAlive: true,
+      hasUsedAntidote: false,
+    });
+    let events = getHistoricallyVisibleEvents(
+      player,
+      await this.prisma.event.findMany({
+        where: { gameId, visibility: { in: candidateVisibilities }, ...eventCutoff },
         orderBy: { sequence: 'asc' },
-      });
-
-      // 获取可见的 visibility 列表（包含状态判断）
-      const visibleVisibilities = await this.getVisibleVisibilities(player, allEvents);
-
-      // 按 visibility 过滤事件
-      events = allEvents.filter((e) => visibleVisibilities.includes(e.visibility));
-    } else {
-      // 其他角色：直接按 visibility 过滤
-      const visibleVisibilities = await this.getVisibleVisibilities(player, []);
-      events = await this.prisma.event.findMany({
-        where: {
-          gameId,
-          visibility: { in: visibleVisibilities },
-        },
-        orderBy: { sequence: 'asc' },
-      });
-    }
+      }),
+    );
 
     // 投票是并发同时执行：决策时点不应看到本轮其他人的投票，保留已经结束的投票轮次
     if (scenario === AGENT_SCENARIOS.VOTE) {
-      const voteDay = await this.getCurrentRound(gameId, events);
       events = events.filter(
         (e) =>
           !(
             e.actionType === ACTION_TYPES.VOTE &&
-            e.day === voteDay &&
-            Number((e.content as Record<string, unknown>).voteRound ?? 0) >= (input.voteRound ?? 0)
+            e.day === currentDay &&
+            Number((e.content as Record<string, unknown>).voteRound ?? 0) >= position.round
           ),
       );
     }
@@ -605,48 +405,22 @@ export class AgentRuntimeService {
           { types: ['persona', 'strategy'] },
         );
 
-    // 4. 构建分层上下文
-    const layeredContext = await this.buildLayeredContext({
-      player,
-      events,
-    });
-
-    // 5. 生成个性化发言摘要（所有场景）
-    let speechSummary = '';
-    const currentDay = await this.getCurrentRound(gameId, events);
-    // 发言可见性由 visibility 决定（public 发言含遗言对存活玩家依然可见），
-    // 不能按「发言者是否存活」过滤，否则已出局玩家的遗言会被整段丢弃。
-    const otherPlayers = await this.prisma.player.findMany({
-      where: {
-        gameId,
-        id: { not: playerId }, // 排除自己
-      },
-      select: { seatNo: true },
-    });
-
     // 3.1 检索历史经验（独立于 persona/strategy，见 MemoryService.retrieveExperience）
     const opponents = await this.prisma.player.findMany({
       where: { gameId, id: { not: playerId } },
-      select: { agentId: true },
+      select: { agentId: true, seatNo: true, displayName: true },
     });
-    const actionType =
-      input.actionType ??
-      {
-        day_speech: 'speech',
-        last_words: 'speech',
-        vote: 'vote',
-        sheriff_decide_order: 'sheriff_decide_order',
-      }[scenario] ??
-      (player.role === ROLES.SEER
-        ? 'seer_check'
-        : player.role === ROLES.WEREWOLF
-          ? 'wolf_kill'
-          : 'night_action');
     const query = `${buildScenarioQuery({ role: player.role, scenario, day: currentDay, events })}\n板子：${player.game.rulesetId}\n动作：${actionType}\n${additionalContext ?? ''}`;
     const situation = {
       rulesetId: player.game.rulesetId,
       actionType,
-      facts: buildKnowledgeFacts({ day: currentDay, playerId, seatNo: player.seatNo, events }),
+      facts: buildKnowledgeFacts({
+        day: currentDay,
+        role: player.role,
+        playerId,
+        seatNo: player.seatNo,
+        events,
+      }),
     };
     const experienceInput = {
       agentId: player.agentId,
@@ -694,38 +468,28 @@ export class AgentRuntimeService {
           })
       : [];
 
-    const visiblePlayerSeats = otherPlayers
-      .map((p) => p.seatNo)
-      .filter((seatNo): seatNo is number => seatNo !== null);
-
-    // 使用个性化摘要（纯读组装，摘要与判断已由 daySummary 节点统一生成）
-    const personalSummary = await this.speechSummarizer.summarizeForAgent(
+    // 主观判断独立标注，已提交原文和行动只由 events 提供。
+    const personalJudgments = await this.speechSummarizer.readPersonalJudgments(
       gameId,
       currentDay,
       player.agentId,
-      visiblePlayerSeats,
     );
-
-    speechSummary = this.formatPersonalSummary(personalSummary);
-
-    // 狼人白天发言：注入夜间商量原文（仅狼队可见，保密标注）
-    const wolfDiscussionContext =
-      scenario === AGENT_SCENARIOS.DAY_SPEECH && player.role === ROLES.WEREWOLF
-        ? this.buildWolfDiscussionContext(events, currentDay)
-        : '';
 
     // 6. 组装 System Prompt
     const prompts =
       experiment?.prompts ??
-      (await this.promptService.captureSnapshot([
-        PROMPT_NAMES.agentSystemPrompt,
-        PROMPT_NAMES.agentReasoning,
-        PROMPT_NAMES.agentSpeechThinking,
-        PROMPT_NAMES.agentSpeechContent,
-        PROMPT_NAMES.agentDecisionSystem,
-        PROMPT_NAMES.agentDecisionUser,
-      ]));
+      this.recovery?.current?.manifest.prompts ??
+      (await this.promptService.captureGameSnapshot(gameId, PLAYER_TURN_PROMPT_NAMES));
+    const turnContext = buildTurnContext({
+      playerId,
+      seatNo: player.seatNo,
+      roster: [player, ...opponents],
+      actionType,
+      events,
+      position,
+    });
     const assembly = {
+      turnContext,
       prompts,
       scenario,
       player,
@@ -733,8 +497,7 @@ export class AgentRuntimeService {
       experience,
       globalPatterns,
       knowledgeHits,
-      context: layeredContext,
-      additionalContext: [speechSummary, wolfDiscussionContext, additionalContext]
+      additionalContext: [this.formatPersonalJudgments(personalJudgments), additionalContext]
         .filter(Boolean)
         .join('\n\n'),
     };
@@ -757,6 +520,8 @@ export class AgentRuntimeService {
         scenario,
         query,
         situation,
+        turnContext,
+        position,
         knowledgeHits,
         injectionEnabled: Boolean(injectionEnabled),
         evidence: events,
@@ -793,149 +558,6 @@ export class AgentRuntimeService {
   }
 
   /**
-   * 步骤 1.1: Build Layered Context（构建分层上下文）
-   *
-   * 三层信息：
-   * 1. 关键信息 - 当前状态（存活玩家、当前天数）
-   * 2. 最近一轮详细 - 上一轮的完整信息
-   * 3. 历史摘要 - 更早的关键事件摘要
-   */
-  private async buildLayeredContext(options: {
-    player: PlayerWithGame;
-    events: EventRecord[];
-  }): Promise<LayeredContext> {
-    const { player, events } = options;
-    const currentDay = await this.getCurrentRound(player.gameId, events);
-
-    // 1. 关键信息：当前状态
-    const alivePlayers = await this.prisma.player.findMany({
-      where: {
-        gameId: player.gameId,
-        deathDay: null,
-      },
-      select: { seatNo: true, displayName: true },
-      orderBy: { seatNo: 'asc' },
-    });
-
-    const critical = `
-      当前是第 ${currentDay} 天\n
-      存活玩家：${alivePlayers.map((p) => `${p.seatNo}号位(${p.displayName})`).join('、')}
-    `.trim();
-
-    // 2. 最近一轮详细：当天的所有事件
-    const recentEvents = events.filter((e) => e.day === currentDay);
-
-    // speech 统一由 SpeechSummarizerService 处理，不在此重复
-    const recent =
-      recentEvents.length > 0
-        ? recentEvents
-            .map((e) => {
-              const content = e.content as any;
-              switch (e.actionType) {
-                case ACTION_TYPES.WOLF_KILL:
-                  return `- 狼人刀了 ${content.targetSeatNo}号位`;
-                case ACTION_TYPES.SEER_CHECK:
-                  return `- 预言家查验了 ${content.targetSeatNo}号位，结果：${content.result}`;
-                case ACTION_TYPES.WITCH_SAVE:
-                  return content.saved
-                    ? `- 女巫使用了解药救 ${content.targetSeatNo}号位`
-                    : '- 女巫未使用解药';
-                case ACTION_TYPES.WITCH_POISON:
-                  return content.used
-                    ? `- 女巫使用了毒药毒 ${content.targetSeatNo}号位`
-                    : '- 女巫未使用毒药';
-                case ACTION_TYPES.SPEECH:
-                  // 发言统一由 SpeechSummarizerService 处理
-                  return null;
-                case ACTION_TYPES.VOTE:
-                  return `- ${content.voterSeatNo}号位投票给 ${content.targetSeatNo}号位`;
-                case ACTION_TYPES.PLAYER_DIED:
-                  return `- 死亡公告：${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
-                case ACTION_TYPES.JUDGE_ANNOUNCE:
-                  return typeof content.content === 'string' ? `- ${content.content}` : null;
-                default:
-                  return `- ${e.actionType}`;
-              }
-            })
-            .filter(Boolean)
-            .join('\n')
-        : '暂无';
-
-    // 3. 历史摘要：之前几天的关键事件
-    const historyEvents = events.filter((e) => e.day && e.day < currentDay);
-    const history =
-      historyEvents.length > 0
-        ? historyEvents
-            .filter((e) =>
-              (
-                [
-                  ACTION_TYPES.WOLF_KILL,
-                  ACTION_TYPES.SEER_CHECK,
-                  ACTION_TYPES.PLAYER_DIED,
-                  ACTION_TYPES.PLAYER_EXECUTED,
-                  ACTION_TYPES.JUDGE_ANNOUNCE,
-                ] as string[]
-              ).includes(e.actionType),
-            )
-            .map((e) => {
-              const content = e.content as any;
-              const dayLabel = e.day ?? 0;
-              switch (e.actionType) {
-                case ACTION_TYPES.WOLF_KILL:
-                  return `Day ${dayLabel}: 狼人刀了 ${content.targetSeatNo}号位`;
-                case ACTION_TYPES.SEER_CHECK:
-                  return `Day ${dayLabel}: 预言家查验 ${content.targetSeatNo}号位 → ${content.result}`;
-                case ACTION_TYPES.PLAYER_DIED:
-                  return `Day ${dayLabel}: 死亡 ${content.deaths?.map((d: any) => `${d.seatNo}号位`).join('、')}`;
-                case ACTION_TYPES.PLAYER_EXECUTED:
-                  return `Day ${dayLabel}: 放逐 ${content.targetSeatNo}号位`;
-                case ACTION_TYPES.JUDGE_ANNOUNCE:
-                  return typeof content.content === 'string'
-                    ? `Day ${dayLabel}: ${content.content}`
-                    : '';
-                default:
-                  return '';
-              }
-            })
-            .filter(Boolean)
-            .join('\n')
-        : '暂无';
-
-    return { critical, recent, history };
-  }
-
-  /**
-   * 狼人白天发言：提取夜间商量原文，附带保密标注
-   *
-   * 夜间商量内容仅狼队可见（好人是不知道的）。白天发言时狼人需要据此安排战术，
-   * 但绝不能直接说出"我们昨晚商量/刀了X"这类暴露狼队身份的话，故加标注提醒。
-   */
-  private buildWolfDiscussionContext(events: Event[], currentDay: number): string {
-    const wolfSpeeches = events.filter(
-      (e) =>
-        e.visibility === VISIBILITY_TYPES.WOLF &&
-        e.actionType === ACTION_TYPES.SPEECH &&
-        e.day === currentDay,
-    );
-
-    if (wolfSpeeches.length === 0) {
-      return '';
-    }
-
-    const lines = wolfSpeeches.map((e) => {
-      const content = e.content as any;
-      return `- ${content.seatNo}号位：${content.speech}`;
-    });
-
-    return `
-      ## 你们狼队昨晚的夜间商量（机密，仅狼队可见）
-      ${lines.join('\n')}
-
-      注意：以上是你们狼队夜间私下商量的内容，好人是不知道的。白天发言时你可以据此安排战术（谁悍跳、谁冲锋、谁倒钩），但绝不能直接说出"我们昨晚商量/刀了X"这类暴露狼队身份的话。
-    `.trim();
-  }
-
-  /**
    * 步骤 1.2: Assemble System Prompt（组装 System Prompt）
    *
    * 组装结构（骨架走 PromptService 模板，动态内容按变量注入）：
@@ -944,7 +566,7 @@ export class AgentRuntimeService {
    * - 场景指令：按 scenario 加载（scenarios/day-speech 等）
    * - 角色玩法：按 player.role 加载（roles/werewolf 等）
    * - 人设 + 策略：从 memories 提取
-   * - 角色特定历史（预言家查验记录）+ 分层上下文
+   * - 引擎时点、授权事件原文与主观历史判断
    */
   private async assembleSystemPrompt(options: {
     prompts?: FrozenPrompts;
@@ -953,8 +575,8 @@ export class AgentRuntimeService {
     memories: ActiveMemory[];
     experience: { lessons: ActiveMemory[]; playerModels: ActiveMemory[] };
     globalPatterns: Pick<ActivePattern, 'title' | 'content'>[];
+    turnContext?: string;
     knowledgeHits: KnowledgeHit[];
-    context: LayeredContext;
     additionalContext?: string;
   }): Promise<string> {
     const {
@@ -964,7 +586,6 @@ export class AgentRuntimeService {
       experience,
       globalPatterns,
       knowledgeHits,
-      context,
       additionalContext,
     } = options;
 
@@ -1053,21 +674,11 @@ export class AgentRuntimeService {
             .join('\n\n')
         : '';
 
-    // 角色特定历史信息
-    let roleSpecificInfo = '';
-
-    // 预言家：查验历史
-    if (player.role === ROLES.SEER) {
-      const history = await this.getSeerCheckHistory(player.gameId, player.id);
-      if (history) {
-        roleSpecificInfo = `\n## 你的查验历史\n${history}\n`;
-      }
-    }
-
     // 组合完整 System Prompt（渐进式披露），骨架模板走 PromptService 便于在线调整
     const fullPrompt = await this.promptService.render(
       PROMPT_NAMES.agentSystemPrompt,
       {
+        turnContext: options.turnContext ?? '',
         roleView,
         teammateInfo,
         scenarioPrompt,
@@ -1079,10 +690,6 @@ export class AgentRuntimeService {
         globalPattern: globalPatternSection || '暂无',
         experience: experienceSection || '暂无',
         knowledge: knowledgeSection || '暂无',
-        roleSpecificInfo,
-        critical: context.critical,
-        recent: context.recent,
-        history: context.history,
       },
       options.prompts ?? experiment?.prompts,
     );
@@ -1091,39 +698,16 @@ export class AgentRuntimeService {
   }
 
   /**
-   * 获取预言家历史查验记录
-   */
-  private async getSeerCheckHistory(gameId: string, _playerId: string): Promise<string> {
-    const checkEvents = await this.prisma.event.findMany({
-      where: {
-        gameId,
-        actionType: ACTION_TYPES.SEER_CHECK,
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (checkEvents.length === 0) {
-      return '';
-    }
-
-    const history = checkEvents
-      .map((e) => {
-        const content = e.content as { targetSeatNo: number; result: string };
-        const result = content.result === SEER_CHECK_RESULTS.WEREWOLF ? '狼人' : '好人';
-        return `  - ${content.targetSeatNo}号位：${result}`;
-      })
-      .join('\n');
-
-    return `你已查验过以下玩家：\n${history}`;
-  }
-
-  /**
    * 加载会话历史
    */
   private async loadHistory(threadId: string): Promise<BaseMessage[]> {
     try {
-      return await this.chatHistory.load(threadId);
+      const stored = await this.durable(`history/${threadId}`, async () =>
+        mapChatMessagesToStoredMessages(await this.chatHistory.load(threadId)),
+      );
+      return mapStoredMessagesToChatMessages(stored);
     } catch (error) {
+      if (this.recovery?.current) throw error;
       this.logger.warn(
         `加载会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1143,36 +727,29 @@ export class AgentRuntimeService {
           ? messages.slice(messages.length - HISTORY_WINDOW)
           : messages;
 
-      await this.chatHistory.replace(threadId, trimmed);
+      if (this.recovery?.current) {
+        await this.recovery.effect(`chat/${threadId}`, (tx) =>
+          this.chatHistory.replace(threadId, trimmed, tx),
+        );
+      } else {
+        await this.chatHistory.replace(threadId, trimmed);
+      }
     } catch (error) {
+      if (this.recovery?.current) throw error;
       this.logger.warn(
         `保存会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
-  /**
-   * 获取当前天数
-   */
-  private async getCurrentRound(gameId: string, events: EventRecord[]): Promise<number> {
-    if (events.length === 0) {
-      const latestEvent = await this.prisma.event.findFirst({
-        where: { gameId },
-        orderBy: { day: 'desc' },
-        select: { day: true },
-      });
-      return latestEvent?.day ?? 1;
-    }
-    const days = events.map((e) => e.day).filter((d): d is number => d !== null);
-    return days.length > 0 ? Math.max(...days) : 1;
+  private durable<T>(key: string, produce: () => Promise<T>): Promise<T> {
+    return this.recovery ? this.recovery.value(key, produce) : produce();
   }
 
   /**
-   * 格式化个性化摘要
+   * 格式化个人历史判断（主观意见，不替代事件事实）
    */
-  private formatPersonalSummary(summary: {
-    recentSpeeches: Array<{ day: number; seatNo: number; speech: string }>;
-    olderSpeechesSummary: Array<{ day: number; seatNo: number; summary: string }>;
+  private formatPersonalJudgments(summary: {
     recentJudgments: Array<{
       speaker: number;
       trustScore: number;
@@ -1187,39 +764,9 @@ export class AgentRuntimeService {
   }): string {
     const parts: string[] = [];
 
-    // 近2天完整发言
-    if (summary.recentSpeeches.length > 0) {
-      parts.push(`## 近2天发言记录`);
-
-      // 按天分组
-      const byDay = new Map<number, Array<{ seatNo: number; speech: string }>>();
-      for (const s of summary.recentSpeeches) {
-        if (!byDay.has(s.day)) {
-          byDay.set(s.day, []);
-        }
-        byDay.get(s.day)!.push({ seatNo: s.seatNo, speech: s.speech });
-      }
-
-      // 按天输出
-      for (const [day, speeches] of Array.from(byDay.entries()).toSorted((a, b) => a[0] - b[0])) {
-        parts.push(`\n### Day ${day}`);
-        for (const s of speeches) {
-          parts.push(`- ${s.seatNo}号位：${s.speech}`);
-        }
-      }
-    }
-
-    // 2天以前的发言摘要
-    if (summary.olderSpeechesSummary.length > 0) {
-      parts.push(`\n## 历史发言摘要（2天前）`);
-      for (const s of summary.olderSpeechesSummary) {
-        parts.push(`- Day ${s.day} ${s.seatNo}号位：${s.summary}`);
-      }
-    }
-
     // 我的分析（近2天）
     if (summary.recentJudgments.length > 0) {
-      parts.push(`\n## 我的分析（近2天）`);
+      parts.push(`\n## 我的历史分析（近2天的主观判断，可随新信息调整）`);
       for (const j of summary.recentJudgments) {
         parts.push(
           `- ${j.speaker}号位：信任度${j.trustScore}%${j.suspicious ? '（可疑）' : ''} - ${j.notes}`,
@@ -1229,7 +776,7 @@ export class AgentRuntimeService {
 
     // 我的历史分析（2天以前摘要）
     if (summary.olderJudgmentsSummary.length > 0) {
-      parts.push(`\n## 我的历史分析（摘要）`);
+      parts.push(`\n## 我的历史分析（更早的主观判断摘要，可随新信息调整）`);
       for (const j of summary.olderJudgmentsSummary) {
         parts.push(`- ${j.seatNo}号位：最新信任度${j.latestTrustScore}% - ${j.notes}`);
       }

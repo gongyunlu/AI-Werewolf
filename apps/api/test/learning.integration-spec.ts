@@ -7,7 +7,7 @@ import { MemoryService } from '../src/memory/memory.service';
 import { GlobalMemoryService } from '../src/memory/global-memory.service';
 import type { EmbeddingService } from '../src/memory/embedding.service';
 import { MemoryMaintenanceService } from '../src/memory-maintenance/memory-maintenance.service';
-import type { PromptService } from '../src/observability/prompt.service';
+import { PromptService } from '../src/observability/prompt.service';
 import type { StructuredLlmService } from '../src/observability/structured-llm.service';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
 import { withLearningTestQueues } from './helpers/learning-test-queues';
@@ -30,7 +30,7 @@ import { JudgeService } from '../src/evaluation/judge.service';
 import { loadKnowledgeScoredEvents } from '../src/evaluation/learning-knowledge-comparison';
 import type { GameReviewService } from '../src/reflection/game-review.service';
 import type { RedisService } from '../src/redis/redis.service';
-import { AgentRuntimeService } from '../src/agent-runtime/agent-runtime.service';
+import { createAgentRuntime } from '../src/testing/agent-runtime.fixture';
 import type { ConfigService } from '@nestjs/config';
 import type { Env } from '../src/config/env.validation';
 import type { SkillLoaderService } from '../src/skills/skill-loader.service';
@@ -38,11 +38,6 @@ import type { SpeechSummarizerService } from '../src/speech-summarizer/speech-su
 import type { LangfuseService } from '../src/observability/langfuse.service';
 import type { ChatHistoryService } from '../src/agent-runtime/chat-history.service';
 import type { KnowledgeService } from '../src/knowledge/knowledge.service';
-import {
-  FALLBACK_TEMPLATES,
-  renderTemplate,
-  type PromptName,
-} from '../src/observability/prompt-templates';
 
 function vector(axis = 0): number[] {
   return Array.from({ length: 2048 }, (_, i) => (i === axis ? 1 : 0));
@@ -768,8 +763,12 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
     }
     await maintenance.runForGame(sources[99].id);
     const next = await game(101);
-    const runtime = new AgentRuntimeService(
-      { get: jest.fn().mockReturnValue(false) } as unknown as ConfigService<Env, true>,
+    const runtimeConfig = { get: jest.fn().mockReturnValue(false) } as unknown as ConfigService<
+      Env,
+      true
+    >;
+    const runtime = createAgentRuntime(
+      runtimeConfig,
       prisma,
       memories,
       globalMemories,
@@ -778,7 +777,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
         loadRequiredSkill: jest.fn().mockResolvedValue({ content: 'mock skill' }),
       } as unknown as SkillLoaderService,
       {
-        summarizeForAgent: jest.fn().mockResolvedValue({
+        readPersonalJudgments: jest.fn().mockResolvedValue({
           recentSpeeches: [],
           olderSpeechesSummary: [],
           recentJudgments: [],
@@ -786,27 +785,17 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
         }),
       } as unknown as SpeechSummarizerService,
       {} as LangfuseService,
-      {
-        captureSnapshot: jest.fn().mockResolvedValue({}),
-        render: jest.fn(async (name: PromptName, vars: Record<string, string>) => ({
-          text: renderTemplate(FALLBACK_TEMPLATES[name], vars),
-          name,
-          version: null,
-        })),
-      } as unknown as PromptService,
+      new PromptService(runtimeConfig),
       {} as ChatHistoryService,
     );
-    const contextMethods = runtime as unknown as {
-      getVisibleVisibilities: jest.Mock;
-      buildLayeredContext: jest.Mock;
-      getCurrentRound: jest.Mock;
-    };
-    contextMethods.getVisibleVisibilities = jest.fn().mockResolvedValue(['public']);
-    contextMethods.buildLayeredContext = jest
-      .fn()
-      .mockResolvedValue({ critical: '', recent: '', history: '' });
-    contextMethods.getCurrentRound = jest.fn().mockResolvedValue(1);
-    const context = await runtime.prepareContextPublic(next.id, next.players[0].id, 'vote');
+
+    const context = await runtime.prepareContextPublic({
+      gameId: next.id,
+      playerId: next.players[0].id,
+      scenario: 'vote',
+      actionType: 'vote',
+      position: { day: 1, phase: 'vote', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+    });
     expect(context.systemPrompt).toContain('固化策略');
     expect(context.systemPrompt).toContain('先核对证据再表达判断');
     expect(context.systemPrompt).toContain(pattern.content);

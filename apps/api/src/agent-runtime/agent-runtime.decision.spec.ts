@@ -1,27 +1,30 @@
+import { createAgentRuntime } from '../testing/agent-runtime.fixture';
 import { ChatOpenAI } from '@langchain/openai';
+import { AIMessage } from '@langchain/core/messages';
 import { z } from 'zod';
-import { AgentRuntimeService } from './agent-runtime.service';
 import { WitchAntidoteNode } from '../game-engine/nodes/night/witch-antidote.node';
 import { FALLBACK_TEMPLATES, renderTemplate } from '../observability/prompt-templates';
 
 jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
 
 function setup(output: unknown) {
-  const invoke = jest.fn().mockResolvedValue(output);
+  const invoke = jest
+    .fn()
+    .mockResolvedValue({ raw: new AIMessage(JSON.stringify(output)), parsed: output });
   const structured = jest.fn().mockReturnValue({ invoke });
   jest.mocked(ChatOpenAI).mockImplementation(() => ({ withStructuredOutput: structured }) as never);
   const prisma = { decisionContext: { upsert: jest.fn() } };
   const history = { load: jest.fn().mockResolvedValue([]), replace: jest.fn() };
-  const runtime = new AgentRuntimeService(
+  const runtime = createAgentRuntime(
     ...([
-      { get: jest.fn() },
+      { get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)) },
       prisma,
       {},
       {},
       {},
       {},
       {},
-      { trace: jest.fn().mockReturnValue({}) },
+      { trace: jest.fn().mockReturnValue({ callbacks: [] }) },
       {
         render: jest.fn(async (name, variables) => ({
           name,
@@ -33,7 +36,7 @@ function setup(output: unknown) {
         })),
       },
       history,
-    ] as unknown as ConstructorParameters<typeof AgentRuntimeService>),
+    ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   const context = {
     game: { id: 'g' },
@@ -106,4 +109,23 @@ it('不完整的结构化动作不得作为已完成决策保存', async () => {
   expect(context.replay).not.toHaveProperty('decision');
   expect(prisma.decisionContext.upsert).not.toHaveBeenCalled();
   expect(history.replace).not.toHaveBeenCalled();
+});
+
+it('结构合法的候选在事件提交之前不写入历史，错误事件也不能确认它', async () => {
+  const { runtime, context, history } = setup({ reasoning: '不救', decision: { action: 'skip' } });
+  await runtime.decide(
+    context as never,
+    z.object({ action: z.literal('skip') }),
+    undefined,
+    'thread',
+  );
+  expect(history.replace).not.toHaveBeenCalled();
+  const event = { id: 'e', gameId: 'g', actorId: 'other', day: 1, actionType: 'witch_save' };
+  await runtime.recordExperienceUsages(context as never, event);
+  expect(history.replace).not.toHaveBeenCalled();
+  await runtime.recordExperienceUsages(context as never, { ...event, actorId: 'witch' });
+  expect(history.replace).toHaveBeenCalledTimes(1);
+  expect(String(history.replace.mock.calls[0][1][0].content)).toContain(
+    '第1天 witch_save 已记录的决策',
+  );
 });

@@ -2,7 +2,7 @@ import { checkWinCondition } from './win-condition';
 import { createPlayer } from '../testing/test-utils';
 import type { PlayerState } from '../core/types';
 
-describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀）', () => {
+describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋）', () => {
   // 辅助函数：快速构造 PlayerState
 
   describe('第三方胜利（人狼恋）- 最高优先级', () => {
@@ -109,106 +109,24 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
     });
   });
 
-  describe('狼人拍刀速胜', () => {
-    it('2主刀狼 vs 2好人，触发拍刀（狼人数 = 好人数）', () => {
+  describe('绑票不提前判胜', () => {
+    it.each([2, 3, 6])('%s 狼与神民同时存活时继续游戏', (wolves) => {
       const players = [
-        createPlayer('w1', 1, 'werewolf', 'werewolf', true),
-        createPlayer('w2', 2, 'werewolf', 'werewolf', true),
-        createPlayer('v1', 3, 'villager', 'villager', true),
-        createPlayer('s1', 4, 'seer', 'villager', true),
+        ...Array.from({ length: wolves }, (_, i) =>
+          createPlayer('w' + i, i + 1, 'werewolf', 'werewolf'),
+        ),
+        createPlayer('v', wolves + 1, 'villager', 'villager'),
+        createPlayer('h', wolves + 2, 'hunter', 'villager'),
       ];
-
-      const result = checkWinCondition(players, null);
-
-      // 2狼 = 2好人，满足拍刀条件（≤）
-      expect(result.isGameOver).toBe(true);
-      expect(result.winner).toBe('werewolf');
+      expect(checkWinCondition(players)).toEqual({ isGameOver: false, winner: null });
     });
-
-    it('3主刀狼 vs 2好人，触发拍刀', () => {
+    it('绑票之后神职出局，按实际屠边结算', () => {
       const players = [
-        createPlayer('w1', 1, 'werewolf', 'werewolf', true),
-        createPlayer('w2', 2, 'wolf_king', 'werewolf', true),
-        createPlayer('w3', 3, 'white_wolf', 'werewolf', true),
-        createPlayer('v1', 4, 'villager', 'villager', true),
-        createPlayer('s1', 5, 'seer', 'villager', true),
+        createPlayer('w', 1, 'werewolf', 'werewolf'),
+        createPlayer('v', 2, 'villager', 'villager'),
+        createPlayer('h', 3, 'hunter', 'villager', false),
       ];
-
-      const result = checkWinCondition(players);
-
-      expect(result.isGameOver).toBe(true);
-      expect(result.winner).toBe('werewolf');
-    });
-
-    it('仅剩隐狼和2好人，不触发拍刀（隐狼无刀）', () => {
-      const players = [
-        createPlayer('h1', 1, 'hidden_wolf', 'werewolf', true),
-        createPlayer('v1', 2, 'villager', 'villager', true),
-        createPlayer('s1', 3, 'seer', 'villager', true),
-      ];
-
-      const result = checkWinCondition(players, null);
-
-      // 隐狼不能刀，且神民都存活，狼人未达到屠边条件
-      expect(result.isGameOver).toBe(false);
-    });
-
-    it('仅剩隐狼和1好人（主刀狼已死），触发拍刀（隐狼获得刀人能力）', () => {
-      const players = [
-        createPlayer('h1', 1, 'hidden_wolf', 'werewolf', true),
-        createPlayer('v1', 2, 'villager', 'villager', true),
-        createPlayer('w1', 3, 'werewolf', 'werewolf', false),
-        createPlayer('s1', 4, 'seer', 'villager', false),
-      ];
-
-      // 此时存活：1隐狼 vs 1好人，隐狼获得刀人能力，可以拍刀
-      const result = checkWinCondition(players, null);
-
-      expect(result.isGameOver).toBe(true);
-      expect(result.winner).toBe('werewolf');
-    });
-
-    it('石像鬼单独存活 vs 1好人，触发拍刀', () => {
-      const players = [
-        createPlayer('g1', 1, 'stone_wolf', 'werewolf', true),
-        createPlayer('v1', 2, 'villager', 'villager', true),
-        createPlayer('w1', 3, 'werewolf', 'werewolf', false),
-      ];
-
-      const result = checkWinCondition(players);
-
-      expect(result.isGameOver).toBe(true);
-      expect(result.winner).toBe('werewolf');
-    });
-
-    it('1主刀狼 + 1隐狼 vs 2好人，不触发拍刀（只计算主刀狼）', () => {
-      const players = [
-        createPlayer('w1', 1, 'werewolf', 'werewolf', true),
-        createPlayer('h1', 2, 'hidden_wolf', 'werewolf', true),
-        createPlayer('v1', 3, 'villager', 'villager', true),
-        createPlayer('s1', 4, 'seer', 'villager', true),
-      ];
-
-      const result = checkWinCondition(players);
-
-      // 1主刀狼 < 2好人，不满足拍刀条件
-      expect(result.isGameOver).toBe(false);
-    });
-
-    it('有第三方存在时不触发拍刀', () => {
-      const players = [
-        createPlayer('w1', 1, 'werewolf', 'werewolf', true),
-        createPlayer('w2', 2, 'werewolf', 'werewolf', true),
-        createPlayer('w3', 3, 'werewolf', 'werewolf', true),
-        createPlayer('v1', 4, 'villager', 'villager', true),
-        createPlayer('s1', 5, 'seer', 'villager', true),
-        createPlayer('c1', 6, 'cupid', 'third_party', true),
-      ];
-
-      const result = checkWinCondition(players);
-
-      // 有第三方干扰，不触发拍刀
-      expect(result.isGameOver).toBe(false);
+      expect(checkWinCondition(players)).toEqual({ isGameOver: true, winner: 'werewolf' });
     });
   });
 
@@ -298,7 +216,7 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
       expect(result.winner).toBeNull();
     });
 
-    it('6狼6好人开局触发拍刀', () => {
+    it('6狼6好人开局不能仅按人数判胜', () => {
       const players = [
         ...Array.from({ length: 6 }, (_, i) =>
           createPlayer(`w${i + 1}`, i + 1, 'werewolf', 'werewolf', true),
@@ -312,9 +230,9 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
 
       const result = checkWinCondition(players);
 
-      // 6狼 = 6好人，满足拍刀条件
-      expect(result.isGameOver).toBe(true);
-      expect(result.winner).toBe('werewolf');
+      // 人数相等仍需继续执行技能及投票。
+      expect(result.isGameOver).toBe(false);
+      expect(result.winner).toBeNull();
     });
   });
 
@@ -450,7 +368,7 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
       expect(result.winner).toBe('third_party');
     });
 
-    it('好人胜利优先于拍刀判定', () => {
+    it('好人胜利优先于屠边判定', () => {
       const players = [
         createPlayer('w1', 1, 'werewolf', 'werewolf', false),
         createPlayer('v1', 2, 'villager', 'villager', true),
@@ -459,11 +377,11 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
 
       const result = checkWinCondition(players);
 
-      // 狼人全灭 → 好人胜，不会判定拍刀
+      // 狼人全灭 → 好人胜
       expect(result.winner).toBe('villager');
     });
 
-    it('拍刀判定优先于屠边判定', () => {
+    it('神职全灭时按屠边判定', () => {
       const players = [
         createPlayer('w1', 1, 'werewolf', 'werewolf', true),
         createPlayer('w2', 2, 'werewolf', 'werewolf', true),
@@ -475,7 +393,7 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
 
       const result = checkWinCondition(players);
 
-      // 3狼 > 1平民（神职已死），应触发拍刀而非屠边
+      // 神职全部出局，满足屠边条件
       expect(result.isGameOver).toBe(true);
       expect(result.winner).toBe('werewolf');
     });
@@ -490,7 +408,7 @@ describe('checkWinCondition - 胜负判定（屠边规则 + 人狼恋 + 拍刀�
 
       const result = checkWinCondition(players);
 
-      // 狼人存活 + 神职和平民都存活 + 未触发拍刀 → 游戏继续
+      // 狼人存活 + 神职和平民都存活 → 游戏继续
       expect(result.isGameOver).toBe(false);
     });
   });

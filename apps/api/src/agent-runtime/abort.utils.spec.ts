@@ -1,4 +1,4 @@
-import { isAbortError, throwIfAborted } from './abort.utils';
+import { isAbortError, throwIfAborted } from '../llm/abort.utils';
 
 describe('abort utils', () => {
   it('未取消时不抛异常', () => {

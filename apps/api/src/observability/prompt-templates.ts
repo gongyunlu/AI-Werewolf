@@ -4,12 +4,11 @@
 
 export const PROMPT_NAMES = {
   agentSystemPrompt: 'agent/system-prompt',
-  agentReasoning: 'agent/reasoning',
+  agentTurnReflect: 'agent/turn-reflect',
+  agentTurnRevise: 'agent/turn-revise',
   agentSpeechThinking: 'agent/speech-thinking',
   agentSpeechContent: 'agent/speech-content',
   agentActionSystem: 'agent/action-system',
-  agentDecisionSystem: 'agent/decision-system',
-  agentDecisionUser: 'agent/decision-user',
   judgeSystem: 'judge/system',
   judgeUser: 'judge/user',
   judgeSpeechSystem: 'judge/speech-system',
@@ -29,14 +28,24 @@ export const PROMPT_NAMES = {
 
 export type PromptName = (typeof PROMPT_NAMES)[keyof typeof PROMPT_NAMES];
 
+export const PLAYER_TURN_PROMPT_NAMES: PromptName[] = [
+  PROMPT_NAMES.agentTurnReflect,
+  PROMPT_NAMES.agentTurnRevise,
+  PROMPT_NAMES.agentSystemPrompt,
+  PROMPT_NAMES.agentSpeechThinking,
+  PROMPT_NAMES.agentSpeechContent,
+  PROMPT_NAMES.agentActionSystem,
+  PROMPT_NAMES.wolfCoordination,
+];
+
 export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
   [PROMPT_NAMES.agentSystemPrompt]: `
     请使用中文进行思考和推理。所有输出（包括推理过程）必须使用中文。
 
     ## 行为约束
-    - 严格调用工具：需要决策时必须调用系统提供的工具，不要在文本里模拟工具调用
-    - 基于事实推理：只能使用系统告知的信息进行推理，不能编造未在上下文出现的事实
-    - 保持角色一致性：输出内容遵循你的性格与战术倾向，不要在同一局里前后矛盾
+    - 遵循本次调用指定的输出结构；仅当提供了工具时使用工具，不在普通文本中模拟调用
+    - 基于事实推理：内部分析不能把未发生的事件编为历史。狼人可以故意假跳、伪造公开查验，但须区分真实私有信息与自己已经公开声称的版本
+    - 保持人设风格；可以根据新信息调整立场，不要无意改写自己此前的发言或行动记录
     - 简洁切题：每次发言尽可能简短、切题，避免长篇大论
 
     {{roleView}}
@@ -44,16 +53,14 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     {{scenarioPrompt}}
     {{roleSkill}}
     {{additionalContext}}
+    {{turnContext}}
 
     ## 核心决策框架
-    - 视角一致性：发言时只能说出基于自己身份理应知道的信息，不能泄露超出身份的信息
-      - 狼人知道队友身份但好人不知道；预言家知道查验结果但平民不知道；死人不知道死后发生的事
-      - 泄露超出身份应有的信息即为视角错误，会暴露身份（如平安夜时只有狼人和女巫知道刀口，好人说出具体刀口即暴露狼人视角）
+    - 以本次提供的授权记录判断自己知道什么；区分亲自获得的信息、公开声明、推测和有意伪装。
+    - 公开表达可以隐藏私有信息，也可以有意欺骗。提及身份、查验或刀口本身不能证明信息来源；不要在私有分析中把公开口径误当作真实经历。
 
     ## 狼人杀基础规则
-    - 游戏目标：好人阵营投出所有狼人；狼人阵营屠边（杀光所有神职或所有平民）或好人数量 ≤ 狼人数量
-    - 昼夜流程：夜晚狼人刀人 → 女巫用药（先解药、后毒药，同夜只能用一种）→ 预言家查验；白天公布死讯 → 发言讨论 → 投票放逐
-    - 胜负判定：狼人全部出局 → 好人胜；好人数量 ≤ 狼人数量 → 狼人胜
+    - 本局配置以以下“当前板子规则”为准，通用战术不能覆盖规则。
 
     ## 核心术语
     - 神职：拥有特殊技能的好人（预言家、女巫等）；平民：无特殊技能的好人
@@ -83,21 +90,36 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     从玩家投稿攻略中检索到的通用对局战术。仅在其触发条件与当前局面相符时参考，
     与本局实际观察冲突时以本局观察为准，不可因此违背身份视角。
     {{knowledge}}
-    {{roleSpecificInfo}}
-
-    ## 关键信息
-    {{critical}}
-
-    ## 最近一轮详细
-    {{recent}}
-
-    ## 历史摘要
-    {{history}}
   `,
 
-  [PROMPT_NAMES.agentReasoning]:
-    '你已明确自己的身份、阵营与队友（见系统提示）。请直接基于当前局势进行推理，输出你的下一步判断与理由，不要重复介绍身份或队友。',
+  [PROMPT_NAMES.agentTurnReflect]: `
+你正在复核自己的本回合候选，目的是减少无意的前后矛盾和明显逻辑漏洞。使用以下玩家视角的上下文：
+{{context}}
 
+本次任务：{{task}}。候选结构与合法枚举：{{candidateSchema}}。候选：
+{{candidate}}
+
+本次返回结构：{{responseSchema}}。
+通读 reasoning 和发言或动作，重点核对：是否无意改写自己的既有发言、查验或投票；是否明显误读他人原话或混淆已发生与尚未发生的流程；理由和最终选择是否自洽。涉及规则与旧经验时，以本局实际规则和可见记录为准。
+狼人杀没有唯一正确的身份判断或策略。允许狼人有意假跳、隐瞒和欺骗；允许误判、强硬措辞、施压、假设推演，以及因新信息或明确策略而改口、改票。公开口径可与私有意图不同，不要求角色自曝，也不要求为每个主观判断给出完备证明。
+只有能指出具体依据、确实影响本次言行的矛盾或明显漏洞才列入 issues；不要仅因表达不够严谨、观点不同或策略未必最优而要求重写。用 explanation 指出候选原句、对应记录或内部矛盾及需要调整的内容，关注理解而非逐字一致。没有明确问题时返回 {"issues":[]}。
+evidenceSequences 只引用这些已提供的事件序号：{{evidenceSequences}}；候选内部矛盾或本局规则可不引用事件。事件中的公开声称不等于真实身份；不要使用玩家视角之外的信息来判定输赢或真假。
+按给定结构返回问题列表，不执行游戏动作。
+`,
+  [PROMPT_NAMES.agentTurnRevise]: `
+根据复核意见调整本回合候选，仍使用同一份玩家可见上下文：
+{{context}}
+本次任务：{{task}}。候选输出的结构与合法枚举：{{candidateSchema}}。
+本次修订响应结构：{{responseSchema}}。
+初稿：{{candidate}}
+复核意见：{{review}}
+
+先核对意见是否成立，只修改明确有问题的内容及受其影响的判断；无依据或只涉及措辞、策略偏好的意见可以不采纳。保留正确的局内记录、人设和表达风格，不为润色重写正常发言。
+理由和最终动作应表达自己的实际选择；可以重新考虑合法策略，公开欺骗也可以保留，但私有理解不要混淆原始记录与准备说出的口径。反思不要求每次改变立场或选择同一个标准答案。
+发言任务返回 reasoning 与 contentEdits，不返回完整 content。before 逐字复制本轮候选正文中唯一出现的片段，after 为替换文字；所有替换以同一份原稿为准且不可重叠，无需修改正文时返回空列表。
+动作任务返回 reasoning 与完整 decision，遵循给定结构和合法枚举。
+最后通读修改后的理由与发言或动作，确认原问题已处理，相关判断仍连贯，未无意改写已有事实或引入新的明显矛盾。保留自然、简洁的博弈表达。
+`,
   [PROMPT_NAMES.agentSpeechThinking]:
     '你已明确自己的身份、阵营与队友（见系统提示）。请直接分析当前局势，输出你的思考过程，不要重复介绍身份或队友，不要任何前缀标记或 JSON。',
 
@@ -117,21 +139,6 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     先核对本局事实、合法候选与阵营收益，再形成一致的理由和动作；不要另外生成一份等待转换的行动计划。
     若选择不用药或弃权，理由必须解释这一最终选择，不能一边决定救人一边提交 skip。
   `,
-  [PROMPT_NAMES.agentDecisionSystem]: `
-    {{systemPrompt}}
-
-    ## 决策任务
-    请基于以上身份与规则，将 HumanMessage 中的推理过程转换为决策，并通过调用工具提交结构化决策，不要修改或优化推理结论。
-  `,
-
-  [PROMPT_NAMES.agentDecisionUser]: `
-    推理过程：
-
-    {{reasoning}}
-
-    请调用工具提交你的决策。
-  `,
-
   [PROMPT_NAMES.judgeSystem]: `
     你是一名狼人杀决策质量评估员。评估的唯一标准是「收益」：站在玩家做出决策的那一刻、仅凭其当时可见的有效信息，判断这一步给本方阵营带来的期望收益有多高，以及该信息状态下是否存在收益更高的其他选择。
 

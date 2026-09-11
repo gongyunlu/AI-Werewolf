@@ -43,6 +43,18 @@ import type { Env } from '../config/env.validation';
             }),
             res: (res: { statusCode: number }) => ({ statusCode: res.statusCode }),
           },
+          customLogLevel: (req, res, error) => {
+            if (error || res.err || res.statusCode >= 500) return 'error';
+            // 对局详情被观战页定时读取，只省略正常完成的访问日志。
+            if (
+              req.method === 'GET' &&
+              /^\/api\/games\/[^/?]+\/?(?:\?|$)/.test(req.url ?? '') &&
+              res.writableEnded &&
+              (res.statusCode === 200 || res.statusCode === 304)
+            )
+              return 'silent';
+            return 'info';
+          },
           // SSE 是长连接，逐条请求日志意义不大，健康检查同理
           autoLogging: {
             ignore: (req: { url?: string }) =>

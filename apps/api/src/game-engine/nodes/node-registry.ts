@@ -8,54 +8,32 @@ import { createGameEndNode } from './shared/game-end.node';
 import { processDeathSkillsNode } from './day/process-death-skills.node';
 import { createProcessExileSkillsNode } from './day/process-exile-skills.node';
 import { createCalculateSpeechOrderNode } from './day/calculate-speech-order.node';
-import { createNightPipelineNode } from './pipeline/night-pipeline.node';
-import { createDayPipelineNode } from './pipeline/day-pipeline.node';
 
 /**
  * 节点注册表
  *
- * 所有游戏节点的中央注册表，用于配置驱动的主图构建
+ * 在装配时固定节点工厂，运行中的对局只读取各自装配实例的注册表。
  */
 export class NodeRegistry {
-  private factories: Map<string, NodeFactory> = new Map();
-  private staticNodes: Map<string, GameNode> = new Map();
+  private readonly factories: ReadonlyMap<string, NodeFactory>;
+  private readonly staticNodes: ReadonlyMap<string, GameNode> = new Map([
+    ['checkWin', checkWinNode],
+    ['processDeathSkills', processDeathSkillsNode],
+  ]);
 
-  constructor() {
-    this.registerDefaultNodes();
-  }
-
-  /**
-   * 注册默认节点
-   */
-  private registerDefaultNodes() {
-    // 需要依赖注入的节点（工厂模式）
-    this.factories.set('nightPipeline', createNightPipelineNode);
-    this.factories.set('dayPipeline', createDayPipelineNode);
-    this.factories.set('nightResolve', createNightResolveNode);
-    this.factories.set('announceDay', createAnnounceDayNode);
-    this.factories.set('processExileSkills', createProcessExileSkillsNode);
-    this.factories.set('execute', createExecuteNode);
-    this.factories.set('calculateSpeechOrder', createCalculateSpeechOrderNode);
-    this.factories.set('init', createInitNode);
-    this.factories.set('gameEnd', createGameEndNode);
-
-    // 无需依赖注入的节点（静态节点）
-    this.staticNodes.set('checkWin', checkWinNode);
-    this.staticNodes.set('processDeathSkills', processDeathSkillsNode);
-  }
-
-  /**
-   * 注册节点工厂
-   */
-  registerFactory(name: string, factory: NodeFactory) {
-    this.factories.set(name, factory);
-  }
-
-  /**
-   * 注册静态节点
-   */
-  registerStaticNode(name: string, node: GameNode) {
-    this.staticNodes.set(name, node);
+  constructor(factories: Readonly<Record<string, NodeFactory>>) {
+    this.factories = new Map(
+      Object.entries({
+        nightResolve: createNightResolveNode,
+        announceDay: createAnnounceDayNode,
+        processExileSkills: createProcessExileSkillsNode,
+        execute: createExecuteNode,
+        calculateSpeechOrder: createCalculateSpeechOrderNode,
+        init: createInitNode,
+        gameEnd: createGameEndNode,
+        ...factories,
+      }),
+    );
   }
 
   /**
@@ -88,8 +66,3 @@ export class NodeRegistry {
     return [...Array.from(this.factories.keys()), ...Array.from(this.staticNodes.keys())];
   }
 }
-
-/**
- * 全局节点注册表实例
- */
-export const nodeRegistry = new NodeRegistry();

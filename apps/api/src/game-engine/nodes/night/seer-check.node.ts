@@ -1,18 +1,20 @@
+import { ModelCallError } from '@/llm/model-call-guard';
+import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES, ACTION_TYPES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
+import { saveNodeValue } from '../node.types';
 import { checkSeerResult } from '../../rules/seer-check';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建预言家查验决策 Schema（值域动态收敛到合法候选）
  */
-function buildSeerCheckSchema(legalSeatNos: number[]) {
+export function buildSeerCheckSchema(legalSeatNos: number[]) {
   return z.object({
     action: z.enum(['check_identity']),
     targetSeatNo: z
@@ -54,10 +56,12 @@ export class SeerCheckNode {
       await context.eventBus?.publish(nightPromptEvent);
 
       // 查询本局预言家已查验过的座位号（用于硬校验「未查验过」）
-      const checkedEvents = await context.prisma.event.findMany({
-        where: { gameId: state.gameId, actionType: ACTION_TYPES.SEER_CHECK, actorId: seer.id },
-        select: { content: true },
-      });
+      const checkedEvents = await saveNodeValue(context, 'previous-checks', () =>
+        context.prisma.event.findMany({
+          where: { gameId: state.gameId, actionType: ACTION_TYPES.SEER_CHECK, actorId: seer.id },
+          select: { content: true },
+        }),
+      );
       const checkedSeatNos = new Set(
         checkedEvents
           .map((e) => (e.content as { targetSeatNo?: number } | null)?.targetSeatNo)
@@ -73,6 +77,7 @@ export class SeerCheckNode {
         return {};
       }
 
+      let effectStarted = false;
       try {
         const threadId = getPlayerThreadId(state.gameId, seer.id);
 
@@ -98,14 +103,12 @@ export class SeerCheckNode {
             targetPlayer.seatNo === seer.seatNo ||
             checkedSeatNos.has(decision.targetSeatNo)
           ) {
-            gameLogger.warn(
-              `[预言家查验] 目标座位号 ${decision.targetSeatNo} 非法，降级为随机查验`,
-            );
-            return this.fallbackToRandom(state, seer, context, checkedSeatNos);
+            throw new ModelCallError('invalid_output');
           }
 
           const checkResult = checkSeerResult(targetPlayer);
 
+          effectStarted = true;
           const seerCheckEvent = await context.eventWriter.writeSeerCheckEvent({
             gameId: state.gameId,
             day: state.currentDay,
@@ -126,9 +129,9 @@ export class SeerCheckNode {
           return this.fallbackToRandom(state, seer, context, checkedSeatNos);
         }
       } catch (error) {
-        if (isAbortError(error, context.signal)) {
-          throw error;
-        }
+        if (effectStarted) failAfterEffect(error);
+
+        await allowModelFallback(error, context, 'check');
         gameLogger.error(
           `[预言家查验] 执行异常，降级为随机查验: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -147,12 +150,19 @@ export class SeerCheckNode {
     additionalContext?: string,
   ) {
     // 复用 AgentRuntimeService 的 prepareContextPublic
-    return this.agentRuntime.prepareContextPublic(
-      state.gameId,
-      playerId,
-      'night_action' as any,
-      additionalContext,
-    );
+    return this.agentRuntime.prepareContextPublic({
+      gameId: state.gameId,
+      playerId: playerId,
+      scenario: 'night_action',
+      actionType: 'seer_check',
+      position: {
+        day: state.currentDay,
+        phase: '预言家查验',
+        round: 0,
+        aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+      },
+      additionalContext: additionalContext,
+    });
   }
 
   /**
@@ -169,7 +179,11 @@ export class SeerCheckNode {
     );
 
     if (candidates.length > 0) {
-      const target = candidates[Math.floor(Math.random() * candidates.length)];
+      const target = await saveNodeValue(
+        context,
+        'fallback-target',
+        () => candidates[Math.floor(Math.random() * candidates.length)],
+      );
       const checkResult = checkSeerResult(target);
 
       const event = await context.eventWriter.writeSeerCheckEvent({

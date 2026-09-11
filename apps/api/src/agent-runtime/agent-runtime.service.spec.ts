@@ -1,3 +1,4 @@
+import { createAgentRuntime } from '../testing/agent-runtime.fixture';
 import type { ConfigService } from '@nestjs/config';
 import { ACTION_TYPES, AGENT_SCENARIOS, ROLES } from '@ai-werewolf/shared';
 import type { Env } from '../config/env.validation';
@@ -9,7 +10,6 @@ import type { SkillLoaderService } from '../skills/skill-loader.service';
 import type { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import type { LangfuseService } from '../observability/langfuse.service';
 import type { PromptService } from '../observability/prompt.service';
-import { AgentRuntimeService } from './agent-runtime.service';
 import type { ChatHistoryService } from './chat-history.service';
 
 jest.mock('../observability/langfuse.service', () => ({ LangfuseService: jest.fn() }));
@@ -25,9 +25,6 @@ type TestableAgentRuntime = {
     playerId: string;
     scenario: (typeof AGENT_SCENARIOS)[keyof typeof AGENT_SCENARIOS];
   }): Promise<unknown>;
-  getVisibleVisibilities: jest.Mock;
-  buildLayeredContext: jest.Mock;
-  getCurrentRound: jest.Mock;
   assembleSystemPrompt: jest.Mock;
 };
 
@@ -69,14 +66,14 @@ describe('AgentRuntimeService memory retrieval', () => {
       retrieve: jest.fn().mockResolvedValue([]),
     } as unknown as KnowledgeService;
     const speechSummarizer = {
-      summarizeForAgent: jest.fn().mockResolvedValue({
+      readPersonalJudgments: jest.fn().mockResolvedValue({
         recentSpeeches: [],
         olderSpeechesSummary: [],
         recentJudgments: [],
         olderJudgmentsSummary: [],
       }),
     } as unknown as SpeechSummarizerService;
-    const service = new AgentRuntimeService(
+    const service = createAgentRuntime(
       { get: jest.fn().mockReturnValue(true) } as unknown as ConfigService<Env, true>,
       prisma,
       memoryService,
@@ -85,24 +82,20 @@ describe('AgentRuntimeService memory retrieval', () => {
       {} as SkillLoaderService,
       speechSummarizer,
       {} as LangfuseService,
-      { captureSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
+      { captureGameSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
       {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;
-    runtime.getVisibleVisibilities = jest.fn().mockResolvedValue([]);
-    runtime.buildLayeredContext = jest.fn().mockResolvedValue({
-      critical: '',
-      recent: '',
-      history: '',
-    });
-    runtime.getCurrentRound = jest.fn().mockResolvedValue(1);
+
     runtime.assembleSystemPrompt = jest.fn().mockResolvedValue('system prompt');
 
-    const contextData = await service.prepareContextPublic(
-      'game-1',
-      'player-1',
-      AGENT_SCENARIOS.VOTE,
-    );
+    const contextData = await service.prepareContextPublic({
+      gameId: 'game-1',
+      playerId: 'player-1',
+      scenario: AGENT_SCENARIOS.VOTE,
+      actionType: 'vote',
+      position: { day: 1, phase: 'AGENT_SCENARIOS.VOTE', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+    });
 
     expect(memoryService.retrieveActiveMemories).toHaveBeenCalledWith('agent-1', 'default', {
       types: ['persona', 'strategy'],
@@ -195,14 +188,14 @@ describe('AgentRuntimeService memory retrieval', () => {
       recordUsages: jest.fn().mockResolvedValue(undefined),
     } as unknown as KnowledgeService;
     const speechSummarizer = {
-      summarizeForAgent: jest.fn().mockResolvedValue({
+      readPersonalJudgments: jest.fn().mockResolvedValue({
         recentSpeeches: [],
         olderSpeechesSummary: [],
         recentJudgments: [],
         olderJudgmentsSummary: [],
       }),
     } as unknown as SpeechSummarizerService;
-    const service = new AgentRuntimeService(
+    const service = createAgentRuntime(
       { get: jest.fn().mockReturnValue(true) } as unknown as ConfigService<Env, true>,
       prisma,
       memoryService,
@@ -211,24 +204,25 @@ describe('AgentRuntimeService memory retrieval', () => {
       {} as SkillLoaderService,
       speechSummarizer,
       {} as LangfuseService,
-      { captureSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
+      { captureGameSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
       {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;
-    runtime.getVisibleVisibilities = jest.fn().mockResolvedValue([]);
-    runtime.buildLayeredContext = jest.fn().mockResolvedValue({
-      critical: '',
-      recent: '',
-      history: '',
-    });
-    runtime.getCurrentRound = jest.fn().mockResolvedValue(1);
+
     runtime.assembleSystemPrompt = jest.fn().mockResolvedValue('system prompt');
 
-    const contextData = await service.prepareContextPublic(
-      'game-1',
-      'player-1',
-      AGENT_SCENARIOS.DAY_SPEECH,
-    );
+    const contextData = await service.prepareContextPublic({
+      gameId: 'game-1',
+      playerId: 'player-1',
+      scenario: AGENT_SCENARIOS.DAY_SPEECH,
+      actionType: 'speech',
+      position: {
+        day: 1,
+        phase: 'AGENT_SCENARIOS.DAY_SPEECH',
+        round: 0,
+        aliveSeats: [1, 2, 3, 4, 5, 6],
+      },
+    });
     expect(contextData).toHaveProperty('pendingKnowledgeUsages', [{ chunkId: 'chunk-1' }]);
 
     await service.recordExperienceUsages(contextData, {

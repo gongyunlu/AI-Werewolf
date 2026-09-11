@@ -206,7 +206,11 @@ export function selectKeyEvents(events: MetricEvent[]): KeyEvent[] {
   for (const e of events) {
     const day = e.day ?? 0;
 
-    if (e.actionType === ACTION_TYPES.PLAYER_DIED && !firstBloodRecorded) {
+    if (
+      !firstBloodRecorded &&
+      (e.actionType === ACTION_TYPES.PLAYER_DIED ||
+        (e.actionType === ACTION_TYPES.NIGHT_RESOLVED && firstDeathSeatNo(e.content) !== undefined))
+    ) {
       const seatNo = firstDeathSeatNo(e.content);
       result.push({ day, type: 'first_blood', ...(seatNo !== undefined ? { seatNo } : {}) });
       firstBloodRecorded = true;

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import type { Prisma } from '../generated/prisma/client';
 
 /**
  * Agent 判断数据类型
@@ -33,6 +34,7 @@ export class AgentJudgmentService {
     gameId: string,
     day: number,
     judgments: AgentJudgment[],
+    tx: Prisma.TransactionClient = this.prisma,
   ): Promise<void> {
     if (judgments.length === 0) {
       return;
@@ -45,7 +47,7 @@ export class AgentJudgmentService {
       }
     }
 
-    await this.prisma.agentJudgment.createMany({
+    await tx.agentJudgment.createMany({
       data: judgments.map((j) => ({
         agentId,
         gameId,

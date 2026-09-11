@@ -1,3 +1,4 @@
+import { ModelCallError } from '@/llm/model-call-guard';
 import { VoteNode } from './vote.node';
 import { createGameState, createPlayer } from '../../testing/test-utils';
 import type { NodeContext } from '../node.types';
@@ -5,7 +6,8 @@ import type { NodeContext } from '../node.types';
 describe('VoteNode', () => {
   it('模型失败时写入弃票事件', async () => {
     const agentRuntime = {
-      prepareContextPublic: jest.fn().mockRejectedValue(new Error('model failed')),
+      prepareContextPublic: jest.fn().mockResolvedValue({}),
+      decide: jest.fn().mockRejectedValue(new ModelCallError('transient')),
     };
     const event = { id: 'vote-event' };
     const context = {

@@ -1,12 +1,18 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Queue } from 'bullmq';
+import { PrismaService } from '../prisma/prisma.service';
+
+export function gameJobId(gameId: string, generation = 1): string {
+  return generation === 1 ? gameId : `${gameId}-${generation}`;
+}
 
 /**
  * 游戏对局任务数据
  */
 export interface GameJobData {
   gameId: string;
+  generation?: number;
 }
 
 /**
@@ -30,7 +36,10 @@ export interface QueueStatus {
 export class GameQueueService {
   private readonly logger = new Logger(GameQueueService.name);
 
-  constructor(@InjectQueue('game-queue') private readonly queue: Queue<GameJobData>) {}
+  constructor(
+    @InjectQueue('game-queue') private readonly queue: Queue<GameJobData>,
+    @Optional() private readonly prisma?: PrismaService,
+  ) {}
 
   /**
    * 添加游戏任务到队列
@@ -38,12 +47,12 @@ export class GameQueueService {
    * @param gameId - 游戏对局ID
    * @returns Job ID
    */
-  async addGameJob(gameId: string): Promise<string> {
+  async addGameJob(gameId: string, generation = 1): Promise<string> {
     const job = await this.queue.add(
       'run-game',
-      { gameId },
+      { gameId, generation },
       {
-        jobId: gameId,
+        jobId: gameJobId(gameId, generation),
         // 正常引擎错误由 Worker 转成 UnrecoverableError，绝不从初始状态重放事件；
         // attempts 只用于引擎已经落成 FINISHED 后，幂等重试结算/分析投递。
         // 6 次尝试的指数窗口会越过 30s 调度锁 TTL；持锁进程硬崩溃时，至少还有一次
@@ -68,8 +77,15 @@ export class GameQueueService {
    * @param gameId - 游戏对局ID
    * @returns Job 对象或 undefined
    */
-  async getJob(gameId: string) {
-    return this.queue.getJob(gameId);
+  async getJob(gameId: string, generation?: number) {
+    const execution =
+      generation === undefined
+        ? await this.prisma?.gameExecution.findUnique({
+            where: { gameId },
+            select: { generation: true },
+          })
+        : undefined;
+    return this.queue.getJob(gameJobId(gameId, generation ?? execution?.generation));
   }
 
   /**
@@ -79,7 +95,7 @@ export class GameQueueService {
    * @returns 队列状态
    */
   async getJobStatus(gameId: string): Promise<QueueStatus> {
-    const job = await this.queue.getJob(gameId);
+    const job = await this.getJob(gameId);
 
     if (!job) {
       return { status: 'unknown' };
@@ -90,7 +106,7 @@ export class GameQueueService {
     // 如果是 waiting，计算在队列中的位置
     if (state === 'waiting') {
       const waitingJobs = await this.queue.getWaiting();
-      const position = waitingJobs.findIndex((j) => j.id === gameId);
+      const position = waitingJobs.findIndex((j) => j.id === job.id);
       return { status: 'pending', position: position >= 0 ? position + 1 : undefined };
     }
 
@@ -113,7 +129,7 @@ export class GameQueueService {
    * @returns 是否成功从队列移除
    */
   async cancelJob(gameId: string): Promise<boolean> {
-    const job = await this.queue.getJob(gameId);
+    const job = await this.getJob(gameId);
     if (!job) {
       this.logger.warn(`任务不存在: ${gameId}`);
       return false;

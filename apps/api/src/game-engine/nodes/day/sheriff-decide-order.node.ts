@@ -1,7 +1,9 @@
+import { allowModelFallback, failAfterEffect } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '@/game-engine/core/types';
 import type { NodeFactory } from '@/game-engine/nodes/node.types';
+import { saveNodeValue } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import {
   calculateSpeechOrder,
@@ -10,7 +12,6 @@ import {
 import type { TypedRuleset } from '@/prisma/typed-models';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 const SheriffDecideOrderSchema = z.object({
   direction: z.enum(['left', 'right']).describe('发言方向：left=逆时针，right=顺时针'),
@@ -55,14 +56,21 @@ export class SheriffDecideOrderNode {
       }
 
       let sheriffChoice: { direction: 'left' | 'right' } | undefined;
+      let effectStarted = false;
 
       try {
-        const contextData = await this.agentRuntime.prepareContextPublic(
-          state.gameId,
-          sheriff.id,
-          'sheriff_decide_order' as any,
-          undefined,
-        );
+        const contextData = await this.agentRuntime.prepareContextPublic({
+          gameId: state.gameId,
+          playerId: sheriff.id,
+          scenario: 'sheriff_decide_order',
+          actionType: 'sheriff_decide_order',
+          position: {
+            day: state.currentDay,
+            phase: '警长决定发言顺序',
+            round: 0,
+            aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+          },
+        });
 
         const threadId = getPlayerThreadId(state.gameId, sheriff.id);
 
@@ -77,6 +85,7 @@ export class SheriffDecideOrderNode {
           direction: decision.direction,
         };
 
+        effectStarted = true;
         const event = await context.eventWriter.writeSheriffDecideOrderEvent({
           gameId: state.gameId,
           day: state.currentDay,
@@ -87,20 +96,21 @@ export class SheriffDecideOrderNode {
         await this.agentRuntime.recordExperienceUsages(contextData, event);
         await context.eventBus?.publish(event);
       } catch (error) {
-        if (isAbortError(error, context.signal)) {
-          throw error;
-        }
+        if (effectStarted) failAfterEffect(error);
+        await allowModelFallback(error, context, 'sheriff-order');
         gameLogger.error(
           `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 
-      const orderResult = calculateSpeechOrder({
-        state,
-        config,
-        currentTime: new Date(),
-        sheriffChoice,
-      });
+      const orderResult = await saveNodeValue(context, 'sheriff-order', () =>
+        calculateSpeechOrder({
+          state,
+          config,
+          currentTime: new Date(),
+          sheriffChoice,
+        }),
+      );
 
       return {
         speechOrder: orderResult.speechOrder,

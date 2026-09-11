@@ -80,5 +80,10 @@ describe('knowledge applicability and deduplication', () => {
     expect(facts).toContain('has_wolf_check');
     expect(facts).not.toContain('first_night');
     expect(facts).not.toContain('public_discussion');
+    expect(facts).not.toContain('antidote_unused');
+    expect(facts).not.toContain('poison_unused');
+    expect(
+      buildKnowledgeFacts({ day: 1, role: 'witch', playerId: 'w', seatNo: 3, events: [] }),
+    ).toEqual(expect.arrayContaining(['antidote_unused', 'poison_unused']));
   });
 });

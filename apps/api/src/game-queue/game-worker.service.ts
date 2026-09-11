@@ -10,6 +10,11 @@ import { GamePausedException } from '../game-engine/core/game-engine.exception';
 import type { Env } from '../config/env.validation';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import { PostGameAnalysisError } from '../game-executor/game-executor.exception';
+import { Optional } from '@nestjs/common';
+import {
+  ExecutionOwnershipError,
+  GameRecoveryService,
+} from '../game-recovery/game-recovery.service';
 
 /**
  * 游戏队列 Worker
@@ -33,6 +38,7 @@ export class GameWorkerService extends WorkerHost {
     private readonly configService: ConfigService<Env, true>,
     private readonly logger: PinoLogger,
     private readonly broadcaster: SseBroadcasterService,
+    @Optional() private readonly recovery?: GameRecoveryService,
   ) {
     super();
     // 直接注入 PinoLogger 而非 @InjectPinoLogger：后者按类名注册具名 provider，
@@ -44,6 +50,8 @@ export class GameWorkerService extends WorkerHost {
 
   async process(job: Job<GameJobData>): Promise<void> {
     const { gameId } = job.data;
+    // 检查点上线前入队的任务属于首次执行，不能因此省略对后继代次的隔离。
+    const generation = job.data.generation ?? 1;
     const attempt = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts ?? 1;
     const startedAt = Date.now();
@@ -90,15 +98,25 @@ export class GameWorkerService extends WorkerHost {
       return;
     }
 
+    // BullMQ 失锁后会重新取出同一任务；这里等待人工恢复，不重新开始第一夜。
+    if (job.stalledCounter > 0) {
+      await this.recovery?.interrupt(gameId, generation);
+      throw new UnrecoverableError('执行进程中断；有检查点的对局等待手动恢复，无检查点的对局中止');
+    }
+
     this.logger.info({ gameId, jobId: job.id, attempt, maxAttempts }, '开始执行对局');
 
     try {
-      await this.gameExecutor.executeGame(gameId);
+      await this.gameExecutor.executeGame(gameId, generation);
       this.logger.info(
         { gameId, jobId: job.id, attempt, durationMs: Date.now() - startedAt },
         '对局执行完成',
       );
     } catch (error) {
+      if (error instanceof ExecutionOwnershipError) {
+        this.logger.warn({ gameId, jobId: job.id }, '执行权已转移，旧任务退出');
+        throw new UnrecoverableError(error.message);
+      }
       // 如果是游戏暂停/取消异常，特殊处理
       if (error instanceof GamePausedException) {
         this.logger.info(
@@ -128,7 +146,11 @@ export class GameWorkerService extends WorkerHost {
       try {
         const cleanup = await this.prisma.game.updateMany({
           // 终局事务可能已经提交、只是客户端收到不确定失败；绝不能把 FINISHED 覆盖成 ABORTED。
-          where: { id: gameId, status: GAME_STATUSES.RUNNING },
+          where: {
+            id: gameId,
+            status: GAME_STATUSES.RUNNING,
+            OR: [{ execution: null }, { execution: { generation } }],
+          },
           data: {
             status: GAME_STATUSES.ABORTED,
             endedAt: new Date(),

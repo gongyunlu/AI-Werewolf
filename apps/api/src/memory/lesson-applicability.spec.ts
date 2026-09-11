@@ -15,7 +15,9 @@ it('首夜尚无讨论或救人事实时，不能采纳依赖这些事实的经�
     ]),
   ).toBe(true);
   expect(lessonApplies({ conditions: ['after_first_night'] }, ['first_night'])).toBe(false);
-  expect(lessonApplies({}, ['first_night'])).toBe(true);
+  expect(lessonApplies({}, ['first_night'])).toBe(false);
+  expect(lessonApplies({ conditions: ['unknown_condition'] }, ['first_night'])).toBe(false);
+  expect(lessonApplies({ conditions: [] }, ['first_night'])).toBe(true);
 });
 
 it('冻结检索先排除条件不成立的高相似经验，保留适用经验', () => {

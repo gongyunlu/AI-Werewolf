@@ -1,5 +1,5 @@
 import { GameExecutorService } from './game-executor.service';
-import { GameEngine } from '../game-engine/core/game-engine';
+import type { GameGraphState } from '../game-engine/core/types';
 import {
   GameAbortedException,
   GamePausedException,
@@ -35,22 +35,22 @@ function createHarness() {
   const gameAnalysis = {
     analyzeGame: jest.fn().mockResolvedValue({ judged: 1, reflectPlanned: 1 }),
   };
+  const engine = { run: jest.fn(async (state: GameGraphState) => state) };
+  const engineFactory = { create: jest.fn(() => engine) };
 
   const service = new GameExecutorService(
     prisma as never,
     agentRuntime as never,
     eventWriter as never,
     {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
+    { getOrCreate: jest.fn() } as never,
     {} as never,
     gameAnalysis as never,
     {} as never,
-    {} as never,
+    engineFactory as never,
   );
 
-  return { service, gameAnalysis };
+  return { service, gameAnalysis, engine, engineFactory };
 }
 
 describe('GameExecutorService', () => {
@@ -59,9 +59,8 @@ describe('GameExecutorService', () => {
   });
 
   it('赛后结算或分析投递失败时向上抛出，供 GameWorker 触发重试', async () => {
-    const { service, gameAnalysis } = createHarness();
+    const { service, gameAnalysis, engineFactory } = createHarness();
     const deliveryError = new Error('queue unavailable');
-    jest.spyOn(GameEngine.prototype, 'run').mockImplementation(async (state) => state);
     gameAnalysis.analyzeGame.mockRejectedValueOnce(deliveryError);
 
     await expect(service.executeGame(GAME_ID)).rejects.toMatchObject({
@@ -69,6 +68,7 @@ describe('GameExecutorService', () => {
       originalError: deliveryError,
     } satisfies Partial<PostGameAnalysisError>);
     expect(gameAnalysis.analyzeGame).toHaveBeenCalledWith(GAME_ID);
+    expect(engineFactory.create).toHaveBeenCalledTimes(1);
     expect(service.abortGame(GAME_ID)).toBe(false);
   });
 
@@ -76,8 +76,8 @@ describe('GameExecutorService', () => {
     ['暂停', new GamePausedException(GAME_ID)],
     ['取消', new GameAbortedException(GAME_ID)],
   ])('游戏%s时保留正常退出语义，不投递赛后分析', async (_label, exception) => {
-    const { service, gameAnalysis } = createHarness();
-    jest.spyOn(GameEngine.prototype, 'run').mockRejectedValueOnce(exception);
+    const { service, gameAnalysis, engine } = createHarness();
+    engine.run.mockRejectedValueOnce(exception);
 
     const state = await service.executeGame(GAME_ID);
 

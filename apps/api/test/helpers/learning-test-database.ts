@@ -1,95 +1,87 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { config } from 'dotenv';
 import { Client } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../../src/generated/prisma/client';
 
-const TABLES = [
-  'rulesets',
-  'agents',
-  'games',
-  'players',
-  'events',
-  'memories',
-  'memory_usages',
-  'memory_derivations',
-  'global_memories',
-  'pattern_candidates',
-  'decision_judgments',
-  'agent_performances',
-  'game_summaries',
-  'agent_judgments',
-  'speech_summaries',
-  'team_judgments',
-  'knowledge_chunks',
-  'knowledge_usages',
-];
+const executeFile = promisify(execFile);
+const apiDirectory = resolve(__dirname, '../..');
 
-/** 复制表结构、索引、CHECK 和外键；所有写入与清理都限定在本次随机 schema。 */
+/** 使用正式迁移建立独立数据库，覆盖 public、langchain、触发器和扩展。 */
 export async function createLearningTestDatabase() {
-  config({ path: resolve(__dirname, '../../../..', '.env.local'), quiet: true });
-  config({ path: resolve(__dirname, '../../../..', '.env'), quiet: true });
+  config({ path: resolve(apiDirectory, '../..', '.env.local'), quiet: true });
+  config({ path: resolve(apiDirectory, '../..', '.env'), quiet: true });
   if (!process.env.DATABASE_URL) throw new Error('集成测试需要 DATABASE_URL');
-  const schema = 'memory_test_' + randomUUID().replaceAll('-', '');
+  const databaseName = 'werewolf_test_' + randomUUID().replaceAll('-', '');
+  const target = new URL(process.env.DATABASE_URL);
+  target.pathname = '/' + databaseName;
+  target.searchParams.delete('schema');
+  const connectionString = target.toString();
   const admin = new Client({ connectionString: process.env.DATABASE_URL });
   await admin.connect();
-  const drop = async () => {
-    if (!/^memory_test_[a-f0-9]{32}$/.test(schema)) throw new Error('拒绝清理非测试 schema');
-    await admin.query('DROP SCHEMA IF EXISTS "' + schema + '" CASCADE');
-    await admin.end();
-  };
-  try {
-    await admin.query('CREATE SCHEMA "' + schema + '"');
-    for (const table of TABLES) {
-      await admin.query(
-        'CREATE TABLE "' + schema + '"."' + table + '" (LIKE public."' + table + '" INCLUDING ALL)',
-      );
-    }
-    const constraints = await admin.query<{ table_name: string; name: string; definition: string }>(
-      "SELECT c.relname AS table_name, con.conname AS name, pg_get_constraintdef(con.oid) AS definition FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND con.contype='f' AND c.relname=ANY($1::text[])",
-      [TABLES],
-    );
-    for (const row of constraints.rows) {
-      const definition = row.definition.replace(
-        /REFERENCES (?:public\.)?("?\w+"?)/,
-        'REFERENCES "' + schema + '".$1',
-      );
-      await admin.query(
-        'ALTER TABLE "' +
-          schema +
-          '"."' +
-          row.table_name +
-          '" ADD CONSTRAINT "' +
-          row.name +
-          '" ' +
-          definition,
-      );
-    }
-    const db = new PrismaClient({
-      adapter: new PrismaPg(
-        {
-          connectionString: process.env.DATABASE_URL,
-          options: '-c search_path=' + schema + ',public',
-        },
-        { schema },
-      ),
+  let created = false;
+  let isolated: Client | undefined;
+  let db: PrismaClient | undefined;
+
+  const runPrisma = async (...args: string[]) => {
+    await executeFile(process.execPath, [require.resolve('prisma/build/index.js'), ...args], {
+      cwd: apiDirectory,
+      env: { ...process.env, DATABASE_URL: connectionString },
+      windowsHide: true,
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
     });
+  };
+  const close = async () => {
+    try {
+      await db?.$disconnect();
+      await isolated?.end();
+      if (created) {
+        if (!/^werewolf_test_[a-f0-9]{32}$/.test(databaseName))
+          throw new Error('拒绝清理非测试数据库');
+        await admin.query('DROP DATABASE "' + databaseName + '"');
+        created = false;
+      }
+    } finally {
+      await admin.end();
+    }
+  };
+
+  try {
+    await admin.query('CREATE DATABASE "' + databaseName + '"');
+    created = true;
+    await runPrisma('migrate', 'deploy');
+    isolated = new Client({ connectionString });
+    await isolated.connect();
+    db = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
     await db.$connect();
+    const [identity] = await db.$queryRaw<
+      Array<{ name: string }>
+    >`SELECT current_database()::text AS name`;
+    if (identity.name !== databaseName) throw new Error('集成测试数据库隔离失败');
+
     return {
       db,
+      databaseName,
+      connectionString,
+      runPrisma,
       async reset() {
-        await admin.query(
-          'TRUNCATE ' + TABLES.map((t) => '"' + schema + '"."' + t + '"').join(', '),
+        const tables = await isolated!.query<{ qualified_name: string }>(
+          "SELECT format('%I.%I', schemaname, tablename) AS qualified_name FROM pg_tables " +
+            "WHERE schemaname IN ('public', 'langchain') AND tablename <> '_prisma_migrations'",
         );
+        if (tables.rows.length)
+          await isolated!.query(
+            'TRUNCATE ' + tables.rows.map((row) => row.qualified_name).join(', '),
+          );
       },
-      async close() {
-        await db.$disconnect();
-        await drop();
-      },
+      close,
     };
   } catch (error) {
-    await drop();
+    await close();
     throw error;
   }
 }

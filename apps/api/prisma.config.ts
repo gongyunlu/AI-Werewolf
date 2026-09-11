@@ -1,12 +1,15 @@
 import { config } from 'dotenv';
+import { resolve } from 'node:path';
 import { defineConfig } from 'prisma/config';
 
-// .env 在仓库根目录，CLI 从 apps/api 运行，需显式指向根 .env
-config({ path: '../../.env' });
+// 与应用一致：已导出的变量优先，其次本地配置，最后仓库默认配置。
+const repositoryRoot = resolve(__dirname, '../..');
+config({ path: resolve(repositoryRoot, '.env.local'), quiet: true });
+config({ path: resolve(repositoryRoot, '.env'), quiet: true });
 
 const databaseUrl = process.env['DATABASE_URL'];
 if (!databaseUrl) {
-  throw new Error('缺少环境变量 DATABASE_URL，请检查仓库根目录 .env');
+  throw new Error('缺少环境变量 DATABASE_URL，请检查仓库根目录 .env.local 和 .env');
 }
 
 export default defineConfig({

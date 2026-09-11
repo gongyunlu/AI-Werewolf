@@ -13,6 +13,7 @@
     "dev": "pnpm -r --parallel run dev",
     "dev:web": "pnpm --filter @ai-werewolf/web dev",
     "dev:api": "pnpm --filter @ai-werewolf/api dev",
+    "dev:api:watch": "pnpm --filter @ai-werewolf/api dev:watch",
     "debug:api": "pnpm --filter @ai-werewolf/api dev:debug",
     "build": "pnpm -r run build",
     "preview": "pnpm -r --parallel run preview",

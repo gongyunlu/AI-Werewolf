@@ -154,9 +154,11 @@ cp .env.example .env
 ```bash
 pnpm install
 cd apps/api
-pnpm prisma:migrate     # 执行数据库迁移
-pnpm prisma:seed        # 初始化种子数据（预设、Agent）
+pnpm prisma:migrate:deploy # 应用仓库内全部正式迁移
+pnpm prisma:seed           # 初始化规则集、Agent 和基础记忆；不创建或重写对局
 ```
+
+Prisma CLI 与应用均按进程环境变量、根目录 `.env.local`、根目录 `.env` 的顺序读取配置。修改数据库结构时使用 `pnpm prisma:migrate` 生成迁移。
 
 ### 5. 启动应用
 
@@ -168,6 +170,10 @@ pnpm dev
 pnpm dev:api    # 后端: http://localhost:3001
 pnpm dev:web    # 前端: http://localhost:3000
 ```
+
+后端默认构建一次后运行，不启用热更新；修改后端代码后，需要停止进程并重新运行 `pnpm dev:api`。`pnpm debug:api` 使用相同的一次构建方式启动调试。运行真实对局时沿用默认方式。
+
+需要自动重编译时，单独运行 `pnpm dev:api:watch`。该命令会在文件变更后重启后端。
 
 ### 6. 创建对局并观战
 
@@ -254,8 +260,17 @@ pnpm format         # Prettier 格式化
 ```bash
 cd apps/api
 pnpm prisma:migrate       # 创建迁移
+pnpm prisma:migrate:deploy # 应用已有迁移
 pnpm prisma:studio        # 可视化数据库
 pnpm prisma:reset         # 重置数据库（慎用）
+```
+
+初始化与恢复集成测试使用随机独立数据库并执行正式迁移，连接账户需要创建数据库的权限；测试结束后清理自己的数据库：
+
+```bash
+pnpm --filter @ai-werewolf/api test:bootstrap-integration
+pnpm --filter @ai-werewolf/api test:game-recovery-integration
+pnpm --filter @ai-werewolf/api test:learning-integration
 ```
 
 ## License

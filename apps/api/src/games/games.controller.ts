@@ -15,6 +15,7 @@ import { QueryGamesDto } from './dto/query-games.dto';
 import { GamesService } from './games.service';
 import { GameQueueService } from '../game-queue/game-queue.service';
 import { GameLaunchService } from './game-launch.service';
+import { GameResumeService } from './game-resume.service';
 
 @ApiTags('games')
 @Controller('games')
@@ -24,6 +25,7 @@ export class GamesController {
     private readonly gameLaunch: GameLaunchService,
     private readonly gameQueue: GameQueueService,
     private readonly logger: PinoLogger,
+    private readonly gameResume: GameResumeService,
   ) {
     this.logger.setContext(GamesController.name);
   }
@@ -87,7 +89,7 @@ export class GamesController {
   @Post(':id/resume')
   @ApiOperation({ summary: '继续对局' })
   async resume(@Param('id', new ParseUUIDPipe()) id: string) {
-    throw new NotImplementedException(`对局 ${id} 暂不支持恢复执行`);
+    return this.gameResume.resume(id);
   }
 
   // ========== 管理端点 ==========
@@ -109,7 +111,7 @@ export class GamesController {
   @Post('admin/recover-game/:id')
   @ApiOperation({ summary: '恢复单个对局' })
   async recoverSingleGame(@Param('id', new ParseUUIDPipe()) id: string) {
-    throw new NotImplementedException(`对局 ${id} 暂不支持恢复执行`);
+    return this.gameResume.resume(id);
   }
 
   @Post('admin/clear-pending-recovery')

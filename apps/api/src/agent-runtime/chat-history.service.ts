@@ -8,6 +8,7 @@ import {
 } from '@langchain/core/messages';
 import { Pool } from 'pg';
 import type { Env } from '../config/env.validation';
+import type { Prisma } from '../generated/prisma/client';
 
 const CHAT_HISTORY_TABLE = 'langchain.langchain_chat_histories';
 const QUOTED_CHAT_HISTORY_TABLE = '"langchain"."langchain_chat_histories"';
@@ -65,10 +66,21 @@ export class ChatHistoryService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 原子替换单个会话的滑动窗口，避免 clear 后写入一半。 */
-  async replace(sessionId: string, messages: BaseMessage[]): Promise<void> {
+  async replace(
+    sessionId: string,
+    messages: BaseMessage[],
+    tx?: Prisma.TransactionClient,
+  ): Promise<void> {
     const storedMessages = mapChatMessagesToStoredMessages(messages).map(({ data, type }) =>
       Object.assign({}, data, { type }),
     );
+    if (tx) {
+      await tx.$executeRaw`DELETE FROM "langchain"."langchain_chat_histories" WHERE "session_id" = ${sessionId}`;
+      for (const message of storedMessages) {
+        await tx.$executeRaw`INSERT INTO "langchain"."langchain_chat_histories" ("session_id", "message") VALUES (${sessionId}, ${JSON.stringify(message)}::jsonb)`;
+      }
+      return;
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

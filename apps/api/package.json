@@ -3,11 +3,13 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "pnpm -w run docker:up && nest start --watch",
-    "dev:debug": "pnpm -w run docker:up && nest start --watch --debug 0.0.0.0:9229",
+    "dev": "pnpm run build && pnpm run start:prod",
+    "dev:debug": "pnpm -w run docker:up && pnpm run build && node --enable-source-maps --inspect=0.0.0.0:9229 dist/main",
+    "dev:watch": "pnpm -w run docker:up && nest start --watch --watchAssets",
     "build": "nest build",
     "postinstall": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "prisma db seed",
     "prisma:reset": "prisma migrate reset",
     "prisma:studio": "prisma studio",
@@ -21,6 +23,7 @@
     "evaluation:measure-ab": "node --import tsx src/evaluation/measure-ab.ts",
     "evaluation:recompute-scores": "node --import tsx src/evaluation/recompute-player-scores.ts",
     "evaluation:rejudge-games": "node --import tsx src/evaluation/rejudge-games.ts",
+    "prompt:sync-turn": "node --import tsx src/observability/sync-turn-prompts.ts",
     "prompt:sync-judge": "node --import tsx src/observability/sync-judge-prompts.ts",
     "start:prod": "pnpm -w run docker:up && node dist/main",
     "preview": "pnpm run start:prod",
@@ -31,8 +34,11 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:learning-integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-learning-integration.json --runInBand",
+    "test:game-recovery-integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-game-recovery-integration.json --runInBand",
+    "test:bootstrap-integration": "pnpm run test:game-recovery-integration --runTestsByPath ./test/bootstrap.integration-spec.ts",
     "test:cov": "jest --coverage",
-    "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json"
+    "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json",
+    "test:mock-game": "jest --runInBand --runTestsByPath src/game-engine/testing/mock-game.spec.ts"
   },
   "dependencies": {
     "@ai-werewolf/shared": "workspace:*",

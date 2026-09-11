@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { nodeRegistry } from './node-registry';
+import { NodeRegistry } from './node-registry';
 import { WerewolfKillNode } from './night/werewolf-kill.node';
 import { WitchAntidoteNode } from './night/witch-antidote.node';
 import { WitchPoisonNode } from './night/witch-poison.node';
@@ -16,41 +16,39 @@ import { WolfExplodeNode } from './day/wolf-explode.node';
 /**
  * 节点注册器
  *
- * 集中持有所有节点实例,按节点名覆盖 nodeRegistry 中的默认注册，
- * 避免 GameEngine 构造函数逐个注入。
+ * 将本容器的节点实例一次性装配为只读注册表。
  */
 @Injectable()
 export class NodeRegistrar {
-  constructor(
-    private readonly werewolfKill: WerewolfKillNode,
-    private readonly witchAntidote: WitchAntidoteNode,
-    private readonly witchPoison: WitchPoisonNode,
-    private readonly seerCheck: SeerCheckNode,
-    private readonly speech: SpeechNode,
-    private readonly vote: VoteNode,
-    private readonly lastWords: LastWordsNode,
-    private readonly exileLastWords: ExileLastWordsNode,
-    private readonly sheriffDecideOrder: SheriffDecideOrderNode,
-    private readonly pkSpeech: PkSpeechNode,
-    private readonly pkVote: PkVoteNode,
-    private readonly wolfExplode: WolfExplodeNode,
-  ) {}
+  readonly registry: NodeRegistry;
 
-  /**
-   * 覆盖注册所有两阶段节点
-   */
-  registerAll(): void {
-    nodeRegistry.registerFactory('werewolfKill', this.werewolfKill.create());
-    nodeRegistry.registerFactory('witchAntidote', this.witchAntidote.create());
-    nodeRegistry.registerFactory('witchPoison', this.witchPoison.create());
-    nodeRegistry.registerFactory('seerCheck', this.seerCheck.create());
-    nodeRegistry.registerFactory('speech', this.speech.create());
-    nodeRegistry.registerFactory('vote', this.vote.create());
-    nodeRegistry.registerFactory('lastWords', this.lastWords.create());
-    nodeRegistry.registerFactory('exileLastWords', this.exileLastWords.create());
-    nodeRegistry.registerFactory('sheriffDecideOrder', this.sheriffDecideOrder.create());
-    nodeRegistry.registerFactory('pkSpeech', this.pkSpeech.create());
-    nodeRegistry.registerFactory('pkVote', this.pkVote.create());
-    nodeRegistry.registerFactory('wolfExplode', this.wolfExplode.create());
+  constructor(
+    werewolfKill: WerewolfKillNode,
+    witchAntidote: WitchAntidoteNode,
+    witchPoison: WitchPoisonNode,
+    seerCheck: SeerCheckNode,
+    speech: SpeechNode,
+    vote: VoteNode,
+    lastWords: LastWordsNode,
+    exileLastWords: ExileLastWordsNode,
+    sheriffDecideOrder: SheriffDecideOrderNode,
+    pkSpeech: PkSpeechNode,
+    pkVote: PkVoteNode,
+    wolfExplode: WolfExplodeNode,
+  ) {
+    this.registry = new NodeRegistry({
+      werewolfKill: werewolfKill.create(),
+      witchAntidote: witchAntidote.create(),
+      witchPoison: witchPoison.create(),
+      seerCheck: seerCheck.create(),
+      speech: speech.create(),
+      vote: vote.create(),
+      lastWords: lastWords.create(),
+      exileLastWords: exileLastWords.create(),
+      sheriffDecideOrder: sheriffDecideOrder.create(),
+      pkSpeech: pkSpeech.create(),
+      pkVote: pkVote.create(),
+      wolfExplode: wolfExplode.create(),
+    });
   }
 }

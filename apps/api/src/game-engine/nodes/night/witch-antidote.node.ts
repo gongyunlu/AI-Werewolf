@@ -1,3 +1,5 @@
+import { ModelCallError } from '@/llm/model-call-guard';
+import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
@@ -6,7 +8,6 @@ import type { NodeFactory } from '../node.types';
 import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
 /**
  * 构建女巫解药决策 Schema（值域收敛到刀口座位）
@@ -46,7 +47,7 @@ export class WitchAntidoteNode {
         return {};
       }
 
-      if (witch.hasAntidoteUsed) {
+      if (witch.hasAntidoteUsed || state.witchPoisonTarget) {
         return {};
       }
 
@@ -79,14 +80,21 @@ export class WitchAntidoteNode {
 你只能选择救 ${targetPlayer.seatNo}号位，或不用药。
       `.trim();
 
+      let effectStarted = false;
       try {
-        const contextData = await this.agentRuntime.prepareContextPublic(
-          state.gameId,
-          witch.id,
-          'night_action' as any,
-          wolfTargetInfo,
-          'witch_save',
-        );
+        const contextData = await this.agentRuntime.prepareContextPublic({
+          gameId: state.gameId,
+          playerId: witch.id,
+          scenario: 'night_action',
+          actionType: 'witch_save',
+          position: {
+            day: state.currentDay,
+            phase: '女巫解药',
+            round: 0,
+            aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+          },
+          additionalContext: wolfTargetInfo,
+        });
 
         const threadId = getPlayerThreadId(state.gameId, witch.id);
 
@@ -100,11 +108,10 @@ export class WitchAntidoteNode {
         if (decision.action === 'antidote') {
           const target = state.players.find((p) => p.seatNo === decision.targetSeatNo);
           if (!target || target.id !== targetPlayer.id) {
-            throw new Error(
-              `[女巫解药] 数据一致性错误：未找到目标玩家 ${decision.targetSeatNo}号位`,
-            );
+            throw new ModelCallError('invalid_output');
           }
 
+          effectStarted = true;
           const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
             day: state.currentDay,
@@ -123,6 +130,7 @@ export class WitchAntidoteNode {
             ),
           };
         } else {
+          effectStarted = true;
           const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
             gameId: state.gameId,
             day: state.currentDay,
@@ -137,9 +145,9 @@ export class WitchAntidoteNode {
           return {};
         }
       } catch (error) {
-        if (isAbortError(error, context.signal)) {
-          throw error;
-        }
+        if (effectStarted) failAfterEffect(error);
+
+        await allowModelFallback(error, context, 'antidote');
         gameLogger.error(
           `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
         );

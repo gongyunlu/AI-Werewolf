@@ -130,6 +130,17 @@ const ACTION_CATALOG: Record<string, ActionMeta> = {
     },
   },
 
+  [ACTION_TYPES.NIGHT_RESOLVED]: {
+    label: '夜间结算',
+    // 输入仍须先按受众过滤；此内部事实只供有权限的全局复盘使用。
+    render: (c) => {
+      const deaths = c.deaths as Array<{ seatNo: number; cause: string }>;
+      return deaths.length
+        ? `夜间结算：${deaths.map((death) => `${death.seatNo}号位出局（${death.cause}）`).join('、')}`
+        : '夜间结算：无人死亡';
+    },
+  },
+
   [ACTION_TYPES.PEACEFUL_NIGHT]: {
     render: () => '死亡公告：平安夜',
   },

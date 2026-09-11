@@ -3,11 +3,14 @@ import { createGameState, createPlayer } from '../testing/test-utils';
 import type { GameGraphState } from './types';
 import type { GamePreset } from '../presets/game-presets';
 import { ExperimentInvalidError } from '@/evaluation/experiment-integrity';
+import { NodeRegistry } from '../nodes/node-registry';
 
 type TestableGameEngine = {
   run: GameEngine['run'];
   prisma: { game: { findUnique: jest.Mock }; $executeRaw?: jest.Mock };
   configService: { get: jest.Mock };
+  nodeContext: object;
+  nodeRegistry: NodeRegistry;
   initialize: jest.Mock;
   checkPause: jest.Mock;
   executePhase: jest.Mock;
@@ -20,8 +23,34 @@ type TestableGameEngine = {
 };
 
 describe('GameEngine lifecycle', () => {
+  it('节点边界检查取消，非模型节点也不能在取消后开始', async () => {
+    const controller = new AbortController();
+    const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.nodeContext = { signal: controller.signal };
+    engine.nodeRegistry = new NodeRegistry({});
+    const node = jest.fn(async () => {
+      controller.abort();
+      return {};
+    });
+    const getNode = jest.spyOn(engine.nodeRegistry, 'getNode').mockReturnValue(node);
+    const state = createGameState({ gameId: 'g', players: [] });
+    try {
+      await expect(engine.executeNode('nightResolve', state)).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      await expect(engine.executeNode('gameEnd', state)).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      expect(node).toHaveBeenCalledTimes(1);
+      expect(getNode).toHaveBeenCalledTimes(1);
+    } finally {
+      getNode.mockRestore();
+    }
+  });
   it.each(['preflight', 'node'])('实验失效由引擎统一记录一次并中止（%s）', async (source) => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.configService = { get: jest.fn() };
+    engine.nodeContext = {};
     engine.initialize = jest.fn();
     engine.prisma = {
       game: {
@@ -40,7 +69,9 @@ describe('GameEngine lifecycle', () => {
       },
       $executeRaw: jest.fn().mockResolvedValue(1),
     };
-    engine.configService = { get: jest.fn().mockReturnValue('new') };
+    engine.configService = {
+      get: jest.fn((key) => (key === 'ARK_EMBEDDING_MODEL' ? 'new' : undefined)),
+    };
     engine.executeNode = jest
       .fn()
       .mockRejectedValue(new ExperimentInvalidError('frozen retrieval failed'));
@@ -53,6 +84,8 @@ describe('GameEngine lifecycle', () => {
   });
   it.each([false, true])('自爆消费中断，判胜后推进轮次（结束=%s）', async (endsGame) => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.configService = { get: jest.fn() };
+    engine.nodeContext = {};
     engine.preset = {
       name: 'test',
       nightPipeline: ['nightResolve'],
@@ -96,6 +129,8 @@ describe('GameEngine lifecycle', () => {
   });
   it('进入主循环前执行 init 节点', async () => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.configService = { get: jest.fn() };
+    engine.nodeContext = {};
     engine.prisma = { game: { findUnique: jest.fn().mockResolvedValue(null) } };
     const initialState = createGameState({
       gameId: 'game-1',
@@ -116,6 +151,8 @@ describe('GameEngine lifecycle', () => {
 
   it('白天触发游戏结束时不增加天数', async () => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.configService = { get: jest.fn() };
+    engine.nodeContext = {};
     const state = createGameState(
       {
         gameId: 'game-1',
@@ -138,5 +175,21 @@ describe('GameEngine lifecycle', () => {
     expect(result.currentDay).toBe(1);
     expect(result.nextIsDay).toBe(false);
     expect(engine.generateDaySummaries).not.toHaveBeenCalled();
+  });
+
+  it('没有阶段进展时达到预算即退出，不编造 gameEnd', async () => {
+    const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
+    engine.configService = { get: jest.fn((key) => (key === 'GAME_MAX_DAYS' ? 1 : undefined)) };
+    engine.nodeContext = {};
+    engine.prisma = { game: { findUnique: jest.fn().mockResolvedValue(null) } };
+    engine.initialize = jest.fn();
+    engine.checkPause = jest.fn();
+    engine.executeNode = jest.fn(async (_name, state) => state);
+    engine.executePhase = jest.fn(async (state) => state);
+    await expect(engine.run(createGameState({ gameId: 'g', players: [] }))).rejects.toThrow(
+      '最大轮次',
+    );
+    expect(engine.executePhase).toHaveBeenCalledTimes(2);
+    expect(engine.executeNode.mock.calls.map(([name]) => name)).not.toContain('gameEnd');
   });
 });

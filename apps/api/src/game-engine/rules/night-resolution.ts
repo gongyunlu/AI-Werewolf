@@ -8,7 +8,6 @@ export interface NightActionInput {
   guardTarget: string | null;
   witchAntidoteTarget: string | null;
   witchPoisonTarget: string | null;
-  witchPlayerId?: string; // 女巫玩家 ID（用于校验自救与用药历史）
 }
 
 export interface NightDeathRecord {
@@ -35,45 +34,14 @@ export interface NightResolutionResult {
  * 5. 同一目标被多种方式击杀时，死因按优先级：毒药 > 狼刀
  * 6. 已死亡玩家不能成为目标
  * 7. 女巫同一晚只能用一种药（解药 OR 毒药）
- * 8. 女巫解药和毒药不能对同一人使用（整局游戏）
- * 9. 女巫不能自救（统一规则）
+ * 8. 女巫永远不能自救；可以在后续夜晚毒此前救过的目标
  */
 export function resolveNightActions(input: NightActionInput): NightResolutionResult {
-  const {
-    players,
-    wolfTarget,
-    guardTarget,
-    witchAntidoteTarget,
-    witchPoisonTarget,
-    witchPlayerId,
-  } = input;
+  const { players, wolfTarget, guardTarget, witchAntidoteTarget, witchPoisonTarget } = input;
 
   // 校验：女巫同一晚只能用一种药
   if (witchAntidoteTarget !== null && witchPoisonTarget !== null) {
     throw new Error('女巫同一晚只能使用一种药（解药 OR 毒药）');
-  }
-
-  // 校验：女巫解药和毒药不能对同一人使用
-  if (witchPlayerId) {
-    const witchPlayer = players.find((p) => p.id === witchPlayerId);
-    if (witchPlayer) {
-      // 检查解药目标是否已被毒过
-      if (
-        witchAntidoteTarget !== null &&
-        witchPlayer.poisonUsedOn !== null &&
-        witchPlayer.poisonUsedOn === witchAntidoteTarget
-      ) {
-        throw new Error('女巫解药和毒药不能对同一人使用');
-      }
-      // 检查毒药目标是否已被解药救过
-      if (
-        witchPoisonTarget !== null &&
-        witchPlayer.antidoteUsedOn !== null &&
-        witchPlayer.antidoteUsedOn === witchPoisonTarget
-      ) {
-        throw new Error('女巫解药和毒药不能对同一人使用');
-      }
-    }
   }
 
   // 校验：女巫不能自救（统一规则，所有板子所有场景）

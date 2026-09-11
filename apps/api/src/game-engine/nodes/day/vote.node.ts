@@ -1,3 +1,9 @@
+import { ModelCallError } from '@/llm/model-call-guard';
+import {
+  failAfterEffect,
+  allowModelFallback,
+  settleGameActions,
+} from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
@@ -6,9 +12,8 @@ import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { resolveVotes } from '../../rules/vote-resolution';
-import { isAbortError } from '@/agent-runtime/abort.utils';
 
-function buildVoteSchema(legalSeatNos: number[]) {
+export function buildVoteSchema(legalSeatNos: number[]) {
   return z.object({
     action: z.enum(['cast_vote', 'abstain']),
     targetSeatNo: z
@@ -55,7 +60,7 @@ export class VoteNode {
         this.handleSingleVote(voter, state, context, legalSeatNos),
       );
 
-      const voteResults = await Promise.all(votePromises);
+      const voteResults = await settleGameActions(votePromises);
 
       // 汇总为 resolveVotes 需要的结构：被投票人 ID → 投票人 ID[]
       const votes = new Map<string, string[]>();
@@ -108,13 +113,21 @@ export class VoteNode {
     context: NodeContext,
     legalSeatNos: number[],
   ): Promise<VoteResult> {
+    let effectStarted = false;
     try {
-      const contextData = await this.agentRuntime.prepareContextPublic(
-        state.gameId,
-        voter.id,
-        'vote' as any,
-        `你只能投票给以下存活玩家之一：${legalSeatNos.join('号、')}号，或弃权。`,
-      );
+      const contextData = await this.agentRuntime.prepareContextPublic({
+        gameId: state.gameId,
+        playerId: voter.id,
+        scenario: 'vote',
+        actionType: 'vote',
+        position: {
+          day: state.currentDay,
+          phase: '普通投票',
+          round: 0,
+          aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+        },
+        additionalContext: `你只能投票给以下存活玩家之一：${legalSeatNos.join('号、')}号，或弃权。`,
+      });
 
       const threadId = getPlayerThreadId(state.gameId, voter.id);
 
@@ -128,18 +141,10 @@ export class VoteNode {
       if (decision.action === 'cast_vote') {
         const target = state.players.find((p) => p.seatNo === decision.targetSeatNo);
         if (!target || !target.isAlive) {
-          const event = await context.eventWriter.writePlayerVoteEvent({
-            gameId: state.gameId,
-            day: state.currentDay,
-            actorId: voter.id,
-            voterSeatNo: voter.seatNo,
-            targetSeatNo: 0,
-          });
-          await this.agentRuntime.recordExperienceUsages(contextData, event);
-          await context.eventBus?.publish(event);
-          return { voterId: voter.id, targetId: null };
+          throw new ModelCallError('invalid_output');
         }
 
+        effectStarted = true;
         const event = await context.eventWriter.writePlayerVoteEvent({
           gameId: state.gameId,
           day: state.currentDay,
@@ -155,6 +160,7 @@ export class VoteNode {
           targetId: target.id,
         };
       } else {
+        effectStarted = true;
         const event = await context.eventWriter.writePlayerVoteEvent({
           gameId: state.gameId,
           day: state.currentDay,
@@ -171,9 +177,9 @@ export class VoteNode {
         };
       }
     } catch (error) {
-      if (isAbortError(error, context.signal)) {
-        throw error;
-      }
+      if (effectStarted) failAfterEffect(error);
+
+      await allowModelFallback(error, context, voter.id);
       gameLogger.error(
         `[投票阶段] ${voter.seatNo}号位投票出错，降级为弃权: ${error instanceof Error ? error.message : String(error)}`,
       );

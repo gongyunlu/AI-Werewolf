@@ -1,0 +1,76 @@
+import { isAIMessageChunk, type AIMessageChunk } from '@langchain/core/messages';
+import {
+  BaseCallbackHandler,
+  type CallbackHandlerPrefersStreaming,
+  type HandleLLMNewTokenCallbackFields,
+  type NewTokenIndices,
+} from '@langchain/core/callbacks/base';
+
+/** 选择 LangChain 的流聚合路径，直接使用供应商 usage，无需另行下载 tokenizer 估算。 */
+export class ModelStreamProgressHandler
+  extends BaseCallbackHandler
+  implements CallbackHandlerPrefersStreaming
+{
+  name = 'model-stream-progress';
+  lc_prefer_streaming = true;
+
+  constructor(
+    private readonly progress: ReturnType<typeof createStreamProgress>,
+    private readonly signal: AbortSignal,
+    private readonly reportProgress: () => void,
+  ) {
+    super({ _awaitHandler: true });
+  }
+
+  override handleLLMNewToken(
+    _token: string,
+    _indices: NewTokenIndices,
+    _runId: string,
+    _parentRunId?: string,
+    _tags?: string[],
+    fields?: HandleLLMNewTokenCallbackFields,
+  ) {
+    if (this.signal.aborted) return;
+    const generation = fields?.chunk;
+    if (generation && 'message' in generation && isAIMessageChunk(generation.message)) {
+      recordStreamProgress(this.progress, generation.message, this.reportProgress);
+      const finishReason = generation.generationInfo?.finish_reason;
+      if (typeof finishReason === 'string') this.progress.finishReason = finishReason;
+    }
+  }
+}
+
+export function createStreamProgress() {
+  return {
+    receivedChunks: 0,
+    contentChars: 0,
+    reasoningChars: 0,
+    toolArgumentChars: 0,
+    finishReason: undefined as string | undefined,
+    inputTokens: undefined as number | undefined,
+    outputTokens: undefined as number | undefined,
+  };
+}
+
+/** 心跳、角色和工具 ID 不代表模型仍在生成有效内容。 */
+export function recordStreamProgress(
+  progress: ReturnType<typeof createStreamProgress>,
+  chunk: AIMessageChunk,
+  reportProgress: () => void,
+) {
+  progress.receivedChunks++;
+  const content = typeof chunk.content === 'string' ? chunk.content : '';
+  const reasoning = chunk.additional_kwargs?.reasoning_content;
+  const reasoningText = typeof reasoning === 'string' ? reasoning : '';
+  const argumentsText = (chunk.tool_call_chunks ?? []).map((tool) => tool.args ?? '').join('');
+  if (content.trim() || reasoningText.trim() || argumentsText.trim()) reportProgress();
+  progress.contentChars += content.length;
+  progress.reasoningChars += reasoningText.length;
+  progress.toolArgumentChars += argumentsText.length;
+  const finishReason = chunk.response_metadata?.finish_reason;
+  if (typeof finishReason === 'string') progress.finishReason = finishReason;
+  if (chunk.usage_metadata) {
+    progress.inputTokens = chunk.usage_metadata.input_tokens;
+    progress.outputTokens = chunk.usage_metadata.output_tokens;
+  }
+}

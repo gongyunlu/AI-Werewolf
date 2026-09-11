@@ -297,6 +297,7 @@ describe('MemoryService', () => {
       .mockResolvedValueOnce([
         {
           id: 'lesson-positive',
+          metadata: { conditions: [] },
           type: 'lesson',
           title: '相关经验',
           content: '当前局面适用',
