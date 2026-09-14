@@ -3,41 +3,110 @@
 @import 'shadcn/tailwind.css';
 @import '@fontsource-variable/geist';
 
+/* shadcn 组件自带一批 dark: 工具类。这里的主题由 html.day 驱动，所以把 dark 变体钉在代码里
+   永远不会出现的 .dark 类上，让那些 dark: 全部失效——否则它会退回 Tailwind 内置的
+   prefers-color-scheme，系统开深色时会在白天主题里叠上深色样式。 */
 @custom-variant dark (&:is(.dark *));
 
+/* 深色写在 :root、白天由 html.day 覆盖，页面层（首页、对局列表、顶栏、各弹窗）与 shadcn
+   组件因此共用同一份取值，不会出现深色页配浅色弹窗。
+   取值与页面已有的硬编码色对齐：#020617 底 / #0f172a 卡片 / #1e293b 描边 / #22d3ee 强调。 */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --background: #020617;
+  --foreground: #e2e8f0;
+  --card: #0f172a;
+  --card-foreground: #e2e8f0;
+  --popover: #0f172a;
+  --popover-foreground: #e2e8f0;
+  --primary: #06b6d4;
+  --primary-foreground: #020617;
+  --secondary: #1e293b;
+  --secondary-foreground: #e2e8f0;
+  --muted: #1e293b;
+  --muted-foreground: #94a3b8;
+  --accent: #1e293b;
+  --accent-foreground: #e2e8f0;
+  --destructive: #f87171;
+  --border: #1e293b;
+  --input: #334155;
+  --ring: #22d3ee;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #0f172a;
+  --sidebar-foreground: #e2e8f0;
+  --sidebar-primary: #06b6d4;
+  --sidebar-primary-foreground: #020617;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #e2e8f0;
+  --sidebar-border: #1e293b;
+  --sidebar-ring: #22d3ee;
+
+  /* 页面层色板。顶栏的昼夜按钮在 html 上加 .day 覆盖下面这些值，因此模块 CSS 只引用
+     token、不写死颜色。与 shadcn 同名的部分直接取上面的 token，避免同一颜色有两处定义。 */
+  --app-bg: var(--background);
+  --app-surface: var(--card);
+  --app-raised: var(--muted);
+  --app-raised-strong: var(--input);
+  --app-raised-heavy: #475569;
+  --app-border: var(--border);
+  --app-border-strong: var(--input);
+  --app-text: var(--foreground);
+  --app-text-secondary: #cbd5e1;
+  --app-text-muted: var(--muted-foreground);
+  --app-text-subtle: #64748b;
+  --app-accent: var(--ring);
+  --app-accent-hover: #67e8f9;
+  --app-accent-fill: var(--primary);
+  --app-accent-fill-hover: #0891b2;
+  --app-accent-contrast: var(--primary-foreground);
+  --app-red: var(--destructive);
+  --app-amber: #fbbf24;
+  --app-orange: #fb923c;
+  --app-purple: #c084fc;
+  --app-green: #4ade80;
+  --app-blue: #60a5fa;
+  --app-header-bg: rgba(2, 6, 23, 0.95);
+}
+
+/* 白天主题。除了页面层色板，也要覆盖 shadcn 的 token，否则弹窗、下拉和按钮会留在深色。
+   深色分支仍写在 :root，这里靠 .day 的选择器权重覆盖。 */
+html.day {
+  --background: #f1f5f9;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #0891b2;
+  --primary-foreground: #ffffff;
+  --secondary: #e2e8f0;
+  --secondary-foreground: #0f172a;
+  --muted: #f8fafc;
+  --muted-foreground: #475569;
+  --accent: #e2e8f0;
+  --accent-foreground: #0f172a;
+  --destructive: #dc2626;
+  --border: #e2e8f0;
+  --input: #cbd5e1;
+  --ring: #0e7490;
+
+  --app-raised-heavy: #cbd5e1;
+  --app-text-secondary: #334155;
+  --app-text-subtle: #64748b;
+  --app-accent-hover: #155e75;
+  --app-accent-fill-hover: #0e7490;
+  --app-amber: #b45309;
+  --app-orange: #ea580c;
+  --app-purple: #9333ea;
+  --app-green: #15803d;
+  --app-blue: #1d4ed8;
+  --app-header-bg: rgba(241, 245, 249, 0.95);
+
+  color-scheme: light;
 }
 
 @theme inline {
@@ -83,40 +152,6 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-}
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -126,5 +161,13 @@
   }
   html {
     @apply font-sans;
+    /* 让原生控件（下拉、复选框、滚动条）按深色渲染，否则会在深色页上出现白块 */
+    color-scheme: dark;
+  }
+  /* 行框的高度与基线按 font-family 里第一个字体的度量算，而 Geist 没有中文字形，
+     中文由回退字体渲染时就会在行框里偏高（实测按钮内上留白 7px、下留白 9px）。
+     按钮文案全是中文，把中文字体前置让行框度量与实际渲染字体一致。 */
+  [data-slot='button'] {
+    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', var(--font-sans);
   }
 }

@@ -11,7 +11,6 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { SkillLoaderModule } from '../skills/skill-loader.module';
 import { SpeechSummarizerModule } from '../speech-summarizer/speech-summarizer.module';
 import { ObservabilityModule } from '../observability/observability.module';
-import { ChatHistoryService, chatHistoryPoolProvider } from './chat-history.service';
 
 @Module({
   imports: [
@@ -26,12 +25,7 @@ import { ChatHistoryService, chatHistoryPoolProvider } from './chat-history.serv
     SpeechSummarizerModule,
     ObservabilityModule,
   ],
-  providers: [
-    chatHistoryPoolProvider,
-    ChatHistoryService,
-    AgentRuntimeService,
-    AbortControllerManager,
-  ],
+  providers: [AgentRuntimeService, AbortControllerManager],
   exports: [AgentRuntimeService, AbortControllerManager],
 })
 export class AgentRuntimeModule {}

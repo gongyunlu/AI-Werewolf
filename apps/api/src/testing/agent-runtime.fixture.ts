@@ -16,8 +16,7 @@ export function createAgentRuntime(
     Dependencies[6],
     LangfuseService,
     Dependencies[7],
-    Dependencies[8],
-    Dependencies[11]?,
+    Dependencies[10]?,
   ]
 ): AgentRuntimeService {
   const [
@@ -30,7 +29,6 @@ export function createAgentRuntime(
     summary,
     langfuse,
     prompts,
-    history,
     recovery,
   ] = dependencies;
   const modelCalls = new ModelCallService(config);
@@ -44,7 +42,6 @@ export function createAgentRuntime(
     skills,
     summary,
     prompts,
-    history,
     modelCalls,
     turns,
     recovery,

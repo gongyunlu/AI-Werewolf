@@ -1,4 +1,3 @@
-import { reviewed } from '../../testing/turn-review.fixture';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 
 export interface ModelRequest {
@@ -55,12 +54,6 @@ export class ScriptedGameModel {
       withStructuredOutput: (schema: ModelSchema) => ({
         invoke: async (messages: BaseMessage[], options: { signal: AbortSignal }) => {
           const request = await this.request(model, messages, options.signal, 'decision', schema);
-          if (schema.properties?.issues) {
-            return {
-              raw: new AIMessage(JSON.stringify(reviewed())),
-              parsed: reviewed(),
-            };
-          }
           const { day, action } = request;
           let decision: object;
           switch (action) {

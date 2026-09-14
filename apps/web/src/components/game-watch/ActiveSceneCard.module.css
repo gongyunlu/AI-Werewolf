@@ -1,6 +1,6 @@
 .card {
-  outline: 2px solid var(--ring, #a1a1aa);
-  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  outline: 1px solid var(--ring);
+  outline-offset: 2px;
 }
 
 @keyframes pulse {
@@ -17,26 +17,29 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .actorId {
-  font-size: 0.75rem;
-  line-height: 1rem;
-  color: var(--muted-foreground, #94a3b8);
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+  color: var(--foreground);
+  font-weight: 600;
 }
 
 .typing {
   margin-left: auto;
   font-size: 0.75rem;
   line-height: 1rem;
-  color: var(--primary, #2563eb);
+  color: var(--app-accent);
   font-weight: 500;
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 .content {
-  font-size: 0.875rem;
-  line-height: 1.5rem;
+  font-size: 0.9375rem;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
   color: inherit;
 
   & p {
@@ -82,13 +85,13 @@
 
   & code {
     font-family: monospace;
-    background-color: var(--muted, #f4f4f5);
+    background-color: var(--muted);
     border-radius: 0.25rem;
     padding: 0.125rem 0.25rem;
   }
 
   & pre {
-    background-color: var(--muted, #f4f4f5);
+    background-color: var(--muted);
     padding: 0.75rem 1rem;
     border-radius: 0.5rem;
     overflow-x: auto;
@@ -103,12 +106,12 @@
   & blockquote {
     margin: 0.75em 0;
     padding-left: 1rem;
-    border-left: 3px solid var(--border, #e4e4e7);
-    color: var(--muted-foreground, #71717a);
+    border-left: 3px solid var(--border);
+    color: var(--muted-foreground);
   }
 
   & a {
-    color: var(--primary, #2563eb);
+    color: var(--primary);
     text-decoration: underline;
   }
 }
@@ -118,6 +121,13 @@
   width: 0.5rem;
   height: 1rem;
   margin-left: 0.25rem;
-  background-color: var(--primary, #2563eb);
+  background-color: var(--primary);
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing,
+  .caret {
+    animation: none;
+  }
 }

@@ -124,7 +124,7 @@ async function main() {
         reasoning: string;
         decision: unknown;
         durationMs: number;
-        reflection: unknown;
+        thinkingRounds: string[];
       }> = [];
       const config = new ConfigService<Env, true>(validateEnv(process.env));
       langfuse = new LangfuseService(config);
@@ -143,7 +143,7 @@ async function main() {
       }
       for (const variant of order) {
         const start = Date.now();
-        const { reasoning, decision, reflection } = await replayDecision(
+        const { reasoning, decision, thinkingRounds } = await replayDecision(
           turns,
           { ...snapshot, systemPrompt: variant.system },
           { gameId: String(artifact.id), playerId: context.playerId },
@@ -155,7 +155,7 @@ async function main() {
           reasoning,
           decision,
           durationMs: Date.now() - start,
-          reflection,
+          thinkingRounds,
         });
         artifact.results = results;
         writeFileSync(out, JSON.stringify(artifact, null, 2));

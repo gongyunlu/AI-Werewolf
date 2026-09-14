@@ -12,9 +12,9 @@ import { WitchAntidoteNode } from './night/witch-antidote.node';
 import { WitchPoisonNode } from './night/witch-poison.node';
 import { WerewolfKillNode } from './night/werewolf-kill.node';
 import { wolfVoting } from './night/werewolf-collaboration';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { resolveNightActions } from '../rules/night-resolution';
 import { GameFailurePolicy } from '../core/game-failure-policy';
+import { VoteTurnAdapter } from '@/game-executor/vote-turn.adapter';
 
 function setup() {
   const runtime = {
@@ -23,8 +23,8 @@ function setup() {
     streamSpeech: jest.fn().mockResolvedValue({ thinking: 'test', content: 'speech' }),
     recordExperienceUsages: jest.fn().mockResolvedValue(undefined),
   };
-  const eventWriter = Object.fromEntries(
-    [
+  const eventWriter = Object.fromEntries([
+    ...[
       'writeNightPromptEvent',
       'writePlayerVoteEvent',
       'writePlayerSpeechEvent',
@@ -34,9 +34,28 @@ function setup() {
       'writeWolfDecisionEvent',
       'writeWolfKillEvent',
     ].map((name) => [name, jest.fn().mockResolvedValue({ id: name })]),
-  );
+    [
+      'writeVoteBatch',
+      jest.fn(
+        async (batch: { gameId: string; day: number; votes: Array<Record<string, unknown>> }) =>
+          batch.votes.map((vote) => ({
+            id: 'writeVoteBatch',
+            gameId: batch.gameId,
+            actionType: 'vote',
+            actorId: vote.actorId,
+            day: batch.day,
+            content: {
+              voteRound: 0,
+              voterSeatNo: vote.voterSeatNo,
+              targetSeatNo: vote.targetSeatNo,
+            },
+          })),
+      ),
+    ],
+  ]);
   const context = {
     agentRuntime: runtime,
+    voteTurn: new VoteTurnAdapter(runtime as never),
     eventWriter,
     prisma: { event: { findMany: jest.fn().mockResolvedValue([]) } },
     eventBus: { publish: jest.fn().mockResolvedValue(undefined) },
@@ -91,7 +110,7 @@ it.each([false, true])('首夜遗言提供顺序和已完成状态（首位空�
   );
 });
 
-it('并发狼刀提案使用各自的私人会话，明确区分提案和讨论', async () => {
+it('并发狼刀提案各自持有本人上下文，明确区分提案和讨论', async () => {
   const { runtime, context, state } = setup();
   const wolves = [
     createPlayer('wolf-a', 1, 'werewolf', 'werewolf'),
@@ -102,17 +121,18 @@ it('并发狼刀提案使用各自的私人会话，明确区分提案和讨论'
     reasoning: '提议刀3号',
     decision: { action: 'propose_kill', targetSeatNo: 3 },
   });
+  runtime.prepareContextPublic.mockImplementation(async ({ playerId }) => ({ playerId }));
   const result = await wolfVoting(wolves, state, context as unknown as NodeContext);
   expect(result).toHaveLength(2);
-  expect(runtime.decide.mock.calls.map((call) => call[3])).toEqual([
-    getPlayerThreadId(state.gameId, 'wolf-a'),
-    getPlayerThreadId(state.gameId, 'wolf-b'),
-  ]);
   expect(
     runtime.prepareContextPublic.mock.calls.every(
       (call) => call[0].actionType === 'wolf_proposal' && call[0].position.phase === '狼队刀人提案',
     ),
   ).toBe(true);
+  // 每只狼各自拿到自己的上下文，不共用同一个对象。
+  expect(
+    runtime.decide.mock.calls.map((call) => (call[0] as { playerId: string }).playerId),
+  ).toEqual(['wolf-a', 'wolf-b']);
 });
 
 describe.each([
@@ -183,7 +203,7 @@ const cases = [
   {
     name: '投票',
     Node: VoteNode,
-    writer: 'writePlayerVoteEvent',
+    writer: 'writeVoteBatch',
     action: 'cast_vote',
     role: 'villager',
   },
@@ -272,10 +292,10 @@ it.each([new TypeError('context bug'), new ExperimentInvalidError('snapshot miss
     const { runtime, eventWriter, context, state } = setup();
     state.players = [state.players[0]];
     runtime.prepareContextPublic.mockRejectedValue(error);
-    await expect(
-      new VoteNode(runtime as never).create()(context as unknown as NodeContext)(state),
-    ).rejects.toBe(error);
-    expect(eventWriter.writePlayerVoteEvent).not.toHaveBeenCalled();
+    await expect(new VoteNode().create()(context as unknown as NodeContext)(state)).rejects.toBe(
+      error,
+    );
+    expect(eventWriter.writeVoteBatch).not.toHaveBeenCalled();
   },
 );
 

@@ -67,11 +67,14 @@ export const PlayerCard = memo(function PlayerCard({ player, index, isLeft, hasW
     <div className={clsx(styles.root, !isLeft && styles.rootFlip, isDead && styles.dead)}>
       {/* 信息 */}
       <div className={clsx(styles.info, isLeft ? styles.infoLeft : styles.infoRight)}>
-        <span className={styles.modelName}>{player.modelName}</span>
         <span className={styles.name}>{player.displayName}</span>
+        <span className={styles.modelName} title={player.modelName}>
+          {player.modelName}
+        </span>
+        {isDead && <span className={styles.deathStatus}>已出局 · 第 {player.deathDay} 天</span>}
       </div>
 
-      {/* 头像 */}
+      {/* 圆形区域预留头像，座次号定位在头像下缘 */}
       <div className={styles.avatarWrap}>
         <div className={clsx(styles.avatar, isDead && styles.avatarDead)} />
         <span className={styles.seatNo}>{displaySeatNo}</span>
@@ -96,9 +99,7 @@ export const PlayerCard = memo(function PlayerCard({ player, index, isLeft, hasW
 
       {/* 角色标签：未分配时显示灰色"未分配" */}
       {player.role ? (
-        <div className={clsx(styles.role, styles[roleColor], isDead && styles.roleDead)}>
-          {roleLabel}
-        </div>
+        <div className={clsx(styles.role, styles[roleColor])}>{roleLabel}</div>
       ) : (
         <div className={clsx(styles.role, styles.roleUnassigned)}>未分配</div>
       )}

@@ -21,6 +21,7 @@ export interface TurnContextRequest {
 }
 
 interface VisibleEvent {
+  id: string;
   sequence: number;
   day: number | null;
   phase?: string;
@@ -30,6 +31,16 @@ interface VisibleEvent {
   content: unknown;
 }
 
+/**
+ * 事件中已提交的本人理由。只有本人动作才带私有理由；
+ * 他人的 thinking、供应商 reasoning 和未提交候选都不在此列。
+ */
+export function ownThinkingFromEvent(event: VisibleEvent, playerId: string): string | undefined {
+  if (event.actorId !== playerId) return undefined;
+  const thinking = (event.content as Record<string, unknown> | null)?.thinking;
+  return typeof thinking === 'string' && thinking.trim() ? thinking : undefined;
+}
+
 export function buildTurnContext(input: {
   playerId: string;
   seatNo: number | null;
@@ -37,6 +48,8 @@ export function buildTurnContext(input: {
   actionType: string;
   events: VisibleEvent[];
   position: TurnPosition;
+  /** 事件未保存理由时，按事件 id 补充的本人私有理由（来自同 game/player/event 的决策快照）。 */
+  ownReasonings?: ReadonlyMap<string, string>;
 }): string {
   const { events, position } = input;
   const lines = [
@@ -100,10 +113,18 @@ export function buildTurnContext(input: {
         (!speech && own ? '你本人已提交：' : '') +
         fact,
     );
+    if (own) {
+      const reasoning =
+        ownThinkingFromEvent(event, input.playerId) ?? input.ownReasonings?.get(event.id);
+      if (reasoning) lines.push('[你的私有理由·当时] ' + reasoning);
+    }
   }
   if (!hasOwnSpeech) lines.push('截至当前没有你的已提交发言。');
   lines.push(
     '发言原文只证明玩家说过这些话，不代表真实身份或真实查验；自称身份、报验和推测不自动成为事实。跨局经验不能证明本局发生了某事。',
+  );
+  lines.push(
+    '标注「你的私有理由·当时」的内容只代表你当时提交动作时的判断和策略，不是当前事实，也不要求你现在继续坚持。',
   );
   return lines.join('\n');
 }

@@ -2,7 +2,7 @@
   "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": ".",
   "testEnvironment": "node",
-  "testRegex": "(?:game-recovery|bootstrap)\\.integration-spec\\.ts$",
+  "testRegex": "(?:game-recovery|bootstrap|agent-access)\\.integration-spec\\.ts$",
   "testTimeout": 30000,
   "transform": {
     "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": { "rootDir": ".." } }]

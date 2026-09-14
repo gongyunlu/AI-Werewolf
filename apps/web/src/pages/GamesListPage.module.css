@@ -1,26 +1,8 @@
-:root {
-  --gl-bg-950: #020617;
-  --gl-bg-900: #0f172a;
-  --gl-bg-700: #334155;
-  --gl-bg-600: #475569;
-  --gl-border: #1e293b;
-  --gl-text-200: #e2e8f0;
-  --gl-text-300: #cbd5e1;
-  --gl-text-400: #94a3b8;
-  --gl-text-500: #64748b;
-  --gl-amber-400: #fbbf24;
-  --gl-cyan-400: #22d3ee;
-  --gl-orange-400: #fb923c;
-  --gl-purple-400: #c084fc;
-  --gl-red-400: #f87171;
-  --gl-green-400: #4ade80;
-}
-
 .page {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  background-color: var(--gl-bg-950);
+  background-color: var(--app-bg);
 }
 
 .body {
@@ -52,11 +34,11 @@
   font-size: 1.875rem;
   line-height: 2.25rem;
   font-weight: 700;
-  color: var(--gl-text-200);
+  color: var(--app-text);
 }
 
 .subtitle {
-  color: var(--gl-text-400);
+  color: var(--app-text-muted);
 }
 
 .loading {
@@ -67,19 +49,19 @@
 }
 
 .loadingText {
-  color: var(--gl-text-400);
+  color: var(--app-text-muted);
 }
 
 .empty {
-  border: 1px solid var(--gl-border);
+  border: 1px solid var(--app-border);
   border-radius: 0.5rem;
-  background-color: var(--gl-bg-900);
+  background-color: var(--app-surface);
   padding: 3rem;
   text-align: center;
 }
 
 .emptyText {
-  color: var(--gl-text-400);
+  color: var(--app-text-muted);
 }
 
 .list {
@@ -88,9 +70,9 @@
 }
 
 .card {
-  border: 1px solid var(--gl-border);
+  border: 1px solid var(--app-border);
   border-radius: 0.5rem;
-  background-color: var(--gl-bg-900);
+  background-color: var(--app-surface);
   padding: 1.5rem;
 }
 
@@ -116,7 +98,7 @@
   font-family: monospace;
   font-size: 0.875rem;
   line-height: 1.25rem;
-  color: var(--gl-text-500);
+  color: var(--app-text-subtle);
 }
 
 .badge {
@@ -128,13 +110,13 @@
 }
 
 .badgeSolid {
-  background-color: var(--gl-bg-700);
-  color: var(--gl-text-300);
+  background-color: var(--app-raised-strong);
+  color: var(--app-text-secondary);
 }
 
 .badgeSolidDim {
-  background-color: var(--gl-bg-600);
-  color: var(--gl-text-400);
+  background-color: var(--app-raised-heavy);
+  color: var(--app-text-muted);
 }
 
 .badgeSoft {
@@ -142,27 +124,27 @@
 }
 
 .badgeAmber {
-  color: var(--gl-amber-400);
+  color: var(--app-amber);
 }
 
 .badgeCyan {
-  color: var(--gl-cyan-400);
+  color: var(--app-accent);
 }
 
 .badgeOrange {
-  color: var(--gl-orange-400);
+  color: var(--app-orange);
 }
 
 .badgePurple {
-  color: var(--gl-purple-400);
+  color: var(--app-purple);
 }
 
 .badgeRed {
-  color: var(--gl-red-400);
+  color: var(--app-red);
 }
 
 .badgeGreen {
-  color: var(--gl-green-400);
+  color: var(--app-green);
 }
 
 .metaDetails {
@@ -171,11 +153,11 @@
   gap: 1rem;
   font-size: 0.875rem;
   line-height: 1.25rem;
-  color: var(--gl-text-400);
+  color: var(--app-text-muted);
 }
 
 .aliveCount {
-  color: var(--gl-cyan-400);
+  color: var(--app-accent);
 }
 
 .watchButton {
@@ -198,13 +180,13 @@
   flex-direction: column;
   align-items: center;
   gap: 0.75rem;
-  border: 1px solid var(--gl-red-400);
+  border: 1px solid var(--app-red);
   border-radius: 0.5rem;
-  background-color: var(--gl-bg-900);
+  background-color: var(--app-surface);
   padding: 3rem;
   text-align: center;
 }
 
 .errorText {
-  color: var(--gl-red-400);
+  color: var(--app-red);
 }

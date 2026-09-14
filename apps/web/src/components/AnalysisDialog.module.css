@@ -1,12 +1,12 @@
 .dialog {
-  background-color: #0f172a;
-  border-color: #334155;
-  color: #cbd5e1;
+  background-color: var(--app-surface);
+  border-color: var(--app-border-strong);
+  color: var(--app-text-secondary);
   max-width: 32rem;
 }
 
 .dialogTitle {
-  color: #f1f5f9;
+  color: var(--app-text);
   font-size: 1.125rem;
 }
 
@@ -22,8 +22,8 @@
   flex-direction: column;
   gap: 0.5rem;
   border-radius: 0.375rem;
-  border: 1px solid #334155;
-  background-color: #1e293b;
+  border: 1px solid var(--app-border-strong);
+  background-color: var(--app-raised);
   padding: 0.75rem 1rem;
 }
 
@@ -34,32 +34,32 @@
 }
 
 .statusLabel {
-  color: #94a3b8;
+  color: var(--app-text-muted);
 }
 
 .statusValue {
-  color: #cbd5e1;
+  color: var(--app-text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
 .statusValueReady {
-  color: #22d3ee;
+  color: var(--app-accent);
 }
 
 .hint {
   font-size: 0.75rem;
-  color: #64748b;
+  color: var(--app-text-subtle);
   line-height: 1.5;
 }
 
 .error {
   font-size: 0.875rem;
-  color: #f87171;
+  color: var(--app-red);
 }
 
 .notice {
   font-size: 0.875rem;
-  color: #22d3ee;
+  color: var(--app-accent);
 }
 
 .actions {
@@ -71,20 +71,20 @@
 
 .secondaryButton {
   cursor: pointer;
-  border-color: #334155;
-  background-color: #1e293b;
-  color: #cbd5e1;
+  border-color: var(--app-border-strong);
+  background-color: var(--app-raised);
+  color: var(--app-text-secondary);
 
   &:hover {
-    background-color: #334155;
+    background-color: var(--app-raised-strong);
   }
 }
 
 .primaryButton {
   cursor: pointer;
-  background-color: #0891b2;
+  background-color: var(--app-accent-fill);
 
   &:hover {
-    background-color: #06b6d4;
+    background-color: var(--app-accent-fill-hover);
   }
 }

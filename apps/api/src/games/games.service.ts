@@ -15,6 +15,9 @@ import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GameExecutorService } from '../game-executor/game-executor.service';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
+import { AGENT_GAME_OMIT } from '../agents/agents.service';
+import { ConfigService } from '@nestjs/config';
+import type { Env } from '../config/env.validation';
 
 const SKILL_VERSION = 'v1';
 
@@ -26,6 +29,7 @@ export class GamesService {
     private readonly prisma: PrismaService,
     private readonly gameExecutor: GameExecutorService,
     private readonly broadcaster: SseBroadcasterService,
+    private readonly configService: ConfigService<Env, true>,
   ) {}
 
   /**
@@ -168,13 +172,16 @@ export class GamesService {
               memoryLabelSnapshot:
                 experiment?.assignments.find((a) => a.agentId === agentId)?.memoryLabel ??
                 agent.memoryLabel,
+              // 默认接入也冻结实际地址，恢复时只允许同端点更新密钥。
+              accessBaseUrl: agent.baseUrl ?? this.configService.get('ARK_BASE_URL'),
+              accessUsesDefault: !agent.baseUrl,
             };
           }),
         },
       },
       include: {
         players: {
-          include: { agent: true },
+          include: { agent: { omit: AGENT_GAME_OMIT } },
         },
       },
     });
@@ -193,7 +200,7 @@ export class GamesService {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
       include: {
-        players: { include: { agent: true } },
+        players: { include: { agent: { omit: AGENT_GAME_OMIT } } },
         ruleset: true,
       },
     });
@@ -245,7 +252,7 @@ export class GamesService {
         include: {
           players: {
             orderBy: { seatNo: 'asc' },
-            include: { agent: true },
+            include: { agent: { omit: AGENT_GAME_OMIT } },
           },
         },
       });
@@ -300,7 +307,7 @@ export class GamesService {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
       include: {
-        players: { include: { agent: true } },
+        players: { include: { agent: { omit: AGENT_GAME_OMIT } } },
         ruleset: true,
       },
     });
@@ -363,7 +370,7 @@ export class GamesService {
       where: { id: gameId },
       omit: { experiment: true },
       include: {
-        players: { orderBy: { seatNo: 'asc' }, include: { agent: true } },
+        players: { orderBy: { seatNo: 'asc' }, include: { agent: { omit: AGENT_GAME_OMIT } } },
       },
     });
   }

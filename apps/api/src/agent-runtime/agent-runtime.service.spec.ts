@@ -10,7 +10,6 @@ import type { SkillLoaderService } from '../skills/skill-loader.service';
 import type { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import type { LangfuseService } from '../observability/langfuse.service';
 import type { PromptService } from '../observability/prompt.service';
-import type { ChatHistoryService } from './chat-history.service';
 
 jest.mock('../observability/langfuse.service', () => ({ LangfuseService: jest.fn() }));
 jest.mock('../observability/prompt.service', () => ({ PromptService: jest.fn() }));
@@ -83,7 +82,6 @@ describe('AgentRuntimeService memory retrieval', () => {
       speechSummarizer,
       {} as LangfuseService,
       { captureGameSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
-      {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;
 
@@ -205,7 +203,6 @@ describe('AgentRuntimeService memory retrieval', () => {
       speechSummarizer,
       {} as LangfuseService,
       { captureGameSnapshot: jest.fn().mockResolvedValue({}) } as unknown as PromptService,
-      {} as ChatHistoryService,
     );
     const runtime = service as unknown as TestableAgentRuntime;
 

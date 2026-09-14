@@ -7,14 +7,23 @@ import { FALLBACK_TEMPLATES, renderTemplate } from '../observability/prompt-temp
 
 jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
 
+/** 决策前的思考轮是普通流式调用，这里只要求它产出一段非空思考。 */
+const thinkingStream = async () =>
+  (async function* () {
+    yield new AIMessage('核对可见事实后行动。');
+  })();
+
 function setup(output: unknown) {
   const invoke = jest
     .fn()
     .mockResolvedValue({ raw: new AIMessage(JSON.stringify(output)), parsed: output });
   const structured = jest.fn().mockReturnValue({ invoke });
-  jest.mocked(ChatOpenAI).mockImplementation(() => ({ withStructuredOutput: structured }) as never);
+  jest
+    .mocked(ChatOpenAI)
+    .mockImplementation(
+      () => ({ withStructuredOutput: structured, stream: thinkingStream }) as never,
+    );
   const prisma = { decisionContext: { upsert: jest.fn() } };
-  const history = { load: jest.fn().mockResolvedValue([]), replace: jest.fn() };
   const runtime = createAgentRuntime(
     ...([
       { get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)) },
@@ -35,7 +44,6 @@ function setup(output: unknown) {
           ),
         })),
       },
-      history,
     ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   const context = {
@@ -48,7 +56,7 @@ function setup(output: unknown) {
     pendingMemoryUsages: [],
     pendingKnowledgeUsages: [],
   };
-  return { runtime, context, prisma, invoke, structured, history };
+  return { runtime, context, prisma, invoke, structured };
 }
 
 it.each(['antidote', 'skip'])(
@@ -59,7 +67,7 @@ it.each(['antidote', 'skip'])(
         action === 'antidote' ? '首夜保留好人行动机会，救1号。' : '本次选择保留解药，不救人。',
       decision: action === 'antidote' ? { action, targetSeatNo: 1 } : { action },
     };
-    const { runtime, context, prisma, invoke, history } = setup(output);
+    const { runtime, context, prisma, invoke } = setup(output);
     jest.spyOn(runtime, 'prepareContextPublic').mockResolvedValue(context as never);
     const event = { id: 'e', gameId: 'g', actorId: 'witch', day: 1, actionType: 'witch_save' };
     const writer = {
@@ -89,12 +97,12 @@ it.each(['antidote', 'skip'])(
       ...output,
       decisionMode: 'joint',
     });
-    expect(history.replace).toHaveBeenCalledTimes(1);
+    expect(prisma.decisionContext.upsert).toHaveBeenCalledTimes(1);
   },
 );
 
 it('不完整的结构化动作不得作为已完成决策保存', async () => {
-  const { runtime, context, prisma, history } = setup({
+  const { runtime, context, prisma } = setup({
     reasoning: '救1号',
     decision: { action: 'antidote' },
   });
@@ -102,30 +110,23 @@ it('不完整的结构化动作不得作为已完成决策保存', async () => {
     runtime.decide(
       context as never,
       z.object({ action: z.literal('antidote'), targetSeatNo: z.number() }),
-      undefined,
-      'thread',
     ),
   ).rejects.toThrow();
   expect(context.replay).not.toHaveProperty('decision');
   expect(prisma.decisionContext.upsert).not.toHaveBeenCalled();
-  expect(history.replace).not.toHaveBeenCalled();
 });
 
-it('结构合法的候选在事件提交之前不写入历史，错误事件也不能确认它', async () => {
-  const { runtime, context, history } = setup({ reasoning: '不救', decision: { action: 'skip' } });
-  await runtime.decide(
-    context as never,
-    z.object({ action: z.literal('skip') }),
-    undefined,
-    'thread',
-  );
-  expect(history.replace).not.toHaveBeenCalled();
+it('结构合法的候选在事件提交之前不写入决策快照，错误事件也不能确认它', async () => {
+  const { runtime, context, prisma } = setup({ reasoning: '不救', decision: { action: 'skip' } });
+  await runtime.decide(context as never, z.object({ action: z.literal('skip') }));
+  expect(prisma.decisionContext.upsert).not.toHaveBeenCalled();
   const event = { id: 'e', gameId: 'g', actorId: 'other', day: 1, actionType: 'witch_save' };
   await runtime.recordExperienceUsages(context as never, event);
-  expect(history.replace).not.toHaveBeenCalled();
+  expect(prisma.decisionContext.upsert).not.toHaveBeenCalled();
   await runtime.recordExperienceUsages(context as never, { ...event, actorId: 'witch' });
-  expect(history.replace).toHaveBeenCalledTimes(1);
-  expect(String(history.replace.mock.calls[0][1][0].content)).toContain(
-    '第1天 witch_save 已记录的决策',
-  );
+  expect(prisma.decisionContext.upsert).toHaveBeenCalledTimes(1);
+  expect(prisma.decisionContext.upsert.mock.calls[0][0].create.snapshot).toMatchObject({
+    reasoning: '不救',
+    decision: { action: 'skip' },
+  });
 });

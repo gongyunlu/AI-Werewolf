@@ -63,6 +63,12 @@ model Agent {
   name             String   @unique @db.VarChar(64) // 唯一标识，如 "阿三"
   defaultModelName String   @map("default_model_name") @db.VarChar(64) // 默认模型，可被 Player.modelName 单局覆盖
   memoryLabel      String   @map("memory_label") @db.VarChar(128) // 当前记忆集标签，如 "张三"；改此字段等于切换到另一批 Memory
+  // 自带接入端点，与 apiKeyCiphertext 成对出现；两者都为空时回落到环境变量里的默认接入
+  baseUrl          String?  @map("base_url") @db.VarChar(512)
+  apiKeyCiphertext String?  @map("api_key_ciphertext") @db.Text // 自带密钥的 AES-256-GCM 密文，只写不读，不经由任何读接口返回
+  // 密钥末 4 位，只用于读接口给出可辨认的掩码；独立存储使读接口不依赖 AGENT_SECRET_KEY，换主密钥不会让列表接口失效
+  apiKeyHint       String?  @map("api_key_hint") @db.VarChar(4)
+  tag              String?  @map("tag") @db.VarChar(64) // 单值自由文本标签，仅供使用者识别与筛选，不参与模型路由
   isActive         Boolean  @default(true) @map("is_active") // 软删除：false 时不可再被开局选中，但历史 Player 外键仍有效
   notes            String?  @db.Text
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
@@ -87,6 +93,10 @@ model Player {
   modelName           String  @map("model_name") @db.VarChar(64) // 开局时从 Agent.defaultModelName 拷贝快照，历史局不受 Agent 升级影响
   // 开局时从 Agent.memoryLabel 拷贝快照，历史局不受 Agent 换记忆影响；用于回溯"这局当时用的是哪批记忆"
   memoryLabelSnapshot String  @map("memory_label_snapshot") @db.VarChar(128)
+  // 开局冻结实际端点及凭证来源；旧数据的 NULL 表示未记录默认端点。
+  // 同端点允许使用最新密钥，凭证来源的端点变化时终止，禁止把新端点密钥发往旧端点。
+  accessBaseUrl       String? @map("access_base_url") @db.VarChar(512)
+  accessUsesDefault   Boolean @default(false) @map("access_uses_default")
   deathDay            Int?    @map("death_day") @db.SmallInt // 玩家死亡的天数
   // 玩家死亡原因，取值口径见 packages/shared 的 DEATH_CAUSES（night_kill/execution/hunter_shot/witch_poison）
   deathCause          String? @map("death_cause") @db.VarChar(32)

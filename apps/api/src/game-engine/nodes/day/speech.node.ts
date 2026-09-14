@@ -1,8 +1,7 @@
 import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
-import type { NodeFactory } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { appendSceneNotice, type NodeFactory } from '../node.types';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
@@ -65,10 +64,8 @@ export class SpeechNode {
               position,
             });
 
-            const threadId = getPlayerThreadId(state.gameId, player.id);
-
             // 流式输出：思考 + 发言正文
-            const result = await this.agentRuntime.streamSpeech(contextData, threadId, {
+            const result = await this.agentRuntime.streamSpeech(contextData, {
               signal: context.signal,
               onThinking: (token) => {
                 context.broadcaster?.emit(state.gameId, {
@@ -114,6 +111,7 @@ export class SpeechNode {
             if (effectStarted) failAfterEffect(error);
 
             await allowModelFallback(error, context, player.id);
+            appendSceneNotice(context, state.gameId, sceneId);
             skippedSeats.push(player.seatNo);
             gameLogger.error(
               `[发言阶段] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,

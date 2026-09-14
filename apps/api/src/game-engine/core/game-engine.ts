@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { type GameGraphState, type GameGraphUpdate } from './types';
 import type { NodeRegistry } from '../nodes/node-registry';
 import type { NodeContext } from '../nodes/node.types';
+import type { VoteTurnPort } from '../ports/vote-turn.port';
 import type { GamePreset } from '../presets/game-presets';
 import { DEFAULT_PRESET } from '../presets/game-presets';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
@@ -43,6 +44,7 @@ export class GameEngine {
 
   constructor(
     private readonly agentRuntime: AgentRuntimeService,
+    private readonly voteTurn: VoteTurnPort,
     private readonly prisma: PrismaService,
     private readonly eventWriter: EventWriterService,
     private readonly broadcaster: SseBroadcasterService,
@@ -56,6 +58,7 @@ export class GameEngine {
   ) {
     this.nodeContext = {
       agentRuntime,
+      voteTurn,
       prisma,
       eventWriter,
       broadcaster,

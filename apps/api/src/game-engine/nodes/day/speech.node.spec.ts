@@ -33,11 +33,11 @@ describe('SpeechNode', () => {
 
     await node(state);
 
-    expect(agentRuntime.streamSpeech.mock.calls[0][2].signal).toBe(controller.signal);
+    expect(agentRuntime.streamSpeech.mock.calls[0][1].signal).toBe(controller.signal);
     expect(agentRuntime.recordExperienceUsages).toHaveBeenCalledTimes(1);
   });
 
-  it('发言失败时仍关闭已打开的场景', async () => {
+  it('发言失败时补收尾声明，再关闭已打开的场景', async () => {
     const agentRuntime = {
       prepareContextPublic: jest.fn().mockResolvedValue({}),
       streamSpeech: jest.fn().mockRejectedValue(new ModelCallError('transient')),
@@ -51,6 +51,15 @@ describe('SpeechNode', () => {
 
     await node(state);
 
+    expect(context.broadcaster?.emit).toHaveBeenCalledWith(
+      'game-1',
+      expect.objectContaining({
+        type: 'scene.append',
+        sceneId: 'speech-game-1-1-player-1',
+        contentType: 'content',
+        token: '（本轮发言未完成，没有产出正文）',
+      }),
+    );
     expect(context.broadcaster?.emit).toHaveBeenLastCalledWith(
       'game-1',
       expect.objectContaining({ type: 'scene.close', sceneId: 'speech-game-1-1-player-1' }),

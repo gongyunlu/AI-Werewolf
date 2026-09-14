@@ -1,5 +1,11 @@
 import { lessonApplies } from './lesson-applicability';
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  PERSONA_IMPORTANCE,
+  PERSONA_STRATEGY_TYPES,
+  STRATEGY_IMPORTANCE,
+  type PersonaStrategyItem,
+} from './persona-strategy';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MemoryType } from '@ai-werewolf/shared';
@@ -9,6 +15,9 @@ import { computeLessonCandidateScore, computeLessonRank, type LessonHit } from '
 import { retrieveFrozenMemories, type FrozenMemory } from '../evaluation/experiment-snapshot';
 import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 import { CURRENT_LEARNING_USAGE_FILTER } from './learning-usage-filter';
+
+/** memories.label 的列长，接口参数与之对齐 */
+const MEMORY_LABEL_MAX_LENGTH = 128;
 
 export type ActiveMemory = Prisma.MemoryGetPayload<{
   select: {
@@ -63,6 +72,27 @@ export type CreateMemoryInput = {
 
 /** 已落库、待补向量的记忆 */
 export type CreatedMemory = { id: string; content: string };
+
+/** 人设/策略的整批写入口径；不含 importance，分层由 type 决定 */
+export type PersonaStrategyInput = {
+  persona: PersonaStrategyItem[];
+  strategy: PersonaStrategyItem[];
+};
+
+/** 人设/策略的读接口形态 */
+export type PersonaStrategyRow = {
+  id: string;
+  type: string;
+  title: string;
+  content: string;
+  importance: number;
+};
+
+export type PersonaStrategyView = {
+  label: string;
+  persona: PersonaStrategyRow[];
+  strategy: PersonaStrategyRow[];
+};
 
 export type BackfillEmbeddingsOptions = {
   /** 每次从数据库领取的最大记录数；EmbeddingService 内部仍按供应商上限拆批。 */
@@ -214,6 +244,85 @@ export class MemoryService {
       content: r.content,
       importance: r.importance,
     }));
+  }
+
+  /** label 缺省时用 Agent 当前的记忆集；Agent 不存在则明确报错，避免写进一个孤儿 label。 */
+  private async resolveMemoryLabel(agentId: string, label?: string): Promise<string> {
+    // 超长 label 会先撞上 Postgres 的列长限制报 500，这里按参数错误挡回去
+    if (label && label.length > MEMORY_LABEL_MAX_LENGTH) {
+      throw new BadRequestException(`label 不能超过 ${MEMORY_LABEL_MAX_LENGTH} 字符`);
+    }
+    if (label) return label;
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { memoryLabel: true },
+    });
+    if (!agent) throw new NotFoundException(`Agent ${agentId} 不存在`);
+    return agent.memoryLabel;
+  }
+
+  /** 读取 Agent 在某记忆集下的人设与策略，供管理界面展示与编辑。 */
+  async readPersonaStrategy(agentId: string, label?: string): Promise<PersonaStrategyView> {
+    const resolved = await this.resolveMemoryLabel(agentId, label);
+    const rows = await this.prisma.memory.findMany({
+      where: {
+        agentId,
+        label: resolved,
+        type: { in: [...PERSONA_STRATEGY_TYPES] },
+        isActive: true,
+      },
+      orderBy: [{ importance: 'desc' }, { createdAt: 'asc' }],
+      select: { id: true, type: true, title: true, content: true, importance: true },
+    });
+    return {
+      label: resolved,
+      persona: rows.filter((row) => row.type === 'persona'),
+      strategy: rows.filter((row) => row.type === 'strategy'),
+    };
+  }
+
+  /**
+   * 整批替换 Agent 在某记忆集下的人设与策略。
+   *
+   * 旧条目只归档不删除：历史对局的 MemoryUsage 仍要指得到它们。
+   * 这两类记忆按 type 过滤读取而非语义检索，所以不生成 embedding，
+   * 5 个向量列全留 NULL 即满足表上「同 NULL 或同非 NULL」的约束。
+   */
+  async replacePersonaStrategy(
+    agentId: string,
+    label: string | undefined,
+    input: PersonaStrategyInput,
+  ): Promise<PersonaStrategyView> {
+    const resolved = await this.resolveMemoryLabel(agentId, label);
+    const rows = [
+      ...input.persona.map((item) => ({
+        ...item,
+        type: 'persona' as const,
+        importance: PERSONA_IMPORTANCE,
+      })),
+      ...input.strategy.map((item) => ({
+        ...item,
+        type: 'strategy' as const,
+        importance: STRATEGY_IMPORTANCE,
+      })),
+    ];
+    await this.prisma.$transaction(async (tx) => {
+      await tx.memory.updateMany({
+        where: {
+          agentId,
+          label: resolved,
+          type: { in: [...PERSONA_STRATEGY_TYPES] },
+          isActive: true,
+        },
+        data: { isActive: false },
+      });
+      if (rows.length > 0) {
+        await tx.memory.createMany({
+          data: rows.map((row) => ({ agentId, label: resolved, source: 'manual', ...row })),
+        });
+      }
+    });
+    return this.readPersonaStrategy(agentId, resolved);
   }
 
   /**
@@ -602,7 +711,11 @@ export class MemoryService {
     }
   }
 
-  /** 分批回填 active Memory；每条成功后立即落库，失败后可安全重跑。 */
+  /**
+   * 分批回填 active Memory；每条成功后立即落库，失败后可安全重跑。
+   *
+   * 人设与策略按 type 直读、不参与语义检索，跳过它们，否则每次回填都会为这批行白花向量调用。
+   */
   async backfillEmbeddings(options: BackfillEmbeddingsOptions = {}): Promise<number> {
     const batchSize = options.batchSize ?? 100;
     const maxCount = options.limit ?? Number.POSITIVE_INFINITY;
@@ -620,6 +733,7 @@ export class MemoryService {
         SELECT id, content
         FROM memories
         WHERE is_active = true
+          AND type NOT IN (${Prisma.join(PERSONA_STRATEGY_TYPES)})
           AND (
             embedding IS NULL
             OR embedding_model IS DISTINCT FROM ${this.embeddingService.model}

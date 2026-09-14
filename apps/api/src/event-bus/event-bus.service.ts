@@ -190,7 +190,8 @@ export class EventBusService {
       metadata,
     });
 
-    if (speech && typeof content.thinking === 'string')
+    // 决策不逐 token 外发，思考随卡片一次性补齐；实时路径的发言由节点直接流式 emit，恢复路径照常重放
+    if (typeof content.thinking === 'string' && content.thinking)
       this.sseBroadcaster.emit(event.gameId, {
         type: 'scene.append',
         sceneId,

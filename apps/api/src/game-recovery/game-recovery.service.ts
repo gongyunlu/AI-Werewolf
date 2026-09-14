@@ -12,9 +12,9 @@ import {
 } from '../llm/model-call-guard';
 import { decodeRecoveryValue, encodeRecoveryValue } from './recovery-value';
 
+/** version 只保护持久化格式本身；格式不变的其他差异一律允许续跑。 */
 export interface RecoveryManifest {
   version: 1;
-  fingerprint: string;
   prompts: FrozenPrompts;
 }
 
@@ -284,7 +284,7 @@ export class GameRecoveryService {
     });
   }
 
-  async prepareResume(gameId: string, fingerprint: string) {
+  async prepareResume(gameId: string) {
     return this.prisma.$transaction(async (tx) => {
       await tx.gameExecution.updateMany({
         where: { gameId },
@@ -293,8 +293,8 @@ export class GameRecoveryService {
       const execution = await tx.gameExecution.findUnique({ where: { gameId } });
       if (!execution) throw new ConflictException('此对局没有执行检查点，不能恢复历史对局');
       const manifest = decodeRecoveryValue<RecoveryManifest>(execution.manifest);
-      if (manifest.version !== 1 || manifest.fingerprint !== fingerprint)
-        throw new ConflictException('运行代码、规则或模型配置已变化，请使用创建检查点时的版本恢复');
+      if (manifest.version !== 1)
+        throw new ConflictException('执行检查点的存储格式不受支持，无法恢复');
       if (execution.deadline.getTime() <= Date.now())
         throw new ConflictException('对局原定运行期限已到，不能延长期限恢复');
       const game = await tx.game.findUnique({ where: { id: gameId }, select: { status: true } });

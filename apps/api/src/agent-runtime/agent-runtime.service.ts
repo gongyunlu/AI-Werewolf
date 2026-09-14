@@ -1,12 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { GameRecoveryService } from '../game-recovery/game-recovery.service';
 import { ConfigService } from '@nestjs/config';
-import {
-  AIMessage,
-  mapChatMessagesToStoredMessages,
-  mapStoredMessagesToChatMessages,
-} from '@langchain/core/messages';
-import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { MemoryService, type ActiveMemory, type SimilarMemory } from '../memory/memory.service';
@@ -16,8 +10,9 @@ import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
 import type { ModelCallMode } from '../llm/model-call-guard';
 import { throwIfAborted } from '../llm/abort.utils';
-import { ModelCallService } from '../llm/model-call.service';
+import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
 import { PlayerTurnService } from '../player-turn/player-turn.service';
+import { resolvePlayerAccess } from '../agents/agent-access';
 import { PromptService } from '../observability/prompt.service';
 import { PROMPT_NAMES, PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
@@ -33,10 +28,9 @@ import {
   ROLES,
   type AgentScenario,
 } from '@ai-werewolf/shared';
-import { buildTurnContext, type TurnContextRequest } from './turn-context';
+import { buildTurnContext, ownThinkingFromEvent, type TurnContextRequest } from './turn-context';
 import { formatMemorySection } from './memory-prompt.utils';
 import { buildScenarioQuery } from './scenario-query';
-import { ChatHistoryService } from './chat-history.service';
 import {
   readExperiment,
   type ExperimentSnapshot,
@@ -74,11 +68,12 @@ interface AgentContext {
   game: Prisma.GameGetPayload<Record<string, never>>;
   /** 当前场景 */
   scenario: AgentScenario;
+  /** 该玩家在本局固定使用的接入端点；缺省时用环境变量默认接入。密钥不写入任何快照或追踪。 */
+  access?: ModelAccess;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的记忆使用关系 */
   pendingMemoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的攻略使用关系 */
   pendingKnowledgeUsages: Array<{ chunkId: string }>;
-  pendingHistory?: { threadId: string; history: BaseMessage[]; decision: unknown };
 }
 
 /**
@@ -101,7 +96,6 @@ export class AgentRuntimeService {
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly promptService: PromptService,
-    private readonly chatHistory: ChatHistoryService,
     private readonly modelCalls: ModelCallService,
     private readonly playerTurn: PlayerTurnService,
     @Optional() private readonly recovery?: GameRecoveryService,
@@ -124,18 +118,17 @@ export class AgentRuntimeService {
    * Structured Output 或工具调用），满足「后端直接转发 LLM 真实流」的需求。
    *
    * @param context 已准备好的上下文
-   * @param threadId 会话 ID
    * @param options.onThinking 思考 token 回调
    * @param options.onContent 正文 token 回调
    * @returns 思考与正文完整文本
    */
   async streamSpeech(
     context: AgentContext,
-    threadId: string,
     options: {
       signal?: AbortSignal;
       onThinking?: (token: string) => void;
       onContent?: (token: string) => void;
+      reflectionMaxRounds?: number;
     } = {},
   ): Promise<{
     thinking: string;
@@ -147,7 +140,7 @@ export class AgentRuntimeService {
     const saved = await this.durable(`speech/${context.player.id}`, async () => {
       generated = true;
       return {
-        result: await this.playerTurn.speech(context, await this.loadHistory(threadId), options),
+        result: await this.playerTurn.speech(context, options),
         replay: context.replay,
       };
     });
@@ -165,38 +158,42 @@ export class AgentRuntimeService {
     context: AgentContext,
     zodSchema: z.ZodType,
     signal?: AbortSignal,
-    threadId?: string,
+    options: {
+      /** 覆盖本局的反思轮次；狼队夜间自身的迭代已经足够，不需要再叠加。 */
+      reflectionMaxRounds?: number;
+    } = {},
   ): Promise<{ reasoning: string; decision: T }> {
-    const saved = await this.durable(`decision/${context.player.id}`, async () => {
-      const history = threadId ? await this.loadHistory(threadId) : [];
-      const result = await this.playerTurn.decide<T>(context, zodSchema, history, signal);
-      // 历史只能在对应行为事件提交后确认。
-      if (threadId) context.pendingHistory = { threadId, history, decision: result.decision };
-      return {
-        result,
-        replay: context.replay,
-        history: context.pendingHistory
-          ? {
-              ...context.pendingHistory,
-              history: mapChatMessagesToStoredMessages(context.pendingHistory.history),
-            }
-          : undefined,
-      };
-    });
+    const saved = await this.durable(`decision/${context.player.id}`, async () => ({
+      result: await this.playerTurn.decide<T>(context, zodSchema, signal, options),
+      replay: context.replay,
+    }));
     context.replay = saved.replay;
     throwIfAborted(signal);
-    context.pendingHistory = saved.history
-      ? {
-          ...saved.history,
-          history: mapStoredMessagesToChatMessages(saved.history.history),
-        }
-      : undefined;
     return saved.result;
   }
 
-  /** 在当前执行 scope 内物化整份输入，恢复时复用原文与版本。 */
+  /**
+   * 在当前执行 scope 内物化整份输入，恢复时复用原文与版本。
+   *
+   * 接入密钥在检查点之外补挂：上下文整体会被序列化进恢复日志，密钥一旦进去就是明文落库，
+   * 恢复时还会把当时的旧 key 读回来用。端点则允许进检查点，续跑用的端点和原来一致。
+   */
   async prepareContextPublic(input: TurnContextRequest): Promise<AgentContext> {
-    return this.durable(`context/${input.playerId}`, () => this.prepareContext(input));
+    const context = await this.durable(`context/${input.playerId}`, () =>
+      this.prepareContext(input),
+    );
+    return {
+      ...context,
+      access: await resolvePlayerAccess(
+        this.prisma,
+        this.configService.get('AGENT_SECRET_KEY'),
+        context.player,
+        {
+          baseUrl: this.configService.get('ARK_BASE_URL'),
+          apiKey: this.configService.get('ARK_API_KEY'),
+        },
+      ),
+    };
   }
 
   /**
@@ -221,7 +218,6 @@ export class AgentRuntimeService {
     // memory 与 knowledge 任一注入待确认都应继续走到下方各自记录
     if (
       !context.replay &&
-      !context.pendingHistory &&
       context.pendingMemoryUsages.length === 0 &&
       context.pendingKnowledgeUsages.length === 0
     ) {
@@ -243,17 +239,6 @@ export class AgentRuntimeService {
         '记忆使用关系与行为事件不匹配，已跳过记录',
       );
       return;
-    }
-
-    if (context.pendingHistory) {
-      const { threadId, history, decision } = context.pendingHistory;
-      await this.saveHistory(threadId, [
-        ...history,
-        new AIMessage(
-          `第${event.day}天 ${event.actionType} 已记录的决策：${JSON.stringify(decision)}`,
-        ),
-      ]);
-      delete context.pendingHistory;
     }
 
     if (context.replay) {
@@ -487,6 +472,7 @@ export class AgentRuntimeService {
       actionType,
       events,
       position,
+      ownReasonings: await this.loadOwnReasonings(gameId, playerId, events),
     });
     const assembly = {
       turnContext,
@@ -536,6 +522,38 @@ export class AgentRuntimeService {
       pendingMemoryUsages,
       pendingKnowledgeUsages: knowledgeHits.map((hit) => ({ chunkId: hit.id })),
     };
+  }
+
+  /**
+   * 本人历史动作的私有理由：先取事件里已提交的 thinking，缺失的（如投票不写 thinking）
+   * 再按 game/player/event 批量回读决策快照的最终 reasoning。
+   *
+   * 只读 reasoning 一个字段，不复制旧 Prompt、证据或别人的 thinking；旧事件缺字段时不补造。
+   */
+  private async loadOwnReasonings(
+    gameId: string,
+    playerId: string,
+    events: EventRecord[],
+  ): Promise<Map<string, string>> {
+    const reasonings = new Map<string, string>();
+    const missing: string[] = [];
+    for (const event of events) {
+      if (event.actorId !== playerId) continue;
+      const thinking = ownThinkingFromEvent(event, playerId);
+      if (thinking) reasonings.set(event.id, thinking);
+      else missing.push(event.id);
+    }
+    if (missing.length === 0) return reasonings;
+
+    const snapshots = await this.prisma.decisionContext.findMany({
+      where: { gameId, playerId, eventId: { in: missing } },
+      select: { eventId: true, snapshot: true },
+    });
+    for (const { eventId, snapshot } of snapshots) {
+      const reasoning = (snapshot as { reasoning?: unknown } | null)?.reasoning;
+      if (typeof reasoning === 'string' && reasoning.trim()) reasonings.set(eventId, reasoning);
+    }
+    return reasonings;
   }
 
   /** 把已注入的经验暂存在上下文；只有真实行为 Event 落库后才会确认成 MemoryUsage。 */
@@ -695,51 +713,6 @@ export class AgentRuntimeService {
     );
 
     return fullPrompt.text;
-  }
-
-  /**
-   * 加载会话历史
-   */
-  private async loadHistory(threadId: string): Promise<BaseMessage[]> {
-    try {
-      const stored = await this.durable(`history/${threadId}`, async () =>
-        mapChatMessagesToStoredMessages(await this.chatHistory.load(threadId)),
-      );
-      return mapStoredMessagesToChatMessages(stored);
-    } catch (error) {
-      if (this.recovery?.current) throw error;
-      this.logger.warn(
-        `加载会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return [];
-    }
-  }
-
-  /**
-   * 保存会话历史
-   */
-  private async saveHistory(threadId: string, messages: BaseMessage[]): Promise<void> {
-    try {
-      // 滑动窗口：只保留最近 N 条消息，避免跨轮记忆无限增长
-      const HISTORY_WINDOW = 20;
-      const trimmed =
-        messages.length > HISTORY_WINDOW
-          ? messages.slice(messages.length - HISTORY_WINDOW)
-          : messages;
-
-      if (this.recovery?.current) {
-        await this.recovery.effect(`chat/${threadId}`, (tx) =>
-          this.chatHistory.replace(threadId, trimmed, tx),
-        );
-      } else {
-        await this.chatHistory.replace(threadId, trimmed);
-      }
-    } catch (error) {
-      if (this.recovery?.current) throw error;
-      this.logger.warn(
-        `保存会话历史失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
   }
 
   private durable<T>(key: string, produce: () => Promise<T>): Promise<T> {

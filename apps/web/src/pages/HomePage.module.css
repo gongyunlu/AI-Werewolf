@@ -2,7 +2,7 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background-color: #020617;
+  background-color: var(--app-bg);
 }
 
 .body {
@@ -33,13 +33,13 @@
   line-height: 1;
   font-weight: 700;
   letter-spacing: -0.025em;
-  color: #fbbf24;
+  color: var(--app-amber);
 }
 
 .tagline {
   font-size: 1.25rem;
   line-height: 1.75rem;
-  color: #cbd5e1;
+  color: var(--app-text-secondary);
 }
 
 .features {
@@ -54,9 +54,9 @@
 }
 
 .feature {
-  border: 1px solid #334155;
+  border: 1px solid var(--app-border-strong);
   border-radius: 0.5rem;
-  background-color: #0f172a;
+  background-color: var(--app-surface);
   padding: 1.5rem;
   display: flex;
   flex-direction: column;
@@ -67,13 +67,13 @@
   font-size: 1.125rem;
   line-height: 1.75rem;
   font-weight: 600;
-  color: #22d3ee;
+  color: var(--app-accent);
 }
 
 .featureDesc {
   font-size: 0.875rem;
   line-height: 1.25rem;
-  color: #cbd5e1;
+  color: var(--app-text-secondary);
 }
 
 .actions {
@@ -84,19 +84,19 @@
 
 .cta {
   padding: 0.75rem 2rem;
-  background-color: #06b6d4;
-  color: #020617;
+  background-color: var(--app-accent-fill);
+  color: var(--app-accent-contrast);
   font-weight: 600;
   border-radius: 0.5rem;
   transition: background-color 0.15s ease;
 
   &:hover {
-    background-color: #0891b2;
+    background-color: var(--app-accent-fill-hover);
   }
 }
 
 .footerNote {
   font-size: 0.875rem;
   line-height: 1.25rem;
-  color: #64748b;
+  color: var(--app-text-subtle);
 }

@@ -8,14 +8,27 @@ import { PROMPT_NAMES } from '../observability/prompt-templates';
 
 jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
 
+/** 决策前的思考轮是普通流式调用，这里只要求它产出一段非空思考。 */
+const thinkingStream = async () =>
+  (async function* () {
+    yield new AIMessage('核对可见事实后行动。');
+  })();
+
 function createRuntime(
   invoke: jest.Mock,
   events: unknown[] = [],
-  options: { role?: string; deathDay?: number; readPersonalJudgments?: jest.Mock } = {},
+  options: {
+    role?: string;
+    deathDay?: number;
+    readPersonalJudgments?: jest.Mock;
+    decisionContext?: jest.Mock;
+  } = {},
 ) {
   jest
     .mocked(ChatOpenAI)
-    .mockImplementation(() => ({ withStructuredOutput: () => ({ invoke }) }) as never);
+    .mockImplementation(
+      () => ({ withStructuredOutput: () => ({ invoke }), stream: thinkingStream }) as never,
+    );
   const config = {
     get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)),
   };
@@ -54,6 +67,9 @@ function createRuntime(
           findMany: jest.fn().mockResolvedValue(events),
           findFirst: jest.fn().mockResolvedValue(null),
         },
+        decisionContext: {
+          findMany: options.decisionContext ?? jest.fn().mockResolvedValue([]),
+        },
       },
       {
         retrieveActiveMemories: jest.fn().mockResolvedValue([]),
@@ -74,7 +90,6 @@ function createRuntime(
       },
       { trace: jest.fn().mockReturnValue({ callbacks: [] }) },
       prompts,
-      { load: jest.fn().mockResolvedValue([]), replace: jest.fn() },
     ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   return runtime;
@@ -117,7 +132,7 @@ it('普通投票上下文包含实际使用的动作模板，并能完成结构�
   });
   expect(context.prompts?.[PROMPT_NAMES.agentActionSystem]).toBeDefined();
   await expect(
-    runtime.decide(context, z.object({ action: z.literal('abstain') }), undefined, 'g/p'),
+    runtime.decide(context, z.object({ action: z.literal('abstain') })),
   ).resolves.toMatchObject({ decision: { action: 'abstain' } });
   expect(invoke).toHaveBeenCalledTimes(1);
   expect(context.systemPrompt).toContain('绑票');
@@ -192,7 +207,7 @@ it('当前日次、检索和判断窗口均采用引擎时点，旧原文只出�
         content: {
           seatNo: 1,
           speech: '我暂时保留意见，等后面发言。',
-          thinking: '不可复制的私有推理',
+          thinking: '本人当时保留意见的判断',
         },
       },
     ],
@@ -208,7 +223,10 @@ it('当前日次、检索和判断窗口均采用引擎时点，旧原文只出�
   expect(context.systemPrompt).toContain('当前第2天');
   expect(context.systemPrompt).toContain('存活玩家：1、3、5');
   expect(context.systemPrompt.match(/我暂时保留意见，等后面发言。/g)).toHaveLength(1);
-  expect(context.systemPrompt).not.toContain('不可复制的私有推理');
+  // 本人的旧理由按事件补进上下文，且只出现一次
+  expect(context.systemPrompt.match(/\[你的私有理由·当时\] 本人当时保留意见的判断/g)).toHaveLength(
+    1,
+  );
   expect(context.replay?.query).toContain('第2天投票');
   expect(readPersonalJudgments).toHaveBeenCalledWith('g', 2, 'a');
 });
@@ -294,7 +312,8 @@ it.each(['villager', 'seer', 'witch', 'werewolf'])(
       { villager: [], seer: [4], witch: [2, 3, 5, 6], werewolf: [1, 2, 5, 7] }[role],
     );
     expect(context.systemPrompt.includes('明天我悍跳你倒钩')).toBe(role === 'werewolf');
-    expect(context.systemPrompt).not.toContain('狼队私有推理');
+    // 本人（1号）当时的私有理由随事件补入；被可见性过滤掉的角色看不到该事件
+    expect(context.systemPrompt.includes('狼队私有推理')).toBe(role === 'werewolf');
     if (role === 'werewolf') expect(context.systemPrompt).toContain('你本人1号发言原文（第1轮）');
     if (role === 'witch') {
       expect(context.systemPrompt).toContain('狼刀目标：5号');
@@ -304,6 +323,83 @@ it.each(['villager', 'seer', 'witch', 'werewolf'])(
     expect(context.systemPrompt).toContain('可以在后续夜晚毒此前用解药救过的目标');
   },
 );
+
+it('只补入本人的旧理由，同桌他人的 thinking 不进入上下文', async () => {
+  const runtime = createRuntime(jest.fn(), [
+    {
+      sequence: 11,
+      day: 1,
+      phase: 'speech',
+      actorId: 'p2',
+      actionType: 'speech',
+      visibility: 'public',
+      content: { seatNo: 2, speech: '我觉得1号发言有问题', thinking: '他人的私密判断' },
+    },
+    {
+      sequence: 12,
+      day: 1,
+      phase: 'vote',
+      actorId: 'p',
+      actionType: 'vote',
+      visibility: 'public',
+      content: { voterSeatNo: 1, targetSeatNo: 2, voteRound: 0 },
+    },
+  ]);
+  const context = await runtime.prepareContextPublic({
+    gameId: 'g',
+    playerId: 'p',
+    scenario: 'day_speech',
+    actionType: 'speech',
+    position: { day: 2, phase: '普通发言', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+  });
+  expect(context.systemPrompt).toContain('你本人已提交：第0轮投票：1号投给2号');
+  expect(context.systemPrompt).toContain('2号发言原文：我觉得1号发言有问题');
+  expect(context.systemPrompt).not.toContain('他人的私密判断');
+});
+
+it('投票事件不带 thinking 时，按 game/player/event 回读当时的决策理由', async () => {
+  const findMany = jest.fn().mockResolvedValue([
+    {
+      eventId: 'ev-vote',
+      snapshot: {
+        reasoning: '2号首夜发言回避刀口，先归票他',
+        systemPrompt: '旧 Prompt 不应被复制',
+      },
+    },
+  ]);
+  const runtime = createRuntime(
+    jest.fn(),
+    [
+      {
+        id: 'ev-vote',
+        sequence: 21,
+        day: 1,
+        phase: 'vote',
+        actorId: 'p',
+        actionType: 'vote',
+        visibility: 'public',
+        content: { voterSeatNo: 1, targetSeatNo: 2, voteRound: 0 },
+      },
+    ],
+    { decisionContext: findMany },
+  );
+
+  const context = await runtime.prepareContextPublic({
+    gameId: 'g',
+    playerId: 'p',
+    scenario: 'day_speech',
+    actionType: 'speech',
+    position: { day: 2, phase: '普通发言', round: 0, aliveSeats: [1, 2, 3, 4, 5, 6] },
+  });
+
+  expect(findMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: { gameId: 'g', playerId: 'p', eventId: { in: ['ev-vote'] } },
+    }),
+  );
+  expect(context.systemPrompt).toContain('[你的私有理由·当时] 2号首夜发言回避刀口，先归票他');
+  expect(context.systemPrompt).not.toContain('旧 Prompt 不应被复制');
+});
 
 it('未用解药的女巫死亡后仍保留生前刀口，不能获知后续夜晚的刀口', async () => {
   const events = [1, 2, 3].map((day) => ({

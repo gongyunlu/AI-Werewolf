@@ -1,7 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
-import type { BaseMessage } from '@langchain/core/messages';
 import { PinoLogger } from 'nestjs-pino';
 import type { Job } from 'bullmq';
 import type { Env } from '@/config/env.validation';
@@ -11,7 +10,6 @@ import { RedisService } from '@/redis/redis.service';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { ModelCallService } from '@/llm/model-call.service';
 import { PlayerTurnService } from '@/player-turn/player-turn.service';
-import { ChatHistoryService } from '@/agent-runtime/chat-history.service';
 import { MemoryService } from '@/memory/memory.service';
 import { GlobalMemoryService } from '@/memory/global-memory.service';
 import { KnowledgeService } from '@/knowledge/knowledge.service';
@@ -24,6 +22,8 @@ import { SseBroadcasterService } from '@/sse/sse-broadcaster.service';
 import { GameAnalysisService } from '@/reflection/game-analysis.service';
 import { GameExecutorService } from '@/game-executor/game-executor.service';
 import { GameEngineFactory } from '@/game-executor/game-engine.factory';
+import { VoteTurnAdapter } from '@/game-executor/vote-turn.adapter';
+import { VOTE_TURN_PORT } from '@/game-engine/ports/vote-turn.port';
 import { GameWorkerService } from '@/game-queue/game-worker.service';
 import type { GameJobData } from '@/game-queue/game-queue.service';
 import { EventWriterService } from '../events/event-writer.service';
@@ -35,8 +35,6 @@ import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
 interface MockGameDependencies {
   prisma?: PrismaService;
   gameId?: string;
-  histories?: Map<string, BaseMessage[]>;
-  chatHistory?: Pick<ChatHistoryService, 'load' | 'replace'>;
   recovery?: boolean;
 }
 
@@ -91,7 +89,6 @@ export async function createMockGame(
     })),
     recordUsages: jest.fn(async (_usages: Array<{ eventId: string }>) => {}),
   };
-  const histories = dependencies.histories ?? new Map<string, BaseMessage[]>();
   const analysis = { analyzeGame: jest.fn(async () => ({ judged: 0, reflectPlanned: 0 })) };
   const summaries = {
     readPersonalJudgments: jest.fn(async () => ({
@@ -111,6 +108,8 @@ export async function createMockGame(
       ...nodes,
       GameExecutorService,
       GameEngineFactory,
+      VoteTurnAdapter,
+      { provide: VOTE_TURN_PORT, useExisting: VoteTurnAdapter },
       GameWorkerService,
       AgentRuntimeService,
       ModelCallService,
@@ -140,15 +139,6 @@ export async function createMockGame(
         useValue: { retrieveActivePatterns: jest.fn(async () => []) },
       },
       { provide: KnowledgeService, useValue: {} },
-      {
-        provide: ChatHistoryService,
-        useValue: dependencies.chatHistory ?? {
-          load: async (id: string) => [...(histories.get(id) ?? [])],
-          replace: async (id: string, messages: BaseMessage[]) => {
-            histories.set(id, [...messages]);
-          },
-        },
-      },
       { provide: SpeechSummarizerService, useValue: summaries },
       { provide: GameAnalysisService, useValue: analysis },
       {
@@ -174,7 +164,6 @@ export async function createMockGame(
     broadcaster,
     memory,
     summaries,
-    histories,
     analysis,
     executor,
     worker,

@@ -73,9 +73,21 @@ describe('游戏执行器生产模块装配', () => {
       writeGameStartEvent: jest.fn(async ({ gameId }: { gameId: string }) => ({
         id: `${gameId}-start`,
       })),
-      writePlayerVoteEvent: jest.fn(async ({ gameId }: { gameId: string }) => ({
-        id: `${gameId}-vote`,
-      })),
+      writeVoteBatch: jest.fn(
+        async (batch: { gameId: string; day: number; votes: Array<Record<string, unknown>> }) =>
+          batch.votes.map((vote) => ({
+            id: `${batch.gameId}-vote`,
+            gameId: batch.gameId,
+            actionType: 'vote',
+            actorId: vote.actorId,
+            day: batch.day,
+            content: {
+              voteRound: 0,
+              voterSeatNo: vote.voterSeatNo,
+              targetSeatNo: vote.targetSeatNo,
+            },
+          })),
+      ),
       commitNightResolution: jest.fn(async () => {}),
       writeGameEndEvent: jest.fn(async ({ gameId }: { gameId: string }) => ({
         id: `${gameId}-end`,
@@ -208,10 +220,10 @@ describe('游戏执行器生产模块装配', () => {
     expect(second.runtime.prepareContextPublic.mock.calls.map(([input]) => input.gameId)).toEqual([
       'second',
     ]);
-    expect(first.eventWriter.writePlayerVoteEvent).toHaveBeenCalledWith(
+    expect(first.eventWriter.writeVoteBatch).toHaveBeenCalledWith(
       expect.objectContaining({ gameId: 'first' }),
     );
-    expect(second.eventWriter.writePlayerVoteEvent).toHaveBeenCalledWith(
+    expect(second.eventWriter.writeVoteBatch).toHaveBeenCalledWith(
       expect.objectContaining({ gameId: 'second' }),
     );
   });

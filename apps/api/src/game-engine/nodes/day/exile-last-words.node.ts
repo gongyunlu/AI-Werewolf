@@ -2,8 +2,7 @@ import { failAfterEffect, allowModelFallback } from '../../core/game-failure-pol
 import { Injectable } from '@nestjs/common';
 import { DEATH_CAUSES } from '@ai-werewolf/shared';
 import type { GameGraphState, GameGraphUpdate } from '../../core/types';
-import type { NodeContext, GameNode } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { appendSceneNotice, type NodeContext, type GameNode } from '../node.types';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
@@ -54,8 +53,6 @@ export class ExileLastWordsNode {
             position,
           });
 
-          const threadId = getPlayerThreadId(state.gameId, exiledPlayer.id);
-
           context.broadcaster?.emit(state.gameId, {
             type: 'scene.open',
             sceneId,
@@ -66,7 +63,7 @@ export class ExileLastWordsNode {
           sceneOpened = true;
 
           // 流式输出：思考 + 遗言正文
-          const result = await this.agentRuntime.streamSpeech(contextData, threadId, {
+          const result = await this.agentRuntime.streamSpeech(contextData, {
             signal: context.signal,
             onThinking: (token) => {
               context.broadcaster?.emit(state.gameId, {
@@ -107,6 +104,7 @@ export class ExileLastWordsNode {
           if (effectStarted) failAfterEffect(error);
 
           await allowModelFallback(error, context, 'exile-last-words');
+          appendSceneNotice(context, state.gameId, sceneId);
           gameLogger.error(
             `[被放逐者遗言] ${exiledPlayer.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,
           );

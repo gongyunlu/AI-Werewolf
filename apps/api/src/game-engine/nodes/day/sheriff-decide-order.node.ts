@@ -4,7 +4,6 @@ import { z } from 'zod';
 import type { GameGraphState } from '@/game-engine/core/types';
 import type { NodeFactory } from '@/game-engine/nodes/node.types';
 import { saveNodeValue } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import {
   calculateSpeechOrder,
   type SpeechOrderConfig,
@@ -72,13 +71,10 @@ export class SheriffDecideOrderNode {
           },
         });
 
-        const threadId = getPlayerThreadId(state.gameId, sheriff.id);
-
         const { decision } = await this.agentRuntime.decide<SheriffDecideOrderDecision>(
           contextData,
           SheriffDecideOrderSchema,
           context.signal,
-          threadId,
         );
 
         sheriffChoice = {

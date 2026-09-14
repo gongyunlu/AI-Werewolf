@@ -11,6 +11,8 @@ import { AgentJudgmentService, AgentJudgment } from '../agent-judgment/agent-jud
 import { PromptService } from '../observability/prompt.service';
 import { LangfuseService } from '../observability/langfuse.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
+import type { ModelAccess } from '../llm/model-call.service';
+import { resolvePlayerAccess } from '../agents/agent-access';
 import type { Env } from '../config/env.validation';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -192,7 +194,16 @@ export class SpeechSummarizerService {
 
     const alivePlayers = await this.prisma.player.findMany({
       where: { gameId, deathDay: null },
-      select: { id: true, gameId: true, agentId: true, seatNo: true, role: true, modelName: true },
+      select: {
+        id: true,
+        gameId: true,
+        agentId: true,
+        seatNo: true,
+        role: true,
+        modelName: true,
+        accessBaseUrl: true,
+        accessUsesDefault: true,
+      },
     });
 
     const allAliveSeats = alivePlayers.map((p) => p.seatNo).filter((s): s is number => s !== null);
@@ -227,6 +238,18 @@ export class SpeechSummarizerService {
 
             const privateInfo = await this.buildPrivateInfo({ gameId, id, seatNo, role });
 
+            // 模型的合法端点随 Agent 自带接入变化，判断必须和玩家回合走同一份接入，
+            // 否则会把某一家的模型名打到另一家的端点上。
+            const access = await resolvePlayerAccess(
+              this.prisma,
+              this.configService.get('AGENT_SECRET_KEY'),
+              player,
+              {
+                baseUrl: this.configService.get('ARK_BASE_URL'),
+                apiKey: this.configService.get('ARK_API_KEY'),
+              },
+            );
+
             const { judgments } = await this.callLLMWithRolePerspective(
               gameId,
               id,
@@ -237,6 +260,7 @@ export class SpeechSummarizerService {
               olderJudgments, // 更早的（压缩格式）
               allAliveSeats.filter((s) => s !== seatNo), // 排除自己
               modelName,
+              access,
             );
 
             // LLM 偶发编造/抄错事件ID，若带着脏 speechId 直接入库会触发 FK 击穿整批判断：
@@ -324,6 +348,7 @@ export class SpeechSummarizerService {
     olderJudgments: AgentJudgment[], // 更早的判断（压缩）
     visiblePlayerSeats: number[],
     modelName: string,
+    access?: ModelAccess,
   ): Promise<{ judgments: AgentJudgment[] }> {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
@@ -331,9 +356,9 @@ export class SpeechSummarizerService {
     });
     const experiment = readExperiment(game?.experiment);
     const model = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
+      apiKey: access?.apiKey ?? this.configService.get('ARK_API_KEY'),
       model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      configuration: { baseURL: access?.baseUrl ?? this.configService.get('ARK_BASE_URL') },
       temperature: 0.3, // 保持一定创造性，但不过度随机
       // 关 SDK 重试：单次最多等 180s，覆盖 ARK 思考模型 3 分钟内的真实长生成（实测慢调用可达此量级）
       maxRetries: 0,

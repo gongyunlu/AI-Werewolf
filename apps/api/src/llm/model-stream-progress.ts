@@ -13,6 +13,13 @@ export class ModelStreamProgressHandler
 {
   name = 'model-stream-progress';
   lc_prefer_streaming = true;
+  /**
+   * 模型原文。结构化输出在解析阶段抛错时，异常不携带原文，重试会退化成
+   * 把同样的输入再发一遍；从流式分片里留存下来才能让重试带上待修正的内容。
+   */
+  rawContent = '';
+  rawToolName = '';
+  rawToolArguments = '';
 
   constructor(
     private readonly progress: ReturnType<typeof createStreamProgress>,
@@ -33,7 +40,13 @@ export class ModelStreamProgressHandler
     if (this.signal.aborted) return;
     const generation = fields?.chunk;
     if (generation && 'message' in generation && isAIMessageChunk(generation.message)) {
-      recordStreamProgress(this.progress, generation.message, this.reportProgress);
+      const message = generation.message;
+      recordStreamProgress(this.progress, message, this.reportProgress);
+      if (typeof message.content === 'string') this.rawContent += message.content;
+      for (const tool of message.tool_call_chunks ?? []) {
+        this.rawToolArguments += tool.args ?? '';
+        if (tool.name && !this.rawToolName) this.rawToolName = tool.name;
+      }
       const finishReason = generation.generationInfo?.finish_reason;
       if (typeof finishReason === 'string') this.progress.finishReason = finishReason;
     }

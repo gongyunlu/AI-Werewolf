@@ -3,7 +3,6 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { resolveVotes } from '../../rules/vote-resolution';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
@@ -64,13 +63,10 @@ export class PkVoteNode {
           additionalContext: extraInfo,
         });
 
-        const threadId = getPlayerThreadId(state.gameId, player.id);
-
-        const { decision } = await this.agentRuntime.decide<VoteDecision>(
+        const { reasoning, decision } = await this.agentRuntime.decide<VoteDecision>(
           contextData,
           buildPkVoteSchema(state.pkCandidates!),
           context.signal,
-          threadId,
         );
 
         // 验证投票目标是否在PK候选人中
@@ -84,6 +80,7 @@ export class PkVoteNode {
           voteRound: Math.max(1, state.pkRound),
           voterSeatNo: player.seatNo!,
           targetSeatNo: decision.targetSeatNo,
+          thinking: reasoning,
         });
         await this.agentRuntime.recordExperienceUsages(contextData, event);
         await context.eventBus?.publish(event);

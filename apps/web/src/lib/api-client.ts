@@ -1,4 +1,5 @@
 import type { GameListItem, GamesListResponse } from '@/types/game';
+import { getAdminToken } from './admin-token';
 
 export interface Ruleset {
   id: string;
@@ -10,7 +11,45 @@ export interface Agent {
   id: string;
   name: string;
   defaultModelName: string;
+  memoryLabel: string;
   isActive: boolean;
+  /** Agent 自带的接入端点；为空表示走服务端环境变量里的默认接入 */
+  baseUrl: string | null;
+  /** 是否已配置自带密钥；读接口只给这个布尔值和掩码，永不给明文 */
+  hasApiKey: boolean;
+  /** 密钥末 4 位掩码，未配置时为 null */
+  apiKeyMasked: string | null;
+  /** 单值自由文本标签，只用于识别与筛选，不参与模型路由 */
+  tag: string | null;
+  notes: string | null;
+}
+
+/** 接入配置与标签的写入口径：字段缺省=保持原值，null=清除，有值=覆盖 */
+export interface AgentUpdateInput {
+  defaultModelName?: string;
+  baseUrl?: string | null;
+  apiKey?: string | null;
+  tag?: string | null;
+  notes?: string;
+  isActive?: boolean;
+}
+
+/** 人设/策略条目；分层由后端按 type 决定，前端只需给标题与正文 */
+export interface PersonaStrategyItem {
+  title: string;
+  content: string;
+}
+
+/** 读回来的条目额外带 id 与重要度分层，保存时只提交标题与正文 */
+export interface PersonaStrategyEntry extends PersonaStrategyItem {
+  id: string;
+  importance: number;
+}
+
+export interface PersonaStrategyView {
+  label: string;
+  persona: PersonaStrategyEntry[];
+  strategy: PersonaStrategyEntry[];
 }
 
 /** 赛后分析进度 */
@@ -87,11 +126,60 @@ class ApiClient {
 
   /**
    * 获取 Agent 列表
+   *
+   * @param includeInactive - 是否带上已停用的 Agent；默认只返回活跃的
    */
-  async getAgents(): Promise<Agent[]> {
-    const response = await fetch(`${this.baseURL}/agents`);
+  async getAgents(includeInactive = false): Promise<Agent[]> {
+    const query = includeInactive ? '?includeInactive=true' : '';
+    const response = await fetch(`${this.baseURL}/agents${query}`);
     if (!response.ok) throw new Error(`Failed to fetch agents: ${response.statusText}`);
     return response.json();
+  }
+
+  /** 管理写接口统一带 x-admin-token；令牌为空时后端会明确拒绝，前端不自行放行。 */
+  private async adminRequest<T>(path: string, init: RequestInit): Promise<T> {
+    const response = await fetch(`${this.baseURL}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': getAdminToken(),
+        ...init.headers,
+      },
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      const message = Array.isArray(err.message) ? err.message.join('；') : err.message;
+      throw new Error(message || `请求失败：${response.statusText}`);
+    }
+    return response.json();
+  }
+
+  /** 更新 Agent 的模型/接入端点/密钥/标签/备注；密钥只写不读 */
+  updateAgent(id: string, input: AgentUpdateInput): Promise<Agent> {
+    return this.adminRequest(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+  }
+
+  /** 读取 Agent 的人设与策略；label 缺省时用该 Agent 当前的记忆集 */
+  async getPersonaStrategy(agentId: string, label?: string): Promise<PersonaStrategyView> {
+    const query = label ? `?label=${encodeURIComponent(label)}` : '';
+    const response = await fetch(
+      `${this.baseURL}/agents/${agentId}/memories/persona-strategy${query}`,
+    );
+    if (!response.ok) throw new Error(`读取人设失败：${response.statusText}`);
+    return response.json();
+  }
+
+  /** 整批替换 Agent 的人设与策略；旧条目由后端归档保留 */
+  replacePersonaStrategy(
+    agentId: string,
+    input: { persona: PersonaStrategyItem[]; strategy: PersonaStrategyItem[] },
+    label?: string,
+  ): Promise<PersonaStrategyView> {
+    const query = label ? `?label=${encodeURIComponent(label)}` : '';
+    return this.adminRequest(`/agents/${agentId}/memories/persona-strategy${query}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
   }
 
   /**
@@ -159,7 +247,11 @@ class ApiClient {
     const response = await fetch(`${this.baseURL}/games/admin/recover-game/${gameId}`, {
       method: 'POST',
     });
-    if (!response.ok) throw new Error(`Failed to recover game: ${response.statusText}`);
+    if (!response.ok) {
+      // 拒绝的原因（指纹变化、期限已到、状态不符）只在响应体里，不能用 statusText 顶替
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || `恢复对局失败：${response.statusText}`);
+    }
   }
 
   /**

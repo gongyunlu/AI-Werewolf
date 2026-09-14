@@ -10,8 +10,8 @@ import type { LangfuseService } from '@/observability/langfuse.service';
 import type { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
 import type { GameFailurePolicy } from '../core/game-failure-policy';
+import type { VoteTurnPort } from '../ports/vote-turn.port';
 import type { GameRecoveryService } from '@/game-recovery/game-recovery.service';
-import type { Prisma } from '@/generated/prisma/client';
 
 /**
  * 游戏节点函数类型
@@ -23,6 +23,8 @@ export type GameNode = (state: GameGraphState) => Promise<Partial<GameGraphState
  */
 export interface NodeContext {
   agentRuntime: AgentRuntimeService;
+  /** 由 composition root 绑定的玩家回合端口；目前只有普通投票走它。 */
+  voteTurn: VoteTurnPort;
   prisma: PrismaService;
   eventWriter: EventWriterService;
   configService: ConfigService<Env, true>;
@@ -52,13 +54,18 @@ export function saveNodeValue<T>(
     : Promise.resolve(produce());
 }
 
-export async function updatePlayerState(
-  context: NodeContext,
-  playerId: string,
-  data: Prisma.PlayerUpdateInput,
-): Promise<void> {
-  const update = (db: Prisma.TransactionClient) =>
-    db.player.update({ where: { id: playerId }, data });
-  if (context.recovery) await context.recovery.effect(`player/${playerId}`, update);
-  else await update(context.prisma);
+/**
+ * 发言失败或中断时，给已经打开的卡片补一条收尾声明。
+ *
+ * 思考与正文是边生成边外发的，已经流出去的 token 收不回来，只能追加一句说明，
+ * 否则观战者会把半截内容当成一轮正常发言。声明只走实时广播，不进事件内容：
+ * 这一轮没有提交任何发言，落库记录里也不需要它。
+ */
+export function appendSceneNotice(context: NodeContext, gameId: string, sceneId: string): void {
+  context.broadcaster?.emit(gameId, {
+    type: 'scene.append',
+    sceneId,
+    token: '（本轮发言未完成，没有产出正文）',
+    contentType: 'content',
+  });
 }

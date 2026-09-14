@@ -15,10 +15,11 @@ export function ThinkingBlock({ thinking, duration, defaultOpen = false }: Think
   const durationText = duration ? `用时 ${(duration / 1000).toFixed(1)} 秒` : '';
 
   return (
-    <div className="mb-3 overflow-hidden rounded-lg border border-blue-200/30 bg-blue-950/20">
+    <div className="mb-3 overflow-hidden rounded-lg border border-border bg-muted">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-blue-100/80 transition-colors hover:bg-blue-950/40"
+        aria-expanded={isOpen}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent"
       >
         <span className="text-base">🧠</span>
         <span className="flex-1">已思考{durationText ? `（${durationText}）` : ''}</span>
@@ -26,8 +27,8 @@ export function ThinkingBlock({ thinking, duration, defaultOpen = false }: Think
       </button>
 
       {isOpen && (
-        <div className="border-t border-blue-200/20 px-3 py-2.5 text-sm text-blue-50/70">
-          <Streamdown className="prose prose-invert prose-sm max-w-none">{thinking}</Streamdown>
+        <div className="border-t border-border px-3 py-2.5 text-sm leading-relaxed text-muted-foreground">
+          <Streamdown>{thinking}</Streamdown>
         </div>
       )}
     </div>

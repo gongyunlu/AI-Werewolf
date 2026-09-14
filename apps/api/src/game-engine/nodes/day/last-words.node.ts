@@ -1,8 +1,7 @@
 import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import type { GameGraphState, GameGraphUpdate } from '../../core/types';
-import type { NodeContext, GameNode } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { appendSceneNotice, type NodeContext, type GameNode } from '../node.types';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
@@ -57,8 +56,6 @@ export class LastWordsNode {
               position,
             });
 
-            const threadId = getPlayerThreadId(state.gameId, player.id);
-
             context.broadcaster?.emit(state.gameId, {
               type: 'scene.open',
               sceneId,
@@ -69,7 +66,7 @@ export class LastWordsNode {
             sceneOpened = true;
 
             // 流式输出：思考 + 遗言正文
-            const result = await this.agentRuntime.streamSpeech(contextData, threadId, {
+            const result = await this.agentRuntime.streamSpeech(contextData, {
               signal: context.signal,
               onThinking: (token) => {
                 context.broadcaster?.emit(state.gameId, {
@@ -115,6 +112,7 @@ export class LastWordsNode {
             if (effectStarted) failAfterEffect(error);
 
             await allowModelFallback(error, context, player.id);
+            appendSceneNotice(context, state.gameId, sceneId);
             skippedSeats.push(player.seatNo);
             gameLogger.error(
               `[遗言阶段] ${player.seatNo}号位遗言异常，跳过: ${error instanceof Error ? error.message : String(error)}`,

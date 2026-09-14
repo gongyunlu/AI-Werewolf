@@ -3,8 +3,6 @@ import { ROLES, DEATH_CAUSES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { updatePlayerState } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
@@ -77,13 +75,10 @@ export class WolfExplodeNode {
               '现在是天亮阶段。你可以选择自爆：公开你的狼人身份并立即出局（自己死亡退场），当天白天直接结束进入黑夜，跳过发言与投票。自爆是牺牲自己换取跳过白天，请审慎判断是否值得。',
           });
 
-          const threadId = getPlayerThreadId(state.gameId, wolf.id);
-
           const { reasoning, decision } = await this.agentRuntime.decide<WolfExplodeDecision>(
             contextData,
             WolfExplodeDecisionSchema,
             raceController.signal,
-            threadId,
           );
 
           throwIfAborted(raceController.signal);
@@ -139,11 +134,17 @@ export class WolfExplodeNode {
         `[狼人自爆] ${wolf.seatNo}号位狼人自爆${explodeReason ? `：${explodeReason}` : ''}`,
       );
 
-      // 法官播报自爆（公开）
+      // 法官播报自爆（公开）：播报与自爆狼出局必须同一事务，避免只落其一。
       const event = await context.eventWriter.writeJudgeEvent({
         gameId: state.gameId,
         day: state.currentDay,
         content: `${wolf.seatNo}号位狼人自爆，进入黑夜。`,
+        updateState: async (tx) => {
+          await tx.player.update({
+            where: { id: wolf.id, gameId: state.gameId },
+            data: { deathDay: state.currentDay, deathCause: DEATH_CAUSES.SELF_DESTRUCT },
+          });
+        },
       });
       await context.eventBus?.publish(event);
 
@@ -158,12 +159,6 @@ export class WolfExplodeNode {
             }
           : p,
       );
-
-      // 持久化死亡状态
-      await updatePlayerState(context, wolf.id, {
-        deathDay: state.currentDay,
-        deathCause: DEATH_CAUSES.SELF_DESTRUCT,
-      });
 
       return {
         players: updatedPlayers,

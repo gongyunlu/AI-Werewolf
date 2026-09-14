@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
-import { Pool } from 'pg';
 import { ACTION_TYPES as A } from '@ai-werewolf/shared';
 import type { Env } from '../src/config/env.validation';
 import type { Event, Player } from '../src/generated/prisma/client';
@@ -8,8 +7,6 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 import { createMockGame, type MockGame } from '../src/game-engine/testing/mock-game-harness';
 import { MockGameStore } from '../src/game-engine/testing/mock-game-store';
 import { GameFailurePolicy } from '../src/game-engine/core/game-failure-policy';
-import { getPlayerThreadId } from '../src/agent-runtime/thread-id.utils';
-import { ChatHistoryService } from '../src/agent-runtime/chat-history.service';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
 
 jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
@@ -32,7 +29,6 @@ describe('standard six player recovery through executor, engine and agent runtim
   let game: MockGame | undefined;
   let gameId: string;
   let players: Player[];
-  let chatHistory: ChatHistoryService;
   let config: Partial<Env>;
 
   beforeAll(async () => {
@@ -107,21 +103,7 @@ describe('standard six player recovery through executor, engine and agent runtim
 
   const events = () => prisma.event.findMany({ where: { gameId }, orderBy: { sequence: 'asc' } });
   const player = (seat: number) => players.find((entry) => entry.seatNo === seat)!;
-  const start = async () => {
-    chatHistory = new ChatHistoryService(new Pool({ connectionString: database.connectionString }));
-    try {
-      await chatHistory.onModuleInit();
-      return await createMockGame('villager', config, {
-        prisma,
-        gameId,
-        chatHistory,
-        recovery: true,
-      });
-    } catch (error) {
-      await chatHistory.onModuleDestroy();
-      throw error;
-    }
-  };
+  const start = async () => createMockGame('villager', config, { prisma, gameId, recovery: true });
 
   async function restart() {
     expect(await game!.recovery!.interrupt(gameId)).toBe(true);
@@ -130,8 +112,7 @@ describe('standard six player recovery through executor, engine and agent runtim
     );
     await game!.close();
     game = await start();
-    const fingerprint = await game.executor.recoveryFingerprintForGame(gameId);
-    const execution = await game.recovery!.prepareResume(gameId, fingerprint);
+    const execution = await game.recovery!.prepareResume(gameId);
     return execution.generation;
   }
 
@@ -163,62 +144,52 @@ describe('standard six player recovery through executor, engine and agent runtim
     expect(await prisma.gameExecutionStep.count({ where: { gameId, completed: false } })).toBe(0);
   });
 
-  it('会话事务写入后失败整体回滚，重建连接恢复已提交查验且历史不重复', async () => {
-    const threadId = getPlayerThreadId(gameId, player(3).id);
-    const replace = chatHistory.replace.bind(chatHistory);
-    jest.spyOn(chatHistory, 'replace').mockImplementation(async (id, messages, tx) => {
-      await replace(id, messages, tx);
-      if (
-        id === threadId &&
-        messages.some((message) => String(message.content).includes('第2天 seer_check'))
-      ) {
-        expect(tx).toBeDefined();
-        throw new Error('会话事务写入后连接失败');
-      }
+  it('提交后私有理由记录失败不中止对局，也不产生第二次动作', async () => {
+    let failedEventId: string | undefined;
+    // Prisma 的 upsert 是重载泛型签名，测试里按实际入参形状收窄后再挂钩。
+    const decisionContext = prisma.decisionContext as unknown as {
+      upsert: (args: { create: { eventId: string } }) => Promise<unknown>;
+    };
+    const failing = jest.spyOn(decisionContext, 'upsert').mockImplementationOnce(async (args) => {
+      failedEventId = args.create.eventId;
+      throw new Error('私有理由记录写入失败');
     });
-    await expect(game!.executor.executeGame(gameId)).rejects.toThrow('会话事务写入后连接失败');
-    const committed = (await events()).find(
-      (event) => event.actionType === A.SEER_CHECK && event.day === 2,
-    )!;
-    expect(committed).toBeDefined();
-    const before = await chatHistory.load(threadId);
-    expect(before.map((message) => String(message.content))).toEqual([
-      expect.stringContaining('第1天 seer_check'),
-      expect.stringContaining('第1天 vote'),
-    ]);
-    const generation = await restart();
-    expect(await chatHistory.load(threadId)).toEqual(before);
-    await finish(generation);
+    await finish();
+    failing.mockRestore();
+    expect(failedEventId).toBeDefined();
+    // 领域效果已经提交，事后记录失败只丢这一条理由来源，对局照常走到终局。
+    const checks = (await events()).filter((event) => event.actionType === A.SEER_CHECK);
+    expect(checks).toHaveLength(2);
+    expect(await prisma.decisionContext.count({ where: { gameId, eventId: failedEventId! } })).toBe(
+      0,
+    );
     expect(
-      game!.model.requests.filter((request) => request.action === 'check_identity'),
-    ).toHaveLength(0);
-    expect((await events()).find((event) => event.id === committed.id)).toEqual(committed);
-    const history = await chatHistory.load(threadId);
-    expect(history).toHaveLength(before.length + 1);
-    expect(
-      history.filter((message) =>
-        String(message.content).includes('第1天 seer_check 已记录的决策'),
-      ),
-    ).toHaveLength(1);
+      await prisma.decisionContext.count({ where: { gameId, eventId: checks.at(-1)!.id } }),
+    ).toBe(1);
   });
 
-  it('resumes five committed simultaneous votes without exposing them to the missing voter', async () => {
-    const fiveVotes = deferred();
+  it('resumes five generated votes without committing a partial round', async () => {
+    const fiveGenerated = deferred();
     const prepare = game!.runtime.prepareContextPublic.bind(game!.runtime);
-    let published = 0;
-    game!.bus.publish.mockImplementation(async (event) => {
-      if (event.actionType === A.VOTE && ++published === 5) fiveVotes.resolve();
+    const decide = game!.runtime.decide.bind(game!.runtime);
+    let decided = 0;
+    jest.spyOn(game!.runtime, 'decide').mockImplementation(async (...args) => {
+      const result = await decide(...args);
+      if ((args[0] as { scenario?: string }).scenario === 'vote' && ++decided === 5)
+        fiveGenerated.resolve();
+      return result;
     });
     jest.spyOn(game!.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
       if (args[0].playerId === player(6).id && args[0].scenario === 'vote') {
-        await fiveVotes.promise;
+        await fiveGenerated.promise;
         throw new Error('sixth voter disconnected before context');
       }
       return prepare(...args);
     });
     await expect(game!.executor.executeGame(gameId)).rejects.toThrow('sixth voter disconnected');
-    const committed = (await events()).filter((event) => event.actionType === A.VOTE);
-    expect(committed).toHaveLength(5);
+    // 整批提交：第六人没有生成之前，本轮一张票都不可见。
+    expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
+
     const generation = await restart();
     const contexts: Awaited<ReturnType<typeof prepare>>[] = [];
     const resumedPrepare = game!.runtime.prepareContextPublic.bind(game!.runtime);
@@ -228,20 +199,27 @@ describe('standard six player recovery through executor, engine and agent runtim
       return context;
     });
     await finish(generation);
+    // 恢复只补第六人；其余五人复用已生成的候选。
     expect(
       game!.model.requests
         .filter((request) => request.day === 1 && request.action === 'cast_vote')
         .map((request) => request.seat),
     ).toEqual([6]);
+    // 全部投票输入仍停在轮次开始前的水位，看不到本轮任何一张票。
     expect(contexts).toHaveLength(6);
     for (const context of contexts) {
       expect(
         context.replay!.evidence.some((event) => event.actionType === A.VOTE && event.day === 1),
       ).toBe(false);
     }
-    const all = await events();
-    for (const event of committed)
-      expect(all.find((entry) => entry.id === event.id)).toEqual(event);
+    expect(
+      (await events()).filter(
+        (event) =>
+          event.actionType === A.VOTE &&
+          event.day === 1 &&
+          Number(content(event).voteRound ?? 0) === 0,
+      ),
+    ).toHaveLength(6);
   });
 
   it('continues sequential speech with prior speakers visible and no repeated speech model calls', async () => {
@@ -453,29 +431,31 @@ describe('standard six player recovery through executor, engine and agent runtim
     expect((await events()).some((event) => event.actionType === A.GAME_ENDED)).toBe(false);
   });
 
-  it('reserves already committed fallback votes before a different voter fails on replay', async () => {
+  it('reserves an already spent fallback before another voter fails on replay', async () => {
     await game!.close();
     config.GAME_MAX_MODEL_FALLBACKS = 1;
     game = await start();
-    const fallbackCommitted = deferred();
-    const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
-    game.bus.publish.mockImplementation(async (event) => {
-      if (event.actionType === A.VOTE && event.actorId === player(5).id)
-        fallbackCommitted.resolve();
+    const fallbackConsumed = deferred();
+    const consume = GameFailurePolicy.prototype.consumePersisted;
+    let consumed = 0;
+    jest.spyOn(GameFailurePolicy.prototype, 'consumePersisted').mockImplementation(async function (
+      this: GameFailurePolicy,
+      ...args
+    ) {
+      const result = await consume.apply(this, args);
+      if (++consumed === 1) fallbackConsumed.resolve();
+      return result;
     });
+    const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
     jest.spyOn(game.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
       if (args[0].scenario === 'vote' && args[0].playerId === player(3).id) {
-        await fallbackCommitted.promise;
+        await fallbackConsumed.promise;
         throw new Error('disconnect after another voter spent fallback budget');
       }
       return prepare(...args);
     });
     game.model.beforeRequest = (request) => {
-      if (request.action === 'cast_vote' && request.seat === 5)
-        throw Object.assign(new Error('流内供应商过载'), {
-          code: 'ServerOverloaded',
-          type: 'TooManyRequests',
-        });
+      if (request.action === 'cast_vote' && request.seat === 5) throw unavailable();
     };
     await expect(game.executor.executeGame(gameId)).rejects.toThrow(
       'disconnect after another voter',
@@ -483,37 +463,64 @@ describe('standard six player recovery through executor, engine and agent runtim
     expect(
       game.model.requests.filter((request) => request.action === 'cast_vote' && request.seat === 5),
     ).toHaveLength(2);
+    const fallbackSteps = () =>
+      prisma.gameExecutionStep.count({
+        where: { gameId, completed: true, key: { contains: '/fallback/' } },
+      });
+    expect(await fallbackSteps()).toBe(1);
+    expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
+
     const generation = await restart();
-    const nextFailure = deferred();
-    const resumedPrepare = game!.runtime.prepareContextPublic.bind(game!.runtime);
-    jest.spyOn(game!.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
-      if (args[0].scenario === 'vote' && args[0].playerId === player(5).id)
-        await nextFailure.promise;
-      return resumedPrepare(...args);
-    });
-    const consume = GameFailurePolicy.prototype.consumePersisted;
-    jest.spyOn(GameFailurePolicy.prototype, 'consumePersisted').mockImplementation(async function (
-      this: GameFailurePolicy,
-      ...args
-    ) {
-      try {
-        return await consume.apply(this, args);
-      } finally {
-        nextFailure.resolve();
-      }
-    });
     game!.model.beforeRequest = (request) => {
       if (request.action === 'cast_vote' && request.seat === 3) throw unavailable();
     };
     await expect(game!.executor.executeGame(gameId, generation)).rejects.toThrow('降级次数已耗尽');
+    // 上一代已花掉的额度被保留：第五人不再请求模型，也没有第二份额度可花。
     expect(
       game!.model.requests.filter(
         (request) => request.action === 'cast_vote' && request.seat === 5,
       ),
     ).toHaveLength(0);
-    const abstentions = (await events()).filter(
-      (event) => event.actionType === A.VOTE && content(event).targetSeatNo === 0,
-    );
-    expect(abstentions.map((event) => playerSeat(event.actorId!))).toEqual([5]);
+    expect(await fallbackSteps()).toBe(1);
+  });
+
+  it('同一轮里同时失败的投票者不会各自扣掉一份降级额度', async () => {
+    await game!.close();
+    config.GAME_MAX_MODEL_FALLBACKS = 1;
+    game = await start();
+    const voters = [player(3).id, player(5).id];
+    const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
+    const bothReady = deferred();
+    let arrived = 0;
+    jest.spyOn(game.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
+      if (args[0].scenario === 'vote' && voters.includes(args[0].playerId)) {
+        if (++arrived === voters.length) bothReady.resolve();
+        await bothReady.promise;
+      }
+      return prepare(...args);
+    });
+    game.model.beforeRequest = (request) => {
+      if (request.action === 'cast_vote' && [3, 5].includes(request.seat)) throw unavailable();
+    };
+    // 两个失败同时进入额度占用，避免退化成先后串行。
+    const consume = GameFailurePolicy.prototype.consumePersisted;
+    const bothConsuming = deferred();
+    let consuming = 0;
+    jest.spyOn(GameFailurePolicy.prototype, 'consumePersisted').mockImplementation(async function (
+      this: GameFailurePolicy,
+      ...args
+    ) {
+      if (++consuming === voters.length) bothConsuming.resolve();
+      await bothConsuming.promise;
+      return consume.apply(this, args);
+    });
+    await expect(game!.executor.executeGame(gameId)).rejects.toThrow('降级次数已耗尽');
+    expect(
+      await prisma.gameExecutionStep.count({
+        where: { gameId, completed: true, key: { contains: '/fallback/' } },
+      }),
+    ).toBe(1);
+    // 额度耗尽时整轮不提交：既没有部分投票，也没有多出来的弃票。
+    expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
   });
 });

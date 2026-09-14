@@ -1,5 +1,6 @@
 import styles from './AppHeader.module.css';
 import { Link, useLocation } from 'react-router-dom';
+import { ThemeToggle } from './ThemeToggle';
 
 interface AppHeaderProps {
   rightContent?: React.ReactNode;
@@ -35,11 +36,20 @@ export function AppHeader({ rightContent }: AppHeaderProps) {
             >
               对局列表
             </Link>
+            <Link
+              to="/agents"
+              className={isActive('/agents') ? styles.navLinkActive : styles.navLink}
+            >
+              Agent 管理
+            </Link>
           </nav>
         </div>
 
-        {/* 右侧：自定义内容 */}
-        {rightContent && <div className={styles.right}>{rightContent}</div>}
+        {/* 右侧：昼夜切换 + 自定义内容 */}
+        <div className={styles.right}>
+          <ThemeToggle />
+          {rightContent}
+        </div>
       </div>
     </header>
   );

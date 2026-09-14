@@ -9,27 +9,29 @@ import { PostGameAnalysisError } from './game-executor.exception';
 
 const GAME_ID = 'game-1';
 
-function createHarness() {
-  const prisma = {
-    game: {
-      findUnique: jest.fn().mockResolvedValue({
-        id: GAME_ID,
-        rulesetId: 'standard6p',
-        skillVersion: 'v1',
-        status: GAME_STATUSES.RUNNING,
-        ruleset: { id: 'standard6p' },
-        players: [
-          {
-            id: 'player-1',
-            seatNo: 1,
-            role: 'villager',
-            faction: 'villager',
-            isSheriff: false,
-          },
-        ],
-      }),
+const GAME_ROW = {
+  id: GAME_ID,
+  rulesetId: 'standard6p',
+  skillVersion: 'v1',
+  status: GAME_STATUSES.RUNNING,
+  experiment: null,
+  ruleset: { id: 'standard6p', definition: { name: '标准六人局' } },
+  players: [
+    {
+      id: 'player-1',
+      seatNo: 1,
+      role: 'villager',
+      faction: 'villager',
+      isSheriff: false,
+      agentId: 'agent-1',
+      modelName: 'deepseek-chat',
     },
-  };
+  ],
+};
+
+const config = { get: jest.fn() };
+
+function createService(prisma: unknown) {
   const agentRuntime = { validateRequiredSkills: jest.fn().mockResolvedValue(undefined) };
   const eventWriter = { initializeSequenceCounter: jest.fn().mockResolvedValue(undefined) };
   const gameAnalysis = {
@@ -37,20 +39,25 @@ function createHarness() {
   };
   const engine = { run: jest.fn(async (state: GameGraphState) => state) };
   const engineFactory = { create: jest.fn(() => engine) };
-
   const service = new GameExecutorService(
     prisma as never,
     agentRuntime as never,
     eventWriter as never,
-    {} as never,
+    config as never,
     { getOrCreate: jest.fn() } as never,
     {} as never,
     gameAnalysis as never,
     {} as never,
     engineFactory as never,
   );
+  return { service, gameAnalysis, engine, engineFactory, agentRuntime, eventWriter };
+}
 
-  return { service, gameAnalysis, engine, engineFactory };
+function createHarness() {
+  const prisma = {
+    game: { findUnique: jest.fn().mockResolvedValue(GAME_ROW) },
+  };
+  return createService(prisma);
 }
 
 describe('GameExecutorService', () => {

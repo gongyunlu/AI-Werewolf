@@ -12,6 +12,8 @@ import { ReflectionModule } from '../reflection/reflection.module';
 import { ObservabilityModule } from '../observability/observability.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { GameEngineFactory } from './game-engine.factory';
+import { VoteTurnAdapter } from './vote-turn.adapter';
+import { VOTE_TURN_PORT } from '../game-engine/ports/vote-turn.port';
 
 /**
  * 游戏执行器模块
@@ -30,7 +32,12 @@ import { GameEngineFactory } from './game-engine.factory';
     SpeechSummarizerModule,
     ReflectionModule,
   ],
-  providers: [GameEngineFactory, GameExecutorService],
+  providers: [
+    GameEngineFactory,
+    VoteTurnAdapter,
+    { provide: VOTE_TURN_PORT, useExisting: VoteTurnAdapter },
+    GameExecutorService,
+  ],
   exports: [GameExecutorService],
 })
 export class GameExecutorModule {}

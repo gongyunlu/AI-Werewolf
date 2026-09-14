@@ -64,6 +64,8 @@ export default function GamesListPage() {
   const [error, setError] = useState('');
   const [pendingGameId, setPendingGameId] = useState<string | null>(null);
   const [analysisGameId, setAnalysisGameId] = useState<string | null>(null);
+  const [resumingGameId, setResumingGameId] = useState<string | null>(null);
+  const [resumeError, setResumeError] = useState('');
 
   const fetchGames = useCallback(async () => {
     try {
@@ -101,6 +103,28 @@ export default function GamesListPage() {
     const gameId = event.currentTarget.dataset.gameId;
     if (gameId) setAnalysisGameId(gameId);
   }, []);
+
+  const handleResume = useCallback(
+    async (event: MouseEvent<HTMLButtonElement>) => {
+      const gameId = event.currentTarget.dataset.gameId;
+      if (!gameId) return;
+      setResumingGameId(gameId);
+      setResumeError('');
+      try {
+        await apiClient.recoverGame(gameId);
+        await fetchGames();
+      } catch (err) {
+        // 被拒绝的原因来自后端，原样展示，否则使用者无从判断是检查点格式不支持还是期限已到；
+        // 提示条在页面顶部、离被点的那一行很远，必须带上对局编号才知道是谁失败了
+        setResumeError(
+          `恢复对局 ${gameId} 失败：${err instanceof Error ? err.message : '未知错误'}`,
+        );
+      } finally {
+        setResumingGameId(null);
+      }
+    },
+    [fetchGames],
+  );
 
   const handleSelectPerspective = useCallback(
     (perspective: string) => {
@@ -154,6 +178,12 @@ export default function GamesListPage() {
               <CreateGameDialog mode="ab" onCreated={handleRetry} />
             </div>
           </div>
+
+          {resumeError && (
+            <p className={styles.errorText} role="alert">
+              {resumeError}
+            </p>
+          )}
 
           {loading ? (
             <div className={styles.loading}>
@@ -222,6 +252,18 @@ export default function GamesListPage() {
                         </div>
                       </div>
                       <div className={styles.cardActions}>
+                        {game.status === GAME_STATUSES.PENDING_RECOVERY && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className={styles.watchButton}
+                            data-game-id={game.id}
+                            disabled={resumingGameId === game.id}
+                            onClick={handleResume}
+                          >
+                            {resumingGameId === game.id ? '恢复中...' : '恢复'}
+                          </Button>
+                        )}
                         {game.status === GAME_STATUSES.FINISHED && (
                           <Button
                             variant="outline"

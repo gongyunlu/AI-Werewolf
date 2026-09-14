@@ -5,7 +5,6 @@ import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
@@ -96,13 +95,10 @@ export class WitchAntidoteNode {
           additionalContext: wolfTargetInfo,
         });
 
-        const threadId = getPlayerThreadId(state.gameId, witch.id);
-
         const { reasoning, decision } = await this.agentRuntime.decide<WitchAntidoteDecision>(
           contextData,
           buildWitchAntidoteSchema([targetPlayer.seatNo]),
           context.signal,
-          threadId,
         );
 
         if (decision.action === 'antidote') {

@@ -1,7 +1,7 @@
 import { ACTION_TYPES } from '@ai-werewolf/shared';
 import type { Event } from '../generated/prisma/client';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
-import type { ConnectionReadyEvent } from '../sse/sse-event.types';
+import type { ConnectionReadyEvent, SseMessage } from '../sse/sse-event.types';
 import { EventBusService } from './event-bus.service';
 
 const gameId = 'game-1';
@@ -108,6 +108,31 @@ describe('EventBusService persisted history recovery', () => {
     expect(snapshot(broadcaster).playerDeaths).toEqual([
       { playerId: 'player-2', deathDay: 1, deathCause: 'execution' },
     ]);
+  });
+
+  it('投票事件实时出卡时把本轮思考补在正文之后，且只有一张卡片', async () => {
+    const { service, broadcaster } = createHarness([]);
+    const messages: SseMessage[] = [];
+    broadcaster.getOrCreate(gameId).subscribe((message) => messages.push(message));
+
+    await service.publish(
+      createEvent('vote-event', 1, ACTION_TYPES.VOTE, {
+        voterSeatNo: 1,
+        targetSeatNo: 2,
+        thinking: '2号首夜发言回避刀口，先归票他。',
+      }),
+    );
+
+    expect(messages.map((message) => message.type)).toEqual([
+      'scene.open',
+      'scene.append',
+      'scene.close',
+    ]);
+    expect(messages[1]).toMatchObject({
+      sceneId: 'vote-event',
+      contentType: 'thinking',
+      token: '2号首夜发言回避刀口，先归票他。',
+    });
   });
 
   it('正常实时发布仍由节点广播 speech，避免落库后增加第二张卡片', async () => {

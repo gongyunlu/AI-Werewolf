@@ -6,7 +6,7 @@ import { HumanMessage, type AIMessage, type BaseMessage } from '@langchain/core/
 import { z } from 'zod';
 import type { Env } from '../config/env.validation';
 import type { TraceConfig } from '../observability/langfuse.service';
-import { resolveStructuredOutputMethod } from '../observability/structured-output-method';
+import { canDisableReasoning, resolveModelCapability } from './model-capability';
 import { isAbortError, throwIfAborted } from './abort.utils';
 import { ModelCallGuard, ModelCallError, type ModelCallMode } from './model-call-guard';
 import {
@@ -16,6 +16,12 @@ import {
 } from './model-stream-progress';
 import { parseJsonOutput } from './parse-json-output';
 import { canonicalJson } from './canonical-json';
+
+/** 单次调用使用的接入端点；缺省时回落到环境变量里的默认接入。密钥只在本进程内传递。 */
+export interface ModelAccess {
+  baseUrl: string;
+  apiKey: string;
+}
 
 /** 模型传输、结构协议和调用故障边界；不读取游戏状态或提交业务效果。 */
 @Injectable()
@@ -32,14 +38,32 @@ export class ModelCallService {
       cooldownMs: configService.get('LLM_CIRCUIT_COOLDOWN_MS'),
     });
   }
-  private createModel(modelName: string): ChatOpenAI {
+  /** 端点与凭证：Agent 自带接入选自带，否则用环境变量默认接入。 */
+  private resolveAccess(access?: ModelAccess): ModelAccess {
+    return (
+      access ?? {
+        baseUrl: this.configService.get('ARK_BASE_URL'),
+        apiKey: this.configService.get('ARK_API_KEY'),
+      }
+    );
+  }
+
+  private createModel(
+    modelName: string,
+    access?: ModelAccess,
+    options?: { disableReasoning?: boolean },
+  ): ChatOpenAI {
+    const { baseUrl, apiKey } = this.resolveAccess(access);
+    // 发言链路里思考由独立调用生成，供应商思维链属纯冗余，关掉可省下大部分生成耗时。
+    const disableReasoning = options?.disableReasoning === true && canDisableReasoning(modelName);
     return new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
+      apiKey,
       model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      configuration: { baseURL: baseUrl },
       streaming: true,
       timeout: this.configService.get('LLM_FIRST_CHUNK_TIMEOUT_MS') ?? 300_000,
       maxRetries: 0,
+      ...(disableReasoning ? { modelKwargs: { thinking: { type: 'disabled' } } } : {}),
     });
   }
 
@@ -49,11 +73,13 @@ export class ModelCallService {
     signal?: AbortSignal,
     diagnostics?: Record<string, unknown>,
     mode: ModelCallMode = 'invoke',
+    access?: ModelAccess,
   ): Promise<T> {
     const startedAt = Date.now();
     try {
+      // 熔断按「端点 + 模型」隔离：换端点不能复用另一条链路的故障状态。
       return await this.modelGuard.run(
-        `${this.configService.get('ARK_BASE_URL')}:${modelName}`,
+        `${this.resolveAccess(access).baseUrl}:${modelName}`,
         call,
         signal,
         mode,
@@ -80,8 +106,9 @@ export class ModelCallService {
     signal: AbortSignal | undefined,
     onToken?: (token: string) => void,
     trace?: TraceConfig,
+    access?: ModelAccess,
   ): Promise<string> {
-    const model = this.createModel(modelName);
+    const model = this.createModel(modelName, access, { disableReasoning: true });
     const progress = {
       ...trace?.metadata,
       runName: trace?.runName,
@@ -110,6 +137,7 @@ export class ModelCallService {
       signal,
       progress,
       'stream',
+      access,
     );
   }
 
@@ -120,14 +148,12 @@ export class ModelCallService {
     traceFor: (retry: boolean) => TraceConfig,
     signal?: AbortSignal,
     wireSchema: Record<string, unknown> = z.toJSONSchema(outputSchema),
+    access?: ModelAccess,
   ): Promise<z.infer<S>> {
-    const baseModel = this.createModel(modelName);
+    const baseModel = this.createModel(modelName, access);
 
-    // 方舟 MiniMax-M3 的嵌套工具参数会错位；文本 JSON 仍在本地完整解析和校验。
-    const method =
-      modelName.trim().toLowerCase() === 'minimax-m3'
-        ? 'jsonMode'
-        : resolveStructuredOutputMethod(modelName);
+    const capability = resolveModelCapability(modelName);
+    const method = capability.protocol;
     const model = baseModel.withStructuredOutput(JSON.parse(canonicalJson(wireSchema)), {
       name: 'extract',
       method,
@@ -202,7 +228,7 @@ export class ModelCallService {
             // 流解析器会容忍未闭合 JSON，完整结果仍须通过严格语法校验。
             output = response.parsed;
             if (method !== 'functionCalling' && typeof raw.content === 'string')
-              output = parseJsonOutput(raw.content, method === 'jsonMode');
+              output = parseJsonOutput(raw.content, capability.allowCodeFence);
             const toolOutputs = (raw.additional_kwargs.tool_calls ?? []).map((tool) => ({
               name: tool.function.name,
               args: JSON.parse(tool.function.arguments) as unknown,
@@ -210,6 +236,26 @@ export class ModelCallService {
             if (method === 'functionCalling' && toolOutputs.length)
               output = toolOutputs.find((tool) => tool.name === 'extract')?.args;
           } catch (error) {
+            // 解析在 invoke 内部就抛错时，模型原文不会随异常返回；改从流式分片里取回，
+            // 否则重试拿不到任何待修正的内容，只能把同样的输入再发一遍。
+            if (
+              !previousResponse &&
+              (progressHandler.rawContent || progressHandler.rawToolArguments)
+            ) {
+              previousResponse = {
+                content: progressHandler.rawContent,
+                toolCalls: progressHandler.rawToolArguments
+                  ? [
+                      {
+                        function: {
+                          name: progressHandler.rawToolName,
+                          arguments: progressHandler.rawToolArguments,
+                        },
+                      },
+                    ]
+                  : [],
+              };
+            }
             // OpenAI SDK 的 JSON Schema 解析也可能直接抛原生解析异常。
             if (
               error instanceof SyntaxError ||
@@ -227,6 +273,7 @@ export class ModelCallService {
         signal,
         diagnostics,
         'stream',
+        access,
       );
     };
     let result: z.infer<typeof outputSchema>;

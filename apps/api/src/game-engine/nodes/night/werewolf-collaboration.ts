@@ -9,8 +9,7 @@ import { FACTIONS } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState, PlayerState } from '../../core/types';
 import type { NodeContext } from '../node.types';
-import { saveNodeValue } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import { appendSceneNotice, saveNodeValue } from '../node.types';
 import { ModelCallError } from '@/llm/model-call-guard';
 import { PROMPT_NAMES, PLAYER_TURN_PROMPT_NAMES } from '@/observability/prompt-templates';
 import { gameLogger } from '../../utils/game-logger';
@@ -89,13 +88,12 @@ export async function singleWolfDecision(
       },
     });
 
-    const playerThreadId = getPlayerThreadId(state.gameId, wolf.id);
-
+    // 狼队刀人提案与夜间讨论同属一次迭代，思考轮只跑一轮
     const { reasoning, decision } = await context.agentRuntime.decide<ProposeKillDecision>(
       contextData,
       ProposeKillDecisionSchema,
       context.signal,
-      playerThreadId,
+      { reflectionMaxRounds: 0 },
     );
 
     if (decision.action === 'propose_kill') {
@@ -234,16 +232,17 @@ export async function wolfDiscussion(
   const maxRounds = 2;
   const maxSpeechPerWolf = 2;
 
-  for (let round = 0; round < maxRounds; round++) {
-    const shuffled = await saveNodeValue(context, `wolf-order/${round}`, () =>
-      experiment
-        ? pairedWolfOrder(werewolves, experiment.pairId, state.currentDay, round)
-        : [...werewolves].toSorted(() => Math.random() - 0.5),
-    );
+  // 发言顺序整夜只抽一次，后续轮次沿用同一顺序（第二轮仍从首位开始），不再每轮重抽
+  const speakingOrder = await saveNodeValue(context, 'wolf-order', () =>
+    experiment
+      ? pairedWolfOrder(werewolves, experiment.pairId, state.currentDay)
+      : [...werewolves].toSorted(() => Math.random() - 0.5),
+  );
 
+  for (let round = 0; round < maxRounds; round++) {
     const completedSeats: number[] = [];
     const skippedSeats: number[] = [];
-    for (const wolf of shuffled) {
+    for (const wolf of speakingOrder) {
       throwIfAborted(context.signal);
       const currentSpeechCount = speechCount.get(wolf.id) || 0;
 
@@ -251,8 +250,6 @@ export async function wolfDiscussion(
         skippedSeats.push(wolf.seatNo);
         continue;
       }
-
-      const playerThreadId = getPlayerThreadId(state.gameId, wolf.id);
 
       const sceneId = `wolf-discussion-${state.gameId}-${state.currentDay}-${round}-${wolf.id}`;
       let sceneOpened = false;
@@ -279,7 +276,7 @@ export async function wolfDiscussion(
             day: state.currentDay,
             phase: '狼队夜间讨论',
             round: round + 1,
-            order: shuffled.map((p) => p.seatNo),
+            order: speakingOrder.map((p) => p.seatNo),
             completedSeats: [...completedSeats],
             skippedSeats: [...skippedSeats],
             aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
@@ -288,8 +285,10 @@ export async function wolfDiscussion(
         });
 
         // 流式输出：思考 + 讨论发言正文
-        const result = await context.agentRuntime.streamSpeech(contextData, playerThreadId, {
+        // 狼队商议本身已经按轮次反复迭代，每句话再叠加反思轮会成倍放大调用次数
+        const result = await context.agentRuntime.streamSpeech(contextData, {
           signal: context.signal,
+          reflectionMaxRounds: 0,
           onThinking: (token) => {
             context.broadcaster?.emit(state.gameId, {
               type: 'scene.append',
@@ -341,6 +340,7 @@ export async function wolfDiscussion(
         if (effectStarted) failAfterEffect(error);
 
         await allowModelFallback(error, context, `speech/${round}/${wolf.id}`);
+        appendSceneNotice(context, state.gameId, sceneId);
         skippedSeats.push(wolf.seatNo);
         gameLogger.error(
           `[狼人讨论] ${wolf.seatNo}号位发言失败: ${error instanceof Error ? error.message : String(error)}`,
@@ -393,8 +393,6 @@ async function runWolfVoting(
   proposalEventIds: string[] = [],
 ): Promise<VoteRecord[]> {
   const votePromises = werewolves.map(async (wolf): Promise<VoteRecord | null> => {
-    const playerThreadId = getPlayerThreadId(state.gameId, wolf.id);
-
     let effectStarted = false;
     try {
       const contextData = await context.agentRuntime.prepareContextPublic({
@@ -415,7 +413,7 @@ async function runWolfVoting(
         contextData,
         ProposeKillDecisionSchema,
         context.signal,
-        playerThreadId,
+        { reflectionMaxRounds: 0 },
       );
 
       if (decision.action === 'propose_kill') {
@@ -500,9 +498,8 @@ export function pairedWolfOrder<T extends { seatNo: number }>(
   wolves: T[],
   pairId: string,
   day: number,
-  round: number,
 ): T[] {
   const key = (wolf: T) =>
-    createHash('sha256').update([pairId, day, round, wolf.seatNo].join(':')).digest('hex');
+    createHash('sha256').update([pairId, day, wolf.seatNo].join(':')).digest('hex');
   return wolves.toSorted((a, b) => key(a).localeCompare(key(b)) || a.seatNo - b.seatNo);
 }

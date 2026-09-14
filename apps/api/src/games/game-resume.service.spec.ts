@@ -27,7 +27,6 @@ function createHarness() {
   const jobs = new Map<string, ReturnType<typeof createJob>>();
   const previousJob = createJob(2, 'failed');
   jobs.set(previousJob.id, previousJob);
-  const executor = { recoveryFingerprintForGame: jest.fn().mockResolvedValue('fingerprint') };
   const bullQueue = {
     getJob: jest.fn().mockImplementation(async (id: string) => jobs.get(id)),
     add: jest
@@ -65,23 +64,17 @@ function createHarness() {
   const games = {
     getGameById: jest.fn().mockImplementation(async () => ({ id: gameId, ...state })),
   };
-  const service = new GameResumeService(
-    executor as never,
-    queue,
-    recovery as never,
-    games as never,
-  );
-  return { service, executor, bullQueue, queue, recovery, games, previousJob, state, jobs };
+  const service = new GameResumeService(queue, recovery as never, games as never);
+  return { service, bullQueue, queue, recovery, games, previousJob, state, jobs };
 }
 
 describe('GameResumeService', () => {
   it('恢复只投递新 generation，保留旧任务供旧执行者正常退出', async () => {
-    const { service, executor, recovery, bullQueue, previousJob, jobs } = createHarness();
+    const { service, recovery, bullQueue, previousJob, jobs } = createHarness();
 
     await expect(service.resume(gameId)).resolves.toMatchObject({ status: GAME_STATUSES.RUNNING });
 
-    expect(executor.recoveryFingerprintForGame).toHaveBeenCalledWith(gameId);
-    expect(recovery.prepareResume).toHaveBeenCalledWith(gameId, 'fingerprint');
+    expect(recovery.prepareResume).toHaveBeenCalledWith(gameId);
     expect(bullQueue.add).toHaveBeenCalledWith(
       'run-game',
       { gameId, generation: 4 },

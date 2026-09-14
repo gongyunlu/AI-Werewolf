@@ -52,7 +52,6 @@ it('冻结记忆检索异常穿过 runtime 和预言家节点，不产生随机�
       {},
       {},
       {},
-      {},
     ] as unknown as Parameters<typeof createAgentRuntime>),
   );
   jest
@@ -83,7 +82,6 @@ it('普通上下文错误保持原异常，不因对局属于实验而读取状�
     ...([
       { get: jest.fn((key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 0 : undefined)) },
       prisma,
-      {},
       {},
       {},
       {},

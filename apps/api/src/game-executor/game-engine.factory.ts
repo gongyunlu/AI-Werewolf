@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
 import type { Env } from '../config/env.validation';
@@ -6,6 +6,7 @@ import { EventBusService } from '../event-bus/event-bus.service';
 import { GameEngine } from '../game-engine/core/game-engine';
 import { EventWriterService } from '../game-engine/events/event-writer.service';
 import { NodeRegistrar } from '../game-engine/nodes/node-registrar.service';
+import { VOTE_TURN_PORT, type VoteTurnPort } from '../game-engine/ports/vote-turn.port';
 import { GameRecoveryService } from '../game-recovery/game-recovery.service';
 import { LangfuseService } from '../observability/langfuse.service';
 import { PromptService } from '../observability/prompt.service';
@@ -18,6 +19,7 @@ import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 export class GameEngineFactory {
   constructor(
     private readonly agentRuntime: AgentRuntimeService,
+    @Inject(VOTE_TURN_PORT) private readonly voteTurn: VoteTurnPort,
     private readonly prisma: PrismaService,
     private readonly eventWriter: EventWriterService,
     private readonly broadcaster: SseBroadcasterService,
@@ -33,6 +35,7 @@ export class GameEngineFactory {
   create(): GameEngine {
     return new GameEngine(
       this.agentRuntime,
+      this.voteTurn,
       this.prisma,
       this.eventWriter,
       this.broadcaster,

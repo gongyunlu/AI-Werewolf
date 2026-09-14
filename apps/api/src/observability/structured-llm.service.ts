@@ -5,7 +5,7 @@ import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages
 import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { LangfuseService } from './langfuse.service';
-import { resolveStructuredOutputMethod } from './structured-output-method';
+import { resolveModelCapability } from '../llm/model-capability';
 import type { Env } from '../config/env.validation';
 
 /** 一次结构化输出调用的入参 */
@@ -63,7 +63,7 @@ export class StructuredLlmService {
 
     const jsonSchema = z.toJSONSchema(schema);
     const model = baseModel.withStructuredOutput(jsonSchema, {
-      method: resolveStructuredOutputMethod(modelName),
+      method: resolveModelCapability(modelName).protocol,
     });
     const traceBase = {
       gameId,

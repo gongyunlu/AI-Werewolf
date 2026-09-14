@@ -5,7 +5,6 @@ import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
@@ -88,13 +87,10 @@ export class WitchPoisonNode {
           additionalContext: `你今晚只能毒以下存活玩家之一：${legalSeatNos.join('号、')}号。`,
         });
 
-        const threadId = getPlayerThreadId(state.gameId, witch.id);
-
         const { reasoning, decision } = await this.agentRuntime.decide<WitchPoisonDecision>(
           contextData,
           buildWitchPoisonSchema(legalSeatNos),
           context.signal,
-          threadId,
         );
 
         if (decision.action === 'poison') {

@@ -1,16 +1,11 @@
 import { ModelCallError } from '@/llm/model-call-guard';
-import {
-  failAfterEffect,
-  allowModelFallback,
-  settleGameActions,
-} from '../../core/game-failure-policy';
+import { allowModelFallback, settleGameActions } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory, NodeContext } from '../node.types';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
+import type { VoteTurnReference } from '../../ports/vote-turn.port';
 import { gameLogger } from '../../utils/game-logger';
-import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { resolveVotes } from '../../rules/vote-resolution';
 
 export function buildVoteSchema(legalSeatNos: number[]) {
@@ -24,24 +19,16 @@ export function buildVoteSchema(legalSeatNos: number[]) {
   });
 }
 
-type VoteDecision =
-  | {
-      action: 'cast_vote';
-      targetSeatNo: number;
-    }
-  | {
-      action: 'abstain';
-    };
-
-interface VoteResult {
-  voterId: string;
+interface CollectedVote {
+  voter: GameGraphState['players'][0];
   targetId: string | null; // null 表示弃权
+  targetSeatNo: number; // 0 表示弃权
+  reference?: VoteTurnReference;
+  thinking?: string;
 }
 
 @Injectable()
 export class VoteNode {
-  constructor(private readonly agentRuntime: AgentRuntimeService) {}
-
   create(): NodeFactory {
     return (context) => async (state: GameGraphState) => {
       const { players } = state;
@@ -55,20 +42,32 @@ export class VoteNode {
       // 合法投票目标 = 存活玩家（含自己）
       const legalSeatNos = alivePlayers.map((p) => p.seatNo);
 
-      // 并行投票
-      const votePromises = alivePlayers.map((voter) =>
-        this.handleSingleVote(voter, state, context, legalSeatNos),
+      // 先并行收齐全部候选：本轮投票在收齐后一次提交，批次内不写 Event。
+      const collected = await settleGameActions(
+        alivePlayers.map((voter) => this.collectVote(voter, state, context, legalSeatNos)),
       );
 
-      const voteResults = await settleGameActions(votePromises);
+      const events = await context.eventWriter.writeVoteBatch({
+        gameId: state.gameId,
+        day: state.currentDay,
+        votes: collected.map(({ voter, targetSeatNo, thinking }) => ({
+          actorId: voter.id,
+          voterSeatNo: voter.seatNo,
+          targetSeatNo,
+          thinking,
+        })),
+      });
+      for (const [index, vote] of collected.entries())
+        if (vote.reference) await context.voteTurn.confirm(vote.reference, events[index]);
+      for (const event of events) await context.eventBus?.publish(event);
 
       // 汇总为 resolveVotes 需要的结构：被投票人 ID → 投票人 ID[]
       const votes = new Map<string, string[]>();
-      voteResults.forEach((result) => {
-        if (result.targetId !== null) {
-          const voters = votes.get(result.targetId) ?? [];
-          voters.push(result.voterId);
-          votes.set(result.targetId, voters);
+      collected.forEach(({ voter, targetId }) => {
+        if (targetId !== null) {
+          const voters = votes.get(targetId) ?? [];
+          voters.push(voter.id);
+          votes.set(targetId, voters);
         }
       });
 
@@ -107,96 +106,51 @@ export class VoteNode {
     };
   }
 
-  private async handleSingleVote(
+  /**
+   * 生成单个玩家的投票候选。
+   *
+   * 这里只产生候选，不写任何 Event：整轮投票收齐后才一次提交。模型失败按现有降级预算
+   * 转成弃票；取消、程序错误与实验完整性异常直接上抛，由批次整体失败而不是补一张弃票。
+   */
+  private async collectVote(
     voter: GameGraphState['players'][0],
     state: GameGraphState,
     context: NodeContext,
     legalSeatNos: number[],
-  ): Promise<VoteResult> {
-    let effectStarted = false;
+  ): Promise<CollectedVote> {
     try {
-      const contextData = await this.agentRuntime.prepareContextPublic({
+      const { reference, reasoning } = await context.voteTurn.vote({
         gameId: state.gameId,
         playerId: voter.id,
-        scenario: 'vote',
-        actionType: 'vote',
-        position: {
-          day: state.currentDay,
-          phase: '普通投票',
-          round: 0,
-          aliveSeats: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
-        },
-        additionalContext: `你只能投票给以下存活玩家之一：${legalSeatNos.join('号、')}号，或弃权。`,
+        seatNo: voter.seatNo,
+        day: state.currentDay,
+        phase: '普通投票',
+        round: 0,
+        aliveSeatNos: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
+        legalSeatNos,
+        schema: buildVoteSchema(legalSeatNos),
+        signal: context.signal,
       });
 
-      const threadId = getPlayerThreadId(state.gameId, voter.id);
+      const action = reference.action;
+      if (action.action === 'abstain')
+        return { voter, targetId: null, targetSeatNo: 0, reference, thinking: reasoning };
 
-      const { decision } = await this.agentRuntime.decide<VoteDecision>(
-        contextData,
-        buildVoteSchema(legalSeatNos),
-        context.signal,
-        threadId,
-      );
-
-      if (decision.action === 'cast_vote') {
-        const target = state.players.find((p) => p.seatNo === decision.targetSeatNo);
-        if (!target || !target.isAlive) {
-          throw new ModelCallError('invalid_output');
-        }
-
-        effectStarted = true;
-        const event = await context.eventWriter.writePlayerVoteEvent({
-          gameId: state.gameId,
-          day: state.currentDay,
-          actorId: voter.id,
-          voterSeatNo: voter.seatNo,
-          targetSeatNo: decision.targetSeatNo,
-        });
-        await this.agentRuntime.recordExperienceUsages(contextData, event);
-        await context.eventBus?.publish(event);
-
-        return {
-          voterId: voter.id,
-          targetId: target.id,
-        };
-      } else {
-        effectStarted = true;
-        const event = await context.eventWriter.writePlayerVoteEvent({
-          gameId: state.gameId,
-          day: state.currentDay,
-          actorId: voter.id,
-          voterSeatNo: voter.seatNo,
-          targetSeatNo: 0,
-        });
-        await this.agentRuntime.recordExperienceUsages(contextData, event);
-        await context.eventBus?.publish(event);
-
-        return {
-          voterId: voter.id,
-          targetId: null,
-        };
-      }
+      const target = state.players.find((p) => p.seatNo === action.targetSeatNo);
+      if (!target || !target.isAlive) throw new ModelCallError('invalid_output');
+      return {
+        voter,
+        targetId: target.id,
+        targetSeatNo: target.seatNo,
+        reference,
+        thinking: reasoning,
+      };
     } catch (error) {
-      if (effectStarted) failAfterEffect(error);
-
       await allowModelFallback(error, context, voter.id);
       gameLogger.error(
         `[投票阶段] ${voter.seatNo}号位投票出错，降级为弃权: ${error instanceof Error ? error.message : String(error)}`,
       );
-
-      const event = await context.eventWriter.writePlayerVoteEvent({
-        gameId: state.gameId,
-        day: state.currentDay,
-        actorId: voter.id,
-        voterSeatNo: voter.seatNo,
-        targetSeatNo: 0,
-      });
-      await context.eventBus?.publish(event);
-
-      return {
-        voterId: voter.id,
-        targetId: null,
-      };
+      return { voter, targetId: null, targetSeatNo: 0 };
     }
   }
 }

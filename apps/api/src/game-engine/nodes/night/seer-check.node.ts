@@ -7,7 +7,6 @@ import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { saveNodeValue } from '../node.types';
 import { checkSeerResult } from '../../rules/seer-check';
-import { getPlayerThreadId } from '@/agent-runtime/thread-id.utils';
 import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
@@ -79,8 +78,6 @@ export class SeerCheckNode {
 
       let effectStarted = false;
       try {
-        const threadId = getPlayerThreadId(state.gameId, seer.id);
-
         // 准备上下文（Node 层收集数据 + 注入合法候选）
         const legalHint = `你今晚只能查验以下存活且未查验过的玩家：${legalSeatNos.join('号、')}号。`;
         const contextData = await this.prepareContext(state, seer.id, context, legalHint);
@@ -89,7 +86,6 @@ export class SeerCheckNode {
           contextData,
           buildSeerCheckSchema(legalSeatNos),
           context.signal,
-          threadId,
         );
 
         // 执行决策

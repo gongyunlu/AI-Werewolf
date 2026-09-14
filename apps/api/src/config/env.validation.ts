@@ -15,6 +15,8 @@ const envSchema = z.object({
   ARK_DEFAULT_MODEL: z.string().min(1),
   ARK_EMBEDDING_MODEL: z.string().min(1).default('doubao-embedding-vision'), // Memory 向量化模型
   JUDGE_MODEL: emptyToUndefined, // 决策质量评估模型，缺省回退 ARK_DEFAULT_MODEL
+  ADMIN_TOKEN: emptyToUndefined, // Agent/人设写接口的请求头鉴权；未配置时写接口一律拒绝
+  AGENT_SECRET_KEY: emptyToUndefined, // Agent 自带密钥的 AES-256-GCM 主密钥；未配置时不允许写入密钥
   KNOWLEDGE_INJECTION: z.preprocess(
     (v) => (typeof v === 'string' ? v.toLowerCase() === 'true' : v),
     z.boolean().default(true),

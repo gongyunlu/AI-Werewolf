@@ -4,11 +4,13 @@ import { MEMORY_EMBEDDING_DIMENSION } from './embedding.service';
 import { MemoryService } from './memory.service';
 
 function createMockPrisma() {
-  return {
+  const prisma = {
+    agent: { findUnique: jest.fn() },
     memory: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
       updateMany: jest.fn(),
+      createMany: jest.fn(),
     },
     memoryUsage: {
       createMany: jest.fn(),
@@ -16,7 +18,10 @@ function createMockPrisma() {
     decisionJudgment: { groupBy: jest.fn() },
     $queryRaw: jest.fn(),
     $executeRaw: jest.fn(),
-  } as unknown as PrismaService;
+    // 事务内直接复用同一组 mock，测试关注的是写入口径而不是事务本身
+    $transaction: jest.fn((callback: (tx: unknown) => unknown) => callback(prisma)),
+  };
+  return prisma as unknown as PrismaService;
 }
 
 function createMockEmbeddingService() {
@@ -391,5 +396,61 @@ describe('MemoryService', () => {
       facts: ['first_night', 'antidote_unused'],
     });
     expect(result.lessons.map((m) => m.id)).toEqual(['now']);
+  });
+
+  describe('人设与策略的读写', () => {
+    const AGENT_ID = '5b12e37c-62ca-491a-a46d-a649d08416fd';
+
+    it('label 缺省时用 Agent 当前的记忆集', async () => {
+      (prisma.agent.findUnique as jest.Mock).mockResolvedValue({ memoryLabel: '钱九' });
+      (prisma.memory.findMany as jest.Mock).mockResolvedValue([]);
+
+      await expect(service.readPersonaStrategy(AGENT_ID)).resolves.toEqual({
+        label: '钱九',
+        persona: [],
+        strategy: [],
+      });
+      expect((prisma.memory.findMany as jest.Mock).mock.calls[0][0].where).toMatchObject({
+        agentId: AGENT_ID,
+        label: '钱九',
+        type: { in: ['persona', 'strategy'] },
+      });
+    });
+
+    it('Agent 不存在时明确报错，不写进孤儿 label', async () => {
+      (prisma.agent.findUnique as jest.Mock).mockResolvedValue(null);
+      await expect(service.readPersonaStrategy(AGENT_ID)).rejects.toThrow('不存在');
+      await expect(
+        service.replacePersonaStrategy(AGENT_ID, undefined, { persona: [], strategy: [] }),
+      ).rejects.toThrow('不存在');
+    });
+
+    it('整批替换时归档旧条目、按分层写入新条目，且不生成 embedding', async () => {
+      (prisma.memory.findMany as jest.Mock).mockResolvedValue([]);
+
+      await service.replacePersonaStrategy(AGENT_ID, '钱九', {
+        persona: [{ title: '表达风格', content: '先听后说' }],
+        strategy: [{ title: '白天策略', content: '跟票不抢话' }],
+      });
+
+      expect((prisma.memory.updateMany as jest.Mock).mock.calls[0][0]).toMatchObject({
+        where: { agentId: AGENT_ID, label: '钱九', isActive: true },
+        data: { isActive: false },
+      });
+      const { data } = (prisma.memory.createMany as jest.Mock).mock.calls[0][0];
+      expect(data).toEqual([
+        expect.objectContaining({ type: 'persona', importance: 1, source: 'manual' }),
+        expect.objectContaining({ type: 'strategy', importance: 0.6, source: 'manual' }),
+      ]);
+      // 向量列不参与写入，留空即可满足表上的同 NULL 约束
+      expect(Object.keys(data[0])).not.toContain('embedding');
+    });
+
+    it('人设与策略都清空时只归档，不写空记录', async () => {
+      (prisma.memory.findMany as jest.Mock).mockResolvedValue([]);
+      await service.replacePersonaStrategy(AGENT_ID, '钱九', { persona: [], strategy: [] });
+      expect(prisma.memory.createMany).not.toHaveBeenCalled();
+      expect(prisma.memory.updateMany).toHaveBeenCalled();
+    });
   });
 });

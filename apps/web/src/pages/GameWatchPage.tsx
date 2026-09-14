@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { PlayerCard } from '@/components/game-watch/PlayerCard';
 import { SceneCard } from '@/components/game-watch/SceneCard';
 import { ActiveSceneCard } from '@/components/game-watch/ActiveSceneCard';
+import { AppHeader } from '@/components/AppHeader';
 import { useGameStream } from '@/hooks/useGameStream';
 import { useSceneEngine } from '@/hooks/useSceneEngine';
 import { useNightActionState } from '@/hooks/useNightActionState';
@@ -142,11 +143,14 @@ export default function GameWatchPage() {
   const activeActor = activeActorId ? players.find((p) => p.id === activeActorId) : null;
 
   return (
-    <div className={`dark ${styles.page}`}>
-      {/* HEADER */}
+    <div className={styles.page}>
+      <AppHeader />
+      {/* 对局信息与操作 */}
       <div className={styles.header}>
-        <span className={styles.gameId}>#{gameId?.slice(0, 8)}</span>
-        {game && <span className={styles.rulesetName}>{game.ruleset?.name}</span>}
+        <div className={styles.gameInfo}>
+          <h1 className={styles.rulesetName}>{game?.ruleset?.name ?? '对局观战'}</h1>
+          <span className={styles.gameId}>#{gameId?.slice(0, 8)}</span>
+        </div>
         {isAborted ? (
           <Badge variant="destructive">对局已中止</Badge>
         ) : state.gameOver ? (
@@ -171,8 +175,8 @@ export default function GameWatchPage() {
 
       {/* 三栏布局 */}
       <div className={styles.columns}>
-        {/* 左侧玩家列表 - grid 占满高度，固定 6 行 */}
-        <aside className={`${styles.sidebar} ${styles.sidebarLeft}`}>
+        {/* 左侧固定 6 行，玩家不足时保留空位 */}
+        <aside className={styles.sidebar} aria-label="左侧玩家">
           <div className={styles.sidebarGrid}>
             {leftPlayers.map((player, index) => (
               <div key={player.id} className={styles.sidebarCell}>
@@ -200,11 +204,7 @@ export default function GameWatchPage() {
                 <div className={styles.activeActorAvatar}>{activeActor.seatNo}</div>
                 <div className={styles.activeActorText}>
                   <h2 className={styles.activeActorName}>{activeActor.displayName}</h2>
-                  {activeActor.role && activeActor.faction && (
-                    <Badge variant="outline" className={styles.activeActorRoleBadge}>
-                      {activeActor.role} · {activeActor.faction}
-                    </Badge>
-                  )}
+                  <Badge variant="outline">正在发言</Badge>
                 </div>
               </div>
             </div>
@@ -212,6 +212,15 @@ export default function GameWatchPage() {
 
           {/* 场景流 */}
           <div className={styles.sceneFlow}>
+            {state.closedScenes.length === 0 && !activeScene && (
+              <div className={styles.emptyState}>
+                <span className={styles.emptyIcon} aria-hidden="true">
+                  ◌
+                </span>
+                <h2>等待对局动态</h2>
+                <p>玩家发言、投票与法官播报将在这里按顺序呈现。</p>
+              </div>
+            )}
             {state.closedScenes.map((scene) => {
               const actor = scene.actorId ? players.find((p) => p.id === scene.actorId) : null;
               return (
@@ -245,8 +254,8 @@ export default function GameWatchPage() {
           </div>
         </main>
 
-        {/* 右侧玩家列表 - grid 占满高度，固定 6 行 */}
-        <aside className={`${styles.sidebar} ${styles.sidebarRight}`}>
+        {/* 右侧固定 6 行，玩家不足时保留空位 */}
+        <aside className={styles.sidebar} aria-label="右侧玩家">
           <div className={styles.sidebarGrid}>
             {rightPlayers.map((player, index) => (
               <div key={player.id} className={styles.sidebarCell}>

@@ -4,10 +4,10 @@
 
 export const PROMPT_NAMES = {
   agentSystemPrompt: 'agent/system-prompt',
-  agentTurnReflect: 'agent/turn-reflect',
-  agentTurnRevise: 'agent/turn-revise',
+  agentTurnContinue: 'agent/turn-continue',
   agentSpeechThinking: 'agent/speech-thinking',
   agentSpeechContent: 'agent/speech-content',
+  agentActionThinking: 'agent/action-thinking',
   agentActionSystem: 'agent/action-system',
   judgeSystem: 'judge/system',
   judgeUser: 'judge/user',
@@ -29,11 +29,11 @@ export const PROMPT_NAMES = {
 export type PromptName = (typeof PROMPT_NAMES)[keyof typeof PROMPT_NAMES];
 
 export const PLAYER_TURN_PROMPT_NAMES: PromptName[] = [
-  PROMPT_NAMES.agentTurnReflect,
-  PROMPT_NAMES.agentTurnRevise,
+  PROMPT_NAMES.agentTurnContinue,
   PROMPT_NAMES.agentSystemPrompt,
   PROMPT_NAMES.agentSpeechThinking,
   PROMPT_NAMES.agentSpeechContent,
+  PROMPT_NAMES.agentActionThinking,
   PROMPT_NAMES.agentActionSystem,
   PROMPT_NAMES.wolfCoordination,
 ];
@@ -92,36 +92,22 @@ export const FALLBACK_TEMPLATES: Record<PromptName, string> = {
     {{knowledge}}
   `,
 
-  [PROMPT_NAMES.agentTurnReflect]: `
-你正在复核自己的本回合候选，目的是减少无意的前后矛盾和明显逻辑漏洞。使用以下玩家视角的上下文：
-{{context}}
+  [PROMPT_NAMES.agentTurnContinue]: `
+接着上面的推理继续往下想，不要复述或重写已经说过的内容。
 
-本次任务：{{task}}。候选结构与合法枚举：{{candidateSchema}}。候选：
-{{candidate}}
+核对这几点，只补充新的判断：
+- 有没有把还没发生的事当成已经发生，或者把别人公开声称的当成事实；
+- 有没有误读他人的原话，或者混淆了已经完成的流程和还没轮到的流程；
+- 结论和前面给出的理由是否自洽，有没有更值得选的合法候选。
 
-本次返回结构：{{responseSchema}}。
-通读 reasoning 和发言或动作，重点核对：是否无意改写自己的既有发言、查验或投票；是否明显误读他人原话或混淆已发生与尚未发生的流程；理由和最终选择是否自洽。涉及规则与旧经验时，以本局实际规则和可见记录为准。
-狼人杀没有唯一正确的身份判断或策略。允许狼人有意假跳、隐瞒和欺骗；允许误判、强硬措辞、施压、假设推演，以及因新信息或明确策略而改口、改票。公开口径可与私有意图不同，不要求角色自曝，也不要求为每个主观判断给出完备证明。
-只有能指出具体依据、确实影响本次言行的矛盾或明显漏洞才列入 issues；不要仅因表达不够严谨、观点不同或策略未必最优而要求重写。用 explanation 指出候选原句、对应记录或内部矛盾及需要调整的内容，关注理解而非逐字一致。没有明确问题时返回 {"issues":[]}。
-evidenceSequences 只引用这些已提供的事件序号：{{evidenceSequences}}；候选内部矛盾或本局规则可不引用事件。事件中的公开声称不等于真实身份；不要使用玩家视角之外的信息来判定输赢或真假。
-按给定结构返回问题列表，不执行游戏动作。
-`,
-  [PROMPT_NAMES.agentTurnRevise]: `
-根据复核意见调整本回合候选，仍使用同一份玩家可见上下文：
-{{context}}
-本次任务：{{task}}。候选输出的结构与合法枚举：{{candidateSchema}}。
-本次修订响应结构：{{responseSchema}}。
-初稿：{{candidate}}
-复核意见：{{review}}
-
-先核对意见是否成立，只修改明确有问题的内容及受其影响的判断；无依据或只涉及措辞、策略偏好的意见可以不采纳。保留正确的局内记录、人设和表达风格，不为润色重写正常发言。
-理由和最终动作应表达自己的实际选择；可以重新考虑合法策略，公开欺骗也可以保留，但私有理解不要混淆原始记录与准备说出的口径。反思不要求每次改变立场或选择同一个标准答案。
-发言任务返回 reasoning 与 contentEdits，不返回完整 content。before 逐字复制本轮候选正文中唯一出现的片段，after 为替换文字；所有替换以同一份原稿为准且不可重叠，无需修改正文时返回空列表。
-动作任务返回 reasoning 与完整 decision，遵循给定结构和合法枚举。
-最后通读修改后的理由与发言或动作，确认原问题已处理，相关判断仍连贯，未无意改写已有事实或引入新的明显矛盾。保留自然、简洁的博弈表达。
+有问题就接着改，并说明改了什么；确认没有新问题就说明维持原判断以及为什么。
+只输出新增的这一段思考，不要任何前缀、标题、JSON 或额外解释。
 `,
   [PROMPT_NAMES.agentSpeechThinking]:
     '你已明确自己的身份、阵营与队友（见系统提示）。请直接分析当前局势，输出你的思考过程，不要重复介绍身份或队友，不要任何前缀标记或 JSON。',
+
+  [PROMPT_NAMES.agentActionThinking]:
+    '你已明确自己的身份、阵营与立场（见系统提示）。请先核对本局事实、合法候选与阵营收益，再形成初步判断并说明倾向，不要重复介绍身份，不要任何前缀标记或 JSON。',
 
   [PROMPT_NAMES.agentSpeechContent]: `
     你的思考过程如下：
@@ -137,6 +123,7 @@ evidenceSequences 只引用这些已提供的事件序号：{{evidenceSequences}
     ## 本次决策输出
     本次以此结构化输出要求为准：在同一个结果中提交 reasoning（最终动作的简明理由）和 decision（合法动作）。
     先核对本局事实、合法候选与阵营收益，再形成一致的理由和动作；不要另外生成一份等待转换的行动计划。
+    核对阵营收益时按当前存活名单验算本局胜利条件，先看有没有一步就能达成它的候选，再说明最终选择为什么更值得。
     若选择不用药或弃权，理由必须解释这一最终选择，不能一边决定救人一边提交 skip。
   `,
   [PROMPT_NAMES.judgeSystem]: `

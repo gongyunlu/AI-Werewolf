@@ -68,14 +68,17 @@ describe('标准六人 mock 完整对局', () => {
     jest.useRealTimers();
   });
 
-  it('启用反思后完整对局仍只提交最终动作，快照包含质量记录', async () => {
+  it('启用反思后完整对局正常终局，快照记录每轮的思考轮次', async () => {
     game = await createMockGame('villager', { TURN_REFLECTION_MAX_ROUNDS: 3 });
     await assertFinished('villager');
     const snapshots = [...game.store.snapshots.values()];
     expect(snapshots.length).toBeGreaterThan(0);
-    expect(snapshots.some((s: any) => (s.snapshot ?? s).reflection?.status === 'passed')).toBe(
-      true,
-    );
+    expect(
+      snapshots.some((s: any) => {
+        const replay = s.snapshot ?? s;
+        return replay.reflectionMaxRounds === 3 && replay.thinkingRounds?.length === 4;
+      }),
+    ).toBe(true);
   });
 
   async function assertFinished(winner: string) {
@@ -132,6 +135,16 @@ describe('标准六人 mock 完整对局', () => {
     expect(game!.execution).toHaveBeenCalledTimes(1);
     expect(game!.store.events).toHaveLength(eventCount);
   }
+
+  it('密钥鉴权失败时直接中止对局，不用替代行动继续', async () => {
+    game = await createMockGame();
+    game.model.beforeRequest = () => {
+      throw Object.assign(new Error('密钥已失效'), { status: 401 });
+    };
+
+    await assertAborted();
+    expect(game.model.requests).toHaveLength(1);
+  });
 
   it('01 好人获胜：首夜救人、白天放逐、次夜毒杀，正常终局', async () => {
     game = await createMockGame();

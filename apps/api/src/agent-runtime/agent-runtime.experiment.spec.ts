@@ -59,7 +59,6 @@ it.each(['on', 'off'])(
         summary,
         {},
         {},
-        {},
       ] as unknown as Parameters<typeof createAgentRuntime>),
     );
     const runtime = service as unknown as {

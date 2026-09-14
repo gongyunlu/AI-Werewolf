@@ -122,6 +122,9 @@ export class MockGameStore {
     },
     ruleset: { findUnique: jest.fn(async () => structuredClone(this.ruleset)) },
     decisionContext: {
+      findMany: jest.fn(async (query: Query) =>
+        selectRows([...this.snapshots.values()] as Array<Record<string, unknown>>, query),
+      ),
       upsert: jest.fn(
         async ({ where, create }: { where: { eventId: string }; create: unknown }) => {
           if (!this.snapshots.has(where.eventId))
@@ -152,6 +155,11 @@ export class MockGameStore {
     get: jest.fn(async (key: string) => this.promptValues.get(key) ?? null),
     incr: jest.fn(async (key: string) => {
       const next = (this.counters.get(key) ?? 0) + 1;
+      this.counters.set(key, next);
+      return next;
+    }),
+    incrby: jest.fn(async (key: string, amount: number) => {
+      const next = (this.counters.get(key) ?? 0) + amount;
       this.counters.set(key, next);
       return next;
     }),

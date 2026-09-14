@@ -36,7 +36,6 @@ import type { Env } from '../src/config/env.validation';
 import type { SkillLoaderService } from '../src/skills/skill-loader.service';
 import type { SpeechSummarizerService } from '../src/speech-summarizer/speech-summarizer.service';
 import type { LangfuseService } from '../src/observability/langfuse.service';
-import type { ChatHistoryService } from '../src/agent-runtime/chat-history.service';
 import type { KnowledgeService } from '../src/knowledge/knowledge.service';
 
 function vector(axis = 0): number[] {
@@ -786,7 +785,6 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
       } as unknown as SpeechSummarizerService,
       {} as LangfuseService,
       new PromptService(runtimeConfig),
-      {} as ChatHistoryService,
     );
 
     const context = await runtime.prepareContextPublic({

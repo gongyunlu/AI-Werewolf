@@ -26,6 +26,9 @@ type StoredMessageJson = Record<string, unknown> & { type: string };
 
 /**
  * 会话历史仓储。表结构由 Prisma migration 管理，运行时只执行 DML。
+ *
+ * 线上玩家回合的历史已改由授权 Event 投影提供，不再读写本表；这里保留读写能力，
+ * 用于读取旧会话记录和受控重放，需要时由调用方显式构造。
  */
 @Injectable()
 export class ChatHistoryService implements OnModuleInit, OnModuleDestroy {

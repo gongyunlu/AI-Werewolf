@@ -1,21 +1,14 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SystemMessage, HumanMessage, type BaseMessage } from '@langchain/core/messages';
+import { SystemMessage, HumanMessage, AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { Env } from '../config/env.validation';
 import type { FrozenPrompts } from '../evaluation/experiment-snapshot';
 import { LangfuseService } from '../observability/langfuse.service';
 import { PromptService, type RenderedPrompt } from '../observability/prompt.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
-import { ModelCallService } from '../llm/model-call.service';
-import { canonicalJson } from '../llm/canonical-json';
+import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
 import { throwIfAborted } from '../llm/abort.utils';
-import {
-  reflectTurn,
-  TurnReviewSchema,
-  SpeechRevisionSchema,
-  applySpeechRevision,
-} from './turn-reflection';
 
 /** 只包含已授权输入与追踪标识，生成器不持有数据库玩家对象或历史存储。 */
 export interface TurnGenerationContext {
@@ -31,12 +24,19 @@ export interface TurnGenerationContext {
   prompts?: FrozenPrompts;
   replay?: Record<string, unknown>;
   reflectionMaxRounds?: number;
+  /** 该玩家在本局固定使用的接入端点；缺省时用环境变量默认接入。 */
+  access?: ModelAccess;
 }
 
-/** 在线与诊断共用的候选生成和有界反思；结果是否提交由应用层决定。 */
+/** 单次模型调用要带上的一局标识，不含随轮次变化的字段。 */
+type TraceParams = Omit<
+  Parameters<LangfuseService['trace']>[0],
+  'runName' | 'promptName' | 'promptVersion'
+>;
+
+/** 在线与诊断共用的候选生成；结果是否提交由应用层决定。 */
 @Injectable()
 export class PlayerTurnService {
-  private readonly logger = new Logger(PlayerTurnService.name);
   constructor(
     private readonly configService: ConfigService<Env, true>,
     private readonly modelCalls: ModelCallService,
@@ -46,22 +46,20 @@ export class PlayerTurnService {
 
   async speech(
     context: TurnGenerationContext,
-    history: BaseMessage[],
     options: {
       signal?: AbortSignal;
       onThinking?: (token: string) => void;
       onContent?: (token: string) => void;
+      /** 覆盖本局的反思轮次；狼队夜间讨论自身的迭代已经足够，不需要再叠加。 */
+      reflectionMaxRounds?: number;
     },
   ) {
     const { signal, onThinking, onContent } = options;
-    const reviewing =
-      (context.reflectionMaxRounds ?? this.configService.get('TURN_REFLECTION_MAX_ROUNDS') ?? 3) >
-      0;
     throwIfAborted(signal);
     const startTime = Date.now();
     const modelName = context.player.modelName;
 
-    const traceParams = {
+    const traceParams: TraceParams = {
       gameId: context.player.gameId,
       playerId: context.player.id,
       modelName,
@@ -75,26 +73,17 @@ export class PlayerTurnService {
       undefined,
       context.prompts,
     );
-    const thinkingTrace = this.langfuse.trace({
+    const { thinkingRounds } = await this.generateThinking({
+      context,
+      systemPrompt: context.systemPrompt,
+      firstPrompt: thinkingPrompt,
       runName: 'speech-thinking',
-      ...traceParams,
-      promptName: thinkingPrompt.name,
-      promptVersion: thinkingPrompt.version,
-    });
-    const thinkingMessages = [
-      new SystemMessage(context.systemPrompt),
-      ...history,
-      new HumanMessage(thinkingPrompt.text),
-    ];
-
-    // 阶段1：流式输出思考
-    const thinking = await this.modelCalls.streamText(
-      modelName,
-      thinkingMessages,
+      traceParams,
+      rounds: this.resolveReflectionRounds(context, options.reflectionMaxRounds),
       signal,
-      reviewing ? undefined : onThinking,
-      thinkingTrace,
-    );
+      onThinking,
+    });
+    const thinking = thinkingRounds.join('\n\n');
 
     throwIfAborted(signal);
     const contentStartTime = Date.now();
@@ -111,37 +100,21 @@ export class PlayerTurnService {
       promptName: contentPrompt.name,
       promptVersion: contentPrompt.version,
     });
-    const contentMessages = [
-      new SystemMessage(context.systemPrompt),
-      new HumanMessage(contentPrompt.text),
-    ];
 
-    // 阶段2：流式输出发言正文
+    // 终稿只有这一次调用，产出的正文即最终发言，因此可以一路逐 token 外发
     const content = await this.modelCalls.streamText(
       modelName,
-      contentMessages,
+      [new SystemMessage(context.systemPrompt), new HumanMessage(contentPrompt.text)],
       signal,
-      reviewing ? undefined : onContent,
+      onContent,
       contentTrace,
+      context.access,
     );
 
-    const final = await this.reflectCandidate(
-      context,
-      { reasoning: thinking, content },
-      z.object({ reasoning: z.string().min(1), content: z.string().min(1) }),
-      'speech',
-      signal,
-      history,
-    );
-    throwIfAborted(signal);
-    if (reviewing) {
-      onThinking?.(final.reasoning);
-      onContent?.(final.content);
-    }
     const contentEndTime = Date.now();
     return {
-      thinking: final.reasoning,
-      content: final.content,
+      thinking,
+      content,
       thinkingDurationMs: contentStartTime - startTime,
       contentDurationMs: contentEndTime - contentStartTime,
     };
@@ -150,49 +123,65 @@ export class PlayerTurnService {
   async decide<T>(
     context: TurnGenerationContext,
     zodSchema: z.ZodType,
-    history: BaseMessage[],
     signal?: AbortSignal,
-    frozenOutputSchema?: Record<string, unknown>,
+    options: {
+      /** 覆盖本局的反思轮次；狼队夜间自身的迭代已经足够，不需要再叠加。 */
+      reflectionMaxRounds?: number;
+      /** 重放历史回合时使用的冻结输出契约。 */
+      frozenOutputSchema?: Record<string, unknown>;
+    } = {},
   ): Promise<{ reasoning: string; decision: T }> {
     throwIfAborted(signal);
     const outputSchema = z.object({
       reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
       decision: zodSchema,
     });
-    const wireSchema = frozenOutputSchema ?? z.toJSONSchema(outputSchema);
+    const wireSchema = options.frozenOutputSchema ?? z.toJSONSchema(outputSchema);
     if (context.replay)
       Object.assign(context.replay, {
         schema: z.toJSONSchema(zodSchema),
         outputSchema: wireSchema,
         decisionMode: 'joint',
-        reasoningHistory: history.map((m) => ({ type: m.getType(), content: m.content })),
       });
+    const traceParams: TraceParams = {
+      gameId: context.player.gameId,
+      playerId: context.player.id,
+      modelName: context.player.modelName,
+      scenario: context.scenario,
+      seatNo: context.player.seatNo,
+      role: context.player.role,
+    };
     const systemPrompt = await this.promptService.render(
       PROMPT_NAMES.agentActionSystem,
       { systemPrompt: context.systemPrompt },
       context.prompts,
     );
-    const baseMessages = [
-      new SystemMessage(systemPrompt.text),
-      ...history,
-      new HumanMessage('请提交本次的 reasoning 和 decision，理由与最终动作必须一致。'),
-    ];
-    const draft = await this.invokeTurnStructured(
+    const thinkingPrompt = await this.promptService.render(
+      PROMPT_NAMES.agentActionThinking,
+      undefined,
+      context.prompts,
+    );
+    const { history } = await this.generateThinking({
+      context,
+      systemPrompt: systemPrompt.text,
+      firstPrompt: thinkingPrompt,
+      runName: 'decision-thinking',
+      traceParams,
+      rounds: this.resolveReflectionRounds(context, options.reflectionMaxRounds),
+      signal,
+    });
+
+    // 理由与动作一次成型，思考保留在会话历史里供本轮调用复用
+    const result = await this.invokeTurnStructured(
       context,
       outputSchema,
-      baseMessages,
+      [
+        ...history,
+        new HumanMessage('请提交本次的 reasoning 和 decision，理由与最终动作必须一致。'),
+      ],
       systemPrompt,
       'decision',
       signal,
-      wireSchema,
-    );
-    const result = await this.reflectCandidate(
-      context,
-      draft,
-      outputSchema,
-      'decision',
-      signal,
-      history,
       wireSchema,
     );
 
@@ -203,6 +192,83 @@ export class PlayerTurnService {
       });
 
     return { reasoning: result.reasoning, decision: result.decision as T };
+  }
+
+  /**
+   * 思考阶段：首轮形成初判，之后每一轮接着上一轮继续审视并纠正。
+   *
+   * 每轮都通过 `onThinking` 逐 token 外发。已经发出去的内容无法收回，所以后续轮次只能
+   * 续写，提示词也明确要求只输出新增的判断，不重写前面的推理。
+   *
+   * 返回完整的会话历史，供需要复用思考的调用方接着生成终稿。
+   */
+  private async generateThinking(options: {
+    context: TurnGenerationContext;
+    systemPrompt: string;
+    firstPrompt: RenderedPrompt;
+    runName: string;
+    traceParams: TraceParams;
+    rounds: number;
+    signal?: AbortSignal;
+    onThinking?: (token: string) => void;
+  }): Promise<{ history: BaseMessage[]; thinkingRounds: string[] }> {
+    const { context, firstPrompt, signal, onThinking } = options;
+    const continuation =
+      options.rounds > 0
+        ? await this.promptService.render(
+            PROMPT_NAMES.agentTurnContinue,
+            undefined,
+            context.prompts,
+          )
+        : undefined;
+    const history: BaseMessage[] = [
+      new SystemMessage(options.systemPrompt),
+      new HumanMessage(firstPrompt.text),
+    ];
+    const thinkingRounds: string[] = [];
+
+    for (let round = 0; round <= options.rounds; round++) {
+      throwIfAborted(signal);
+      const prompt = round === 0 ? firstPrompt : continuation!;
+      if (round > 0)
+        history.push(
+          new AIMessage(thinkingRounds[round - 1]),
+          new HumanMessage(continuation!.text),
+        );
+      thinkingRounds.push(
+        await this.modelCalls.streamText(
+          context.player.modelName,
+          history,
+          signal,
+          onThinking,
+          this.langfuse.trace({
+            runName: `${options.runName}-${round + 1}`,
+            ...options.traceParams,
+            promptName: prompt.name,
+            promptVersion: prompt.version,
+          }),
+          context.access,
+        ),
+      );
+    }
+
+    history.push(new AIMessage(thinkingRounds.at(-1)!));
+    if (context.replay) {
+      context.replay.reflectionMaxRounds = options.rounds;
+      context.replay.thinkingRounds = thinkingRounds;
+    }
+    return { history, thinkingRounds };
+  }
+
+  private resolveReflectionRounds(
+    context: TurnGenerationContext,
+    override: number | undefined,
+  ): number {
+    return (
+      override ??
+      context.reflectionMaxRounds ??
+      this.configService.get('TURN_REFLECTION_MAX_ROUNDS')
+    );
   }
 
   private invokeTurnStructured<S extends z.ZodType>(
@@ -232,102 +298,7 @@ export class PlayerTurnService {
         }),
       signal,
       wireSchema,
+      context.access,
     );
-  }
-
-  private async reflectCandidate<S extends z.ZodType>(
-    context: TurnGenerationContext,
-    initial: z.infer<S>,
-    schema: S,
-    task: 'speech' | 'decision',
-    signal?: AbortSignal,
-    history: BaseMessage[] = [],
-    candidateSchema: Record<string, unknown> = z.toJSONSchema(schema),
-  ): Promise<z.infer<S>> {
-    const maxRounds =
-      context.reflectionMaxRounds ?? this.configService.get('TURN_REFLECTION_MAX_ROUNDS') ?? 3;
-    if (context.replay) context.replay.reflectionMaxRounds = maxRounds;
-    const assistantHistory = history.map((message) => ({
-      type: message.getType(),
-      content: message.content,
-    }));
-    const evidence = (context.replay?.evidence ?? []) as Array<{ sequence: number }>;
-    const sequences = evidence.map((e) => e.sequence);
-    const call = async <R extends z.ZodType>(
-      name: typeof PROMPT_NAMES.agentTurnReflect | typeof PROMPT_NAMES.agentTurnRevise,
-      output: R,
-      candidate: z.infer<S>,
-      round: number,
-      review?: unknown,
-    ): Promise<z.infer<R>> => {
-      const responseSchema =
-        task === 'decision' && name === PROMPT_NAMES.agentTurnRevise
-          ? candidateSchema
-          : z.toJSONSchema(output);
-      const prompt = await this.promptService.render(
-        name,
-        {
-          context: context.systemPrompt + '\n' + canonicalJson({ assistantHistory }),
-          task,
-          candidateSchema: canonicalJson(candidateSchema),
-          responseSchema: canonicalJson(responseSchema),
-          candidate: canonicalJson(candidate),
-          review: canonicalJson(review ?? {}),
-          evidenceSequences: JSON.stringify(sequences),
-        },
-        context.prompts,
-      );
-      return this.invokeTurnStructured(
-        context,
-        output,
-        [new SystemMessage(prompt.text), new HumanMessage('请按指定结构返回完整结果。')],
-        prompt,
-        name.split('/')[1] + '-' + round,
-        signal,
-        responseSchema,
-      );
-    };
-    const audit = await reflectTurn({
-      initial,
-      maxRounds,
-      signal,
-      evidenceSequences: new Set(sequences),
-      review: (candidate, round) =>
-        call(PROMPT_NAMES.agentTurnReflect, TurnReviewSchema, candidate, round),
-      revise: async (candidate, review, round) => {
-        if (task === 'decision')
-          return call(PROMPT_NAMES.agentTurnRevise, schema, candidate, round, review);
-        const speech = candidate as { reasoning: string; content: string };
-        const revisionSchema = SpeechRevisionSchema.superRefine((revision, ctx) => {
-          try {
-            applySpeechRevision(speech, revision);
-          } catch (error) {
-            ctx.addIssue({
-              code: 'custom',
-              message: (error as Error).message,
-              path: ['contentEdits'],
-            });
-          }
-        });
-        const revision = await call(
-          PROMPT_NAMES.agentTurnRevise,
-          revisionSchema,
-          candidate,
-          round,
-          review,
-        );
-        return schema.parse(applySpeechRevision(speech, revision));
-      },
-    });
-    if (context.replay) context.replay.reflection = { ...audit, assistantHistory };
-    if (audit.status !== 'passed' && audit.status !== 'disabled') {
-      this.logger.warn({
-        message: '玩家反思仍有未解决的质量问题，保留最终合法候选',
-        gameId: context.player.gameId,
-        playerId: context.player.id,
-        status: audit.status,
-      });
-    }
-    return audit.final;
   }
 }

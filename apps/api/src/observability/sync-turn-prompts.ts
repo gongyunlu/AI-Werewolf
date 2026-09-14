@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { Langfuse } from 'langfuse-langchain';
 import {
   FALLBACK_TEMPLATES,
-  PROMPT_NAMES,
+  PLAYER_TURN_PROMPT_NAMES,
   REQUIRED_PROMPT_VARIABLES,
   extractPromptVariables,
 } from './prompt-templates';
@@ -13,11 +13,8 @@ import {
 const root = resolve(__dirname, '../../../..');
 loadEnv({ path: resolve(root, '.env.local'), quiet: true });
 loadEnv({ path: resolve(root, '.env'), quiet: true });
-const targets = [
-  PROMPT_NAMES.agentSystemPrompt,
-  PROMPT_NAMES.agentTurnReflect,
-  PROMPT_NAMES.agentTurnRevise,
-];
+// 玩家回合提示词全部同步：线上存在 production 版本时本地模板会被覆盖，漏掉任何一个都会让改动失效
+const targets = PLAYER_TURN_PROMPT_NAMES;
 function print(value: unknown) {
   process.stdout.write(JSON.stringify(value) + '\n');
 }

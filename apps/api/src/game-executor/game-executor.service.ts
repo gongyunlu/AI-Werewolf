@@ -2,10 +2,8 @@ import { ConflictException, Injectable, Logger, Optional } from '@nestjs/common'
 import {
   ExecutionOwnershipError,
   GameRecoveryService,
-  type RecoveryManifest,
 } from '../game-recovery/game-recovery.service';
 import { decodeRecoveryValue } from '../game-recovery/recovery-value';
-import { recoveryFingerprint } from '../game-recovery/recovery-manifest';
 import { PLAYER_TURN_PROMPT_NAMES, PROMPT_NAMES } from '../observability/prompt-templates';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
@@ -108,7 +106,6 @@ export class GameExecutorService {
           initialState,
           {
             version: 1,
-            fingerprint: recoveryFingerprint(this.configService, game.ruleset.definition),
             prompts: await this.promptService.captureGameSnapshot(gameId, [
               ...PLAYER_TURN_PROMPT_NAMES,
               PROMPT_NAMES.summarizerGlobalSummary,
@@ -122,9 +119,6 @@ export class GameExecutorService {
     if (execution) {
       if (generation !== undefined && execution.generation !== generation)
         throw new ExecutionOwnershipError();
-      const manifest = decodeRecoveryValue<RecoveryManifest>(execution.manifest);
-      if (manifest.fingerprint !== recoveryFingerprint(this.configService, game.ruleset.definition))
-        throw new ConflictException('执行记录与当前运行版本不一致');
       initialState = decodeRecoveryValue<GameGraphState>(execution.initialState);
     }
 
@@ -172,16 +166,6 @@ export class GameExecutorService {
     } finally {
       this.abortControllers.delete(gameId);
     }
-  }
-
-  async recoveryFingerprintForGame(gameId: string): Promise<string> {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      include: { ruleset: true },
-    });
-    if (!game || game.rulesetId !== 'standard6p' || game.experiment)
-      throw new ConflictException('当前恢复入口仅支持普通标准六人局');
-    return recoveryFingerprint(this.configService, game.ruleset.definition);
   }
 
   /** 为已经 FINISHED 的对局执行幂等结算并投递分析，供正常结束与队列重试共用。 */

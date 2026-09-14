@@ -38,3 +38,30 @@ it.each(['normal', 'ab'] as const)('%s 入口使用所选配置调用对应创�
   });
   expect(mode === 'ab' ? api.createGame : api.startAbGames).not.toHaveBeenCalled();
 });
+
+it('按标签筛选只保留该标签的 Agent，已选中的不因筛选丢失', async () => {
+  api.getAgents.mockResolvedValue([
+    { id: 'a', name: '甲', defaultModelName: 'model', isActive: true, tag: '火山方舟' },
+    { id: 'b', name: '乙', defaultModelName: 'model', isActive: true, tag: 'DS官方' },
+  ]);
+  const onCreated = vi.fn();
+  render(<CreateGameDialog onCreated={onCreated} />);
+  fireEvent.click(screen.getByRole('button', { name: '创建对局' }));
+
+  // 先选中被筛掉的那个，再切到只显示另一个的标签
+  const boxes = await screen.findAllByRole('checkbox');
+  fireEvent.click(boxes[0]);
+  fireEvent.change(screen.getByLabelText('标签'), { target: { value: 'DS官方' } });
+
+  expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+  expect(screen.getByText('乙')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(screen.getByRole('button', { name: '创建对局' }));
+  await waitFor(() =>
+    expect(api.createGame).toHaveBeenCalledWith({
+      rulesetId: 'rules',
+      agentIds: ['a', 'b'],
+    }),
+  );
+});

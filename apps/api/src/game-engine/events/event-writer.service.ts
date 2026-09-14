@@ -333,6 +333,7 @@ export class EventWriterService {
     voterSeatNo: number;
     targetSeatNo: number;
     voteRound?: number;
+    thinking?: string;
   }): Promise<Event> {
     const { gameId, day, actorId, voterSeatNo, targetSeatNo } = options;
 
@@ -347,6 +348,7 @@ export class EventWriterService {
         voteRound: options.voteRound ?? 0,
         voterSeatNo,
         targetSeatNo,
+        thinking: options.thinking,
       },
     });
 
@@ -493,6 +495,42 @@ export class EventWriterService {
   }
 
   /**
+   * 原子写入一轮普通投票的全部事件。
+   *
+   * 同一批投票要么全部落库，要么全部不落库；批次内不产生可观察的中间状态。
+   * 目前只有普通投票使用；PK 与狼队投票仍是逐票提交，尚未接入。
+   */
+  async writeVoteBatch(options: {
+    gameId: string;
+    day: number;
+    votes: Array<{
+      actorId: string;
+      voterSeatNo: number;
+      targetSeatNo: number;
+      voteRound?: number;
+      thinking?: string;
+    }>;
+  }): Promise<Event[]> {
+    return this.createEventBatch(
+      options.gameId,
+      options.votes.map((vote) => ({
+        day: options.day,
+        phase: PHASES.VOTE,
+        actionType: ACTION_TYPES.VOTE,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: vote.actorId,
+        targetIds: [],
+        content: {
+          voteRound: vote.voteRound ?? 0,
+          voterSeatNo: vote.voterSeatNo,
+          targetSeatNo: vote.targetSeatNo,
+          thinking: vote.thinking,
+        },
+      })),
+    );
+  }
+
+  /**
    * 原子持久化游戏结束事件与 FINISHED 状态。
    *
    * 两项终局事实必须在同一事务提交：既不能出现 FINISHED 却缺结束事件，也不能留下
@@ -583,22 +621,27 @@ export class EventWriterService {
     }
   }
 
-  /** 法官播报事件（公开） */
+  /** 法官播报事件（公开）；可与该播报宣告的状态变更同事务提交。 */
   async writeJudgeEvent(params: {
     gameId: string;
     day: number;
     content: string;
     metadata?: Record<string, unknown>;
+    updateState?: (tx: Prisma.TransactionClient) => Promise<void>;
   }): Promise<Event> {
-    return this.createEventWithSequence(params.gameId, {
-      day: params.day,
-      phase: PHASES.JUDGE,
-      actionType: ACTION_TYPES.JUDGE_ANNOUNCE,
-      visibility: VISIBILITY_TYPES.PUBLIC,
-      actorId: null,
-      targetIds: [],
-      content: { content: params.content, ...params.metadata } as Prisma.InputJsonValue,
-    });
+    return this.createEventWithSequence(
+      params.gameId,
+      {
+        day: params.day,
+        phase: PHASES.JUDGE,
+        actionType: ACTION_TYPES.JUDGE_ANNOUNCE,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { content: params.content, ...params.metadata } as Prisma.InputJsonValue,
+      },
+      params.updateState,
+    );
   }
 
   /** 夜间法官引导事件 */
@@ -648,6 +691,53 @@ export class EventWriterService {
     // 使用 SET NX 原子地初始化计数器（仅当 key 不存在时设置）
     // 避免并发初始化覆盖问题
     await this.redis.set(key, maxSequence, 'NX');
+  }
+
+  /**
+   * 原子分配整段 sequence 并写入一批事件。
+   *
+   * 与单项写入共享同一套序号来源与冲突兜底，区别只在于整批共用一个事务。
+   */
+  private async createEventBatch(
+    gameId: string,
+    drafts: Array<Omit<Prisma.EventUncheckedCreateInput, 'gameId' | 'sequence'>>,
+  ): Promise<Event[]> {
+    if (drafts.length === 0) return [];
+    // 事务内顺序写：同一连接本来不并行，串行还能让失败原因指向具体那一条。
+    const write = async (tx: Prisma.TransactionClient, first: number) => {
+      const events: Event[] = [];
+      for (const [index, data] of drafts.entries())
+        events.push(await tx.event.create({ data: { ...data, gameId, sequence: first + index } }));
+      return events;
+    };
+    if (this.recovery?.current) {
+      return this.recovery.effect(
+        `event-batch/${drafts[0].actionType}/${drafts[0].actorId ?? 'system'}`,
+        async (tx) => {
+          const previous = await tx.event.findFirst({
+            where: { gameId },
+            orderBy: { sequence: 'desc' },
+            select: { sequence: true },
+          });
+          return write(tx, (previous?.sequence ?? 0) + 1);
+        },
+      );
+    }
+    const key = `game:${gameId}:event_seq`;
+    const last = await this.redis.incrby(key, drafts.length);
+    try {
+      return await this.prisma.$transaction((tx) => write(tx, last - drafts.length + 1));
+    } catch (error) {
+      if (!isUniqueConstraintViolation(error)) throw error;
+      const previous = await this.prisma.event.findFirst({
+        where: { gameId },
+        orderBy: { sequence: 'desc' },
+        select: { sequence: true },
+      });
+      await this.redis.set(key, previous?.sequence || 0);
+      const retryLast = await this.redis.incrby(key, drafts.length);
+      return this.prisma.$transaction((tx) => write(tx, retryLast - drafts.length + 1));
+    }
   }
 
   /**

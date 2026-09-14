@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
-import { resolveStructuredOutputMethod } from '../observability/structured-output-method';
+import { resolveModelCapability } from '../llm/model-capability';
 import { RoleSchema } from '@ai-werewolf/shared';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
       timeout: 300_000,
       maxRetries: 0,
     }).withStructuredOutput(z.toJSONSchema(TriggerTagSchema), {
-      method: resolveStructuredOutputMethod(modelName),
+      method: resolveModelCapability(modelName).protocol,
     });
 
     let done = 0;

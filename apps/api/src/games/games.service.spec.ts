@@ -4,7 +4,10 @@ import { GamesService } from './games.service';
 
 function createService() {
   const prisma = {
+    ruleset: { findUnique: jest.fn() },
+    agent: { findMany: jest.fn() },
     game: {
+      create: jest.fn(),
       findUnique: jest.fn(),
       findUniqueOrThrow: jest.fn(),
       updateMany: jest.fn(),
@@ -21,7 +24,12 @@ function createService() {
   };
 
   return {
-    service: new GamesService(prisma as never, gameExecutor as never, broadcaster as never),
+    service: new GamesService(
+      prisma as never,
+      gameExecutor as never,
+      broadcaster as never,
+      { get: () => 'https://mock.invalid' } as never,
+    ),
     prisma,
     gameExecutor,
     broadcaster,
@@ -29,6 +37,49 @@ function createService() {
 }
 
 describe('GamesService', () => {
+  it('创建对局时冻结模型、实际端点与凭证来源，不保存密钥', async () => {
+    const { service, prisma } = createService();
+    prisma.ruleset.findUnique.mockResolvedValue({ id: 'standard6p', playerCount: 2 });
+    prisma.agent.findMany.mockResolvedValue([
+      {
+        id: 'default-agent',
+        name: '默认玩家',
+        isActive: true,
+        defaultModelName: 'default-model',
+        baseUrl: null,
+      },
+      {
+        id: 'custom-agent',
+        name: '独立玩家',
+        isActive: true,
+        defaultModelName: 'custom-model',
+        baseUrl: 'https://custom.invalid',
+        apiKeyCiphertext: '密文',
+      },
+    ]);
+
+    await service.createGame({
+      rulesetId: 'standard6p',
+      agentIds: ['default-agent', 'custom-agent'],
+    });
+
+    const players = prisma.game.create.mock.calls[0][0].data.players.create;
+    expect(players[0]).toMatchObject({
+      modelName: 'default-model',
+      accessBaseUrl: 'https://mock.invalid',
+      accessUsesDefault: true,
+    });
+    expect(players[1]).toMatchObject({
+      modelName: 'custom-model',
+      accessBaseUrl: 'https://custom.invalid',
+      accessUsesDefault: false,
+    });
+    for (const player of players) {
+      expect(player).not.toHaveProperty('apiKey');
+      expect(player).not.toHaveProperty('apiKeyCiphertext');
+    }
+  });
+
   it('使用条件状态更新抢占启动权', async () => {
     const { service, prisma, broadcaster } = createService();
     const initialGame = { id: 'game-1', status: GAME_STATUSES.INITIALIZED };

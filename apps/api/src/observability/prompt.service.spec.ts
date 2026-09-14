@@ -25,10 +25,10 @@ function createConfig(enabled = true): ConfigService<Env, true> {
 }
 
 it('本地发布副本不满足新契约时使用当前模板，不沿用旧版本号', async () => {
-  const name = PROMPT_NAMES.agentTurnReflect;
+  const name = PROMPT_NAMES.agentSystemPrompt;
   const released = turnRelease.prompts[name];
   const original = released.text;
-  released.text = '旧副本只有 {{candidate}}';
+  released.text = '旧副本只有 {{turnContext}}';
   try {
     const result = await new PromptService(createConfig(false)).render(name);
     expect(result).toMatchObject({
@@ -109,23 +109,25 @@ describe('PromptService', () => {
     expect(compile).not.toHaveBeenCalled();
   });
 
-  it('LangFuse 拉取失败时沿用本地 fallback', async () => {
+  it('LangFuse 拉取失败时沿用本地发布副本', async () => {
     jest.spyOn(Langfuse.prototype, 'getPrompt').mockRejectedValueOnce(new Error('offline'));
     const service = new PromptService(createConfig());
 
     const result = await service.render(PROMPT_NAMES.agentSpeechContent, { thinking: '投给3号' });
 
-    expect(result.version).toBeNull();
+    expect(result.version).toBe(turnRelease.prompts[PROMPT_NAMES.agentSpeechContent].version);
+    expect(result.source).toBe('local_release');
     expect(result.text).toContain('投给3号');
   });
 
-  it('未配置 LangFuse 时直接使用本地 fallback', async () => {
+  it('未配置 LangFuse 时直接使用本地发布副本', async () => {
     const getPrompt = jest.spyOn(Langfuse.prototype, 'getPrompt');
     const service = new PromptService(createConfig(false));
 
     const result = await service.render(PROMPT_NAMES.wolfCoordination, { discussion: '刀3号' });
 
-    expect(result.version).toBeNull();
+    expect(result.version).toBe(turnRelease.prompts[PROMPT_NAMES.wolfCoordination].version);
+    expect(result.source).toBe('local_release');
     expect(result.text).toContain('刀3号');
     expect(getPrompt).not.toHaveBeenCalled();
   });

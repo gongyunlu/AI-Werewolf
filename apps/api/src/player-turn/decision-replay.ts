@@ -1,4 +1,4 @@
-import { AIMessage, HumanMessage, type BaseMessage } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { FrozenPrompts } from '../evaluation/experiment-snapshot';
 import type { PlayerTurnService, TurnGenerationContext } from './player-turn.service';
@@ -64,11 +64,10 @@ export async function replayDecision(
     snapshot.reflectionMaxRounds! > 10
   )
     throw new Error('快照缺少明确的反思轮次；历史诊断需显式提供轮次并标记配置来源');
-  const history = (snapshot.reasoningHistory ?? []).map((message) => {
-    if (message.type === 'ai') return new AIMessage(message.content);
-    if (message.type === 'human') return new HumanMessage(message.content);
-    throw new Error(`快照包含不支持的历史消息角色: ${message.type}`);
-  });
+  if (snapshot.reasoningHistory?.length)
+    throw new Error('此快照的输入包含已被替代的会话历史，不能按当前回合协议重放');
+  // TODO: 快照里没有该局玩家用的接入端点，重放一律落回环境变量默认接入；原局若跑在 Agent
+  // 自带端点上，重放与线上就不同源。补齐要让快照存下端点引用，再由调用方解析出密钥。
   const context: TurnGenerationContext = {
     systemPrompt: snapshot.systemPrompt,
     player: {
@@ -82,12 +81,8 @@ export async function replayDecision(
     reflectionMaxRounds: snapshot.reflectionMaxRounds,
     replay: { evidence: snapshot.evidence },
   };
-  const result = await turns.decide(
-    context,
-    restoreDecisionSchema(snapshot.schema),
-    history,
-    signal,
-    snapshot.outputSchema,
-  );
-  return { ...result, reflection: context.replay!.reflection };
+  const result = await turns.decide(context, restoreDecisionSchema(snapshot.schema), signal, {
+    frozenOutputSchema: snapshot.outputSchema,
+  });
+  return { ...result, thinkingRounds: context.replay!.thinkingRounds as string[] };
 }
