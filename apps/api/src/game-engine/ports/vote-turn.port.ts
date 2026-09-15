@@ -1,9 +1,11 @@
 import type { z } from 'zod';
+import type { ActionSource } from '@/observability/action-source';
 
 /** 普通投票的领域动作；只有游戏规则决定取值。 */
 export type VoteAction = { action: 'cast_vote'; targetSeatNo: number } | { action: 'abstain' };
 
 export interface VoteTurnRequest {
+  phaseInstanceId?: string;
   gameId: string;
   playerId: string;
   seatNo: number;
@@ -39,6 +41,7 @@ export interface VoteTurnReference {
 
 /** 一次投票候选：引用与它的形成理由分开返回，节点拿不到应用侧的上下文句柄。 */
 export interface VoteTurnCandidate {
+  source?: ActionSource;
   /** 原样回传，用于事件提交后确认本人历史与归因 */
   reference: VoteTurnReference;
   /** 该候选的形成理由，随投票事件落库并在观战页展示 */

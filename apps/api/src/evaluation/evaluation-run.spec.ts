@@ -1,3 +1,4 @@
+import { evaluationCompleteness } from './evaluation-completeness';
 import { EVALUATION_VERSION } from './evaluation-version';
 import { JudgeService } from './judge.service';
 
@@ -48,42 +49,29 @@ it.each(['complete', 'stale', 'pending', 'target-mismatch', 'legacy'])(
   },
 );
 
-it('登记目标清单后，团队分或个人分缺失均不能标记批次完成', async () => {
-  const run = { id: 'run', gameId: 'g', expectedEventIds: ['decision', 'speech', 'team'] };
-  const prisma = {
-    game: {
-      findUniqueOrThrow: jest.fn().mockResolvedValue({ status: 'finished', experiment: null }),
-    },
-    evaluationRun: {
-      upsert: jest.fn(),
-      findUniqueOrThrow: jest.fn().mockResolvedValue(run),
-      update: jest.fn(),
-    },
-    decisionJudgment: {
-      findMany: jest.fn().mockResolvedValue([{ eventId: 'decision' }, { eventId: 'speech' }]),
-    },
-    teamJudgment: { findMany: jest.fn().mockResolvedValue([]) },
-  };
-  const service = new JudgeService(
-    ...([prisma, {}, {}] as unknown as ConstructorParameters<typeof JudgeService>),
-  );
-  jest.spyOn(service, 'findJudgeableEvents').mockResolvedValue(['decision', 'team']);
-  jest.spyOn(service, 'findSpeechesToJudge').mockResolvedValue(['speech']);
-  await service.beginEvaluation('g', 'run');
-  expect(prisma.evaluationRun.upsert.mock.calls[0][0].create.expectedEventIds.toSorted()).toEqual(
-    run.expectedEventIds.toSorted(),
-  );
-  await expect(service.completeEvaluation('g', 'run')).rejects.toThrow('尚未完整');
-  expect(prisma.evaluationRun.update).not.toHaveBeenCalled();
-  prisma.teamJudgment.findMany.mockResolvedValue([{ eventId: 'team' }]);
-  await service.completeEvaluation('g', 'run');
-  expect(prisma.decisionJudgment.findMany).toHaveBeenCalledWith(
-    expect.objectContaining({
-      where: { gameId: 'g', evaluationRunId: 'run', evaluationVersion: EVALUATION_VERSION },
-    }),
-  );
-  expect(prisma.evaluationRun.update).toHaveBeenCalledWith({
-    where: { id: 'run' },
-    data: { status: 'complete', completedAt: expect.any(Date) },
-  });
-});
+it.each(['decision', 'speech', 'team'])(
+  '即使运行标记完成，缺少 %s 投影仍不允许消费',
+  (missingId) => {
+    const events = [
+      { id: 'decision', actorId: 'p', actionType: 'seer_check', content: { targetSeatNo: 2 } },
+      { id: 'speech', actorId: 'p', actionType: 'speech', content: { speech: '我的发言' } },
+      { id: 'team', actorId: null, actionType: 'wolf_kill', content: { targetSeatNo: 2 } },
+    ];
+    const run = {
+      id: 'run',
+      status: 'complete',
+      expectedEventIds: events.map((event) => event.id),
+    };
+    const judgments = events
+      .filter((event) => event.id !== missingId)
+      .map((event) => ({
+        eventId: event.id,
+        evaluationRunId: run.id,
+        evaluationVersion: EVALUATION_VERSION,
+      }));
+    expect(evaluationCompleteness({ run, events, judgments })).toMatchObject({
+      complete: false,
+      missing: [missingId],
+    });
+  },
+);

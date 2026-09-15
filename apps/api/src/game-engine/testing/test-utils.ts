@@ -117,6 +117,7 @@ export function createGameState(
 ): GameGraphState {
   const base: GameGraphState = {
     ...core,
+    phaseInstanceId: 'node/0/test',
     currentDay: 1,
     currentPhase: 'night',
     eventSequence: 0,

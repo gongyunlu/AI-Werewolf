@@ -13,6 +13,7 @@ import {
 import { ReflectionWorkerService } from './reflection.worker';
 import { GameAnalysisService } from './game-analysis.service';
 import { AnalysisController } from './analysis.controller';
+import { AdminTokenGuard } from '../common/guards/admin-token.guard';
 
 /**
  * 反思模块：对局级复盘 + 玩家级反思 + 赛后分析编排。
@@ -34,6 +35,7 @@ import { AnalysisController } from './analysis.controller';
     ReflectionQueueService,
     ReflectionWorkerService,
     GameAnalysisService,
+    AdminTokenGuard,
   ],
   exports: [GameAnalysisService],
 })

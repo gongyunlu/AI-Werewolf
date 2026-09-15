@@ -54,7 +54,11 @@ describe('VoteNode', () => {
     expect(writeVoteBatch).toHaveBeenCalledTimes(1);
     expect(writeVoteBatch).toHaveBeenCalledWith({
       gameId: 'game-1',
+      phaseInstanceId: 'node/0/test',
+      signal: undefined,
       day: 1,
+      expectedActorIds: ['player-1'],
+      sources: { 'player-1': undefined },
       votes: [{ actorId: 'player-1', voterSeatNo: 1, targetSeatNo: 1, thinking: '归票自己' }],
     });
     expect(agentRuntime.recordExperienceUsages).toHaveBeenCalledTimes(1);
@@ -63,23 +67,19 @@ describe('VoteNode', () => {
     );
   });
 
-  it('模型失败时整批改写为弃票', async () => {
+  it('模型失败时整轮中止，不改写为弃票', async () => {
     const { context, state, agentRuntime, writeVoteBatch } = setup(
       jest.fn().mockRejectedValue(new ModelCallError('transient')),
     );
 
-    await new VoteNode().create()(context)(state);
+    await expect(new VoteNode().create()(context)(state)).rejects.toMatchObject({
+      name: 'ModelCallError',
+      code: 'transient',
+    });
 
-    expect(writeVoteBatch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        votes: [{ actorId: 'player-1', voterSeatNo: 1, targetSeatNo: 0 }],
-      }),
-    );
-    // 降级路径没有候选可归属，不确认本人记录。
+    expect(writeVoteBatch).not.toHaveBeenCalled();
     expect(agentRuntime.recordExperienceUsages).not.toHaveBeenCalled();
-    expect(context.eventBus?.publish).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'vote-event-0' }),
-    );
+    expect(context.eventBus?.publish).not.toHaveBeenCalled();
   });
 
   it('事件与请求不符时报绑定错误，不改写为弃票也不广播', async () => {

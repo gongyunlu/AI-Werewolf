@@ -24,7 +24,6 @@ const envSchema = z.object({
   GAME_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(1),
   GAME_MAX_DAYS: z.coerce.number().int().positive().default(20),
   GAME_MAX_DURATION_MS: z.coerce.number().int().positive().default(3_600_000),
-  GAME_MAX_MODEL_FALLBACKS: z.coerce.number().int().min(0).default(2),
   TURN_REFLECTION_MAX_ROUNDS: z.coerce.number().int().min(0).max(10).default(3),
   LLM_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   LLM_FIRST_CHUNK_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),

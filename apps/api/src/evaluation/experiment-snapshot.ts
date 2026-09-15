@@ -3,8 +3,17 @@ import type { Prisma } from '../generated/prisma/client';
 import type { ActiveMemory, SimilarMemory } from '../memory/memory.service';
 import { computeLessonCandidateScore } from '../memory/lesson-rank';
 import { ExperimentInvalidError } from './experiment-integrity';
+import type { PromptOrigin } from '../observability/langfuse-project';
 
-export type FrozenPrompts = Record<string, { text: string; version: number | null }>;
+export type FrozenPrompts = Record<
+  string,
+  {
+    text: string;
+    version: number | null;
+    source?: 'langfuse' | 'local_release' | 'local_default';
+    origin?: PromptOrigin;
+  }
+>;
 export type FrozenMemory = ActiveMemory & {
   agentId: string;
   label: string;

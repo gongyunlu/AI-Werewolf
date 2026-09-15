@@ -1,3 +1,5 @@
+import { EvaluationProjectionService } from './evaluation-projection.service';
+import { LangfuseScoresService } from './langfuse-scores.service';
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { SettlementService } from './settlement.service';
@@ -17,6 +19,8 @@ import { EvaluationController } from './evaluation.controller';
   ],
   controllers: [EvaluationController],
   providers: [
+    EvaluationProjectionService,
+    LangfuseScoresService,
     SettlementService,
     JudgeService,
     JudgeQueueService,

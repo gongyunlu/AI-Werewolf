@@ -1,11 +1,10 @@
 import { ModelCallError } from '@/llm/model-call-guard';
-import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
+import { failAfterEffect, failModelCall } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
 /**
@@ -60,6 +59,8 @@ export class WitchAntidoteNode {
       }
 
       const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         content: '女巫，请睁眼。',
@@ -82,6 +83,7 @@ export class WitchAntidoteNode {
       let effectStarted = false;
       try {
         const contextData = await this.agentRuntime.prepareContextPublic({
+          phaseInstanceId: state.phaseInstanceId,
           gameId: state.gameId,
           playerId: witch.id,
           scenario: 'night_action',
@@ -109,6 +111,9 @@ export class WitchAntidoteNode {
 
           effectStarted = true;
           const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
@@ -128,6 +133,9 @@ export class WitchAntidoteNode {
         } else {
           effectStarted = true;
           const antidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
@@ -142,30 +150,8 @@ export class WitchAntidoteNode {
         }
       } catch (error) {
         if (effectStarted) failAfterEffect(error);
-
-        await allowModelFallback(error, context, 'antidote');
-        gameLogger.error(
-          `[女巫解药] Agent 执行异常，降级为自动使用: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        failModelCall(error, context, '[女巫解药] Agent 执行异常');
       }
-
-      // 降级策略：自动使用解药
-
-      const fallbackAntidoteEvent = await context.eventWriter.writeWitchAntidoteEvent({
-        gameId: state.gameId,
-        day: state.currentDay,
-        actorId: witch.id,
-        targetId: targetPlayer.id,
-        targetSeatNo: targetPlayer.seatNo,
-      });
-      await context.eventBus?.publish(fallbackAntidoteEvent);
-
-      return {
-        witchAntidoteTarget: targetPlayer.id,
-        players: state.players.map((p) =>
-          p.id === witch.id ? { ...p, hasAntidoteUsed: true, antidoteUsedOn: targetPlayer.id } : p,
-        ),
-      };
     };
   }
 }

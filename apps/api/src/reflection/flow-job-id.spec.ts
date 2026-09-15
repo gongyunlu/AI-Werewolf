@@ -23,6 +23,7 @@ describe('flow jobId 不得含冒号', () => {
   it('子任务 jobId（决策逐条评 + 发言按玩家批量评）', async () => {
     const judgeService = {
       beginEvaluation: jest.fn(),
+      resolveEvaluationRun: jest.fn(async (_gameId, proposed) => proposed),
       findJudgeableEvents: jest.fn().mockResolvedValue(['e1', 'e2']),
       findSpeakingPlayers: jest.fn().mockResolvedValue(['p1', 'p2']),
     };
@@ -44,6 +45,7 @@ describe('flow jobId 不得含冒号', () => {
   it('重跑后缀不引入冒号，且同一目标两次重跑的 jobId 不同', async () => {
     const judgeService = {
       beginEvaluation: jest.fn(),
+      resolveEvaluationRun: jest.fn(async (_gameId, proposed) => proposed),
       findJudgeableEvents: jest.fn().mockResolvedValue(['e1']),
       findSpeakingPlayers: jest.fn().mockResolvedValue([]),
     };

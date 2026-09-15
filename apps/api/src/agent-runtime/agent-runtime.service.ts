@@ -14,6 +14,8 @@ import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
 import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { resolvePlayerAccess } from '../agents/agent-access';
 import { PromptService } from '../observability/prompt.service';
+import type { ActionSource } from '../observability/action-source';
+import { submissionKey } from '../game-engine/events/submission-protocol';
 import { PROMPT_NAMES, PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
 import { Prisma } from '../generated/prisma/client';
@@ -59,6 +61,8 @@ type EventRecord = Prisma.EventGetPayload<Record<string, never>>;
  * Agent 上下文（prepareContext 的产物，贯穿决策与发言）
  */
 interface AgentContext {
+  actionKey?: string;
+  source?: ActionSource;
   experiment?: ExperimentSnapshot;
   prompts?: FrozenPrompts;
   retrievalId?: string;
@@ -142,10 +146,12 @@ export class AgentRuntimeService {
       return {
         result: await this.playerTurn.speech(context, options),
         replay: context.replay,
+        source: context.source,
       };
     });
     throwIfAborted(options.signal);
     context.replay = saved.replay;
+    context.source = saved.source;
     if (!generated) {
       options.onThinking?.(saved.result.thinking);
       options.onContent?.(saved.result.content);
@@ -166,8 +172,10 @@ export class AgentRuntimeService {
     const saved = await this.durable(`decision/${context.player.id}`, async () => ({
       result: await this.playerTurn.decide<T>(context, zodSchema, signal, options),
       replay: context.replay,
+      source: context.source,
     }));
     context.replay = saved.replay;
+    context.source = saved.source;
     throwIfAborted(signal);
     return saved.result;
   }
@@ -204,7 +212,8 @@ export class AgentRuntimeService {
    */
   async recordExperienceUsages(
     context: AgentContext,
-    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
+    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'> &
+      Partial<Pick<EventRecord, 'source'>>,
   ): Promise<void> {
     return this.durable(`experience/${event.actorId}`, () =>
       this.persistExperienceUsages(context, event),
@@ -213,8 +222,29 @@ export class AgentRuntimeService {
 
   private async persistExperienceUsages(
     context: AgentContext,
-    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'>,
+    event: Pick<EventRecord, 'id' | 'gameId' | 'actorId' | 'actionType' | 'day'> &
+      Partial<Pick<EventRecord, 'source'>>,
   ): Promise<void> {
+    // 重复提交会命中首次写入的 Event，其采用的模型调用可能不是本次上下文这一轮
+    // （节点重试、跨执行重放都会重新调用模型）。两者的注入不是同一批，不能拿本次的待确认项去记原行动的账。
+    const committed = event.source as unknown as ActionSource | null | undefined;
+    const adopted = context.source;
+    if (
+      committed &&
+      (committed.actionKey !== adopted?.actionKey ||
+        committed.attemptId !== adopted?.attemptId ||
+        committed.outputObservationId !== adopted?.outputObservationId)
+    ) {
+      this.logger.warn(
+        {
+          eventId: event.id,
+          committedAttemptId: committed.attemptId,
+          contextAttemptId: adopted?.attemptId,
+        },
+        '该 Event 采用的是另一次模型调用，跳过本次注入的确认',
+      );
+      return;
+    }
     // memory 与 knowledge 任一注入待确认都应继续走到下方各自记录
     if (
       !context.replay &&
@@ -494,6 +524,16 @@ export class AgentRuntimeService {
 
     return {
       systemPrompt,
+      ...(input.phaseInstanceId
+        ? {
+            actionKey: submissionKey(
+              { gameId, phaseInstanceId: input.phaseInstanceId },
+              actionType,
+              playerId,
+              input.actionOrdinal ?? 0,
+            ),
+          }
+        : {}),
       experiment,
       prompts,
       retrievalId,

@@ -395,6 +395,8 @@ export class SpeechSummarizerService {
           role,
           promptName: humanPrompt.name,
           promptVersion: humanPrompt.version,
+          promptSource: humanPrompt.source,
+          promptOrigin: humanPrompt.origin,
         }),
       });
       this.logger.log(
@@ -510,6 +512,8 @@ export class SpeechSummarizerService {
           scenario: 'summarizer',
           promptName: systemPrompt.name,
           promptVersion: systemPrompt.version,
+          promptSource: systemPrompt.source,
+          promptOrigin: systemPrompt.origin,
         }),
       });
       this.logger.log(

@@ -1,11 +1,10 @@
 import { ModelCallError } from '@/llm/model-call-guard';
-import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
+import { failAfterEffect, failModelCall } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
-import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
 /**
@@ -55,6 +54,8 @@ export class WitchPoisonNode {
       }
 
       const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         content: '女巫，你要使用毒药吗？',
@@ -74,6 +75,7 @@ export class WitchPoisonNode {
       let effectStarted = false;
       try {
         const contextData = await this.agentRuntime.prepareContextPublic({
+          phaseInstanceId: state.phaseInstanceId,
           gameId: state.gameId,
           playerId: witch.id,
           scenario: 'night_action',
@@ -101,6 +103,9 @@ export class WitchPoisonNode {
 
           effectStarted = true;
           const poisonEvent = await context.eventWriter.writeWitchPoisonEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
@@ -120,6 +125,9 @@ export class WitchPoisonNode {
         } else {
           effectStarted = true;
           const poisonEvent = await context.eventWriter.writeWitchPoisonEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             gameId: state.gameId,
             day: state.currentDay,
             actorId: witch.id,
@@ -134,24 +142,8 @@ export class WitchPoisonNode {
         }
       } catch (error) {
         if (effectStarted) failAfterEffect(error);
-
-        await allowModelFallback(error, context, 'poison');
-        gameLogger.error(
-          `[女巫毒药] Agent 执行异常，降级为不使用: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        failModelCall(error, context, '[女巫毒药] Agent 执行异常');
       }
-
-      const fallbackEvent = await context.eventWriter.writeWitchPoisonEvent({
-        gameId: state.gameId,
-        day: state.currentDay,
-        actorId: witch.id,
-        targetId: witch.id,
-        targetSeatNo: 0,
-      });
-      await context.eventBus?.publish(fallbackEvent);
-
-      // 降级策略：不使用毒药
-      return {};
     };
   }
 }

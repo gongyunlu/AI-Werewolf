@@ -10,6 +10,7 @@ import { ReflectionOutputSchema } from './reflection-schema';
 import { buildReflectionVariables, type TrustMisread } from './reflection-prompt';
 import { GameReviewService } from './game-review.service';
 import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
+import { lockReflectionEvaluation } from './evaluation-reference';
 
 const MEMORY_TYPE: Record<'reflection' | 'lesson' | 'playerModel', MemoryType> = {
   reflection: 'reflection',
@@ -94,6 +95,7 @@ export class ReflectionService {
         voteAccuracy: true,
         speechCount: true,
         reflectionGenerated: true,
+        metadata: true,
       },
     });
 
@@ -103,40 +105,54 @@ export class ReflectionService {
       throw new Error(`Game ${gameId} player ${playerId} 尚无表现记录，无法生成玩家反思`);
     }
 
-    if (performance.reflectionGenerated && !force) {
+    const snapshot = await this.prisma.$transaction(async (tx) => {
+      const evaluationRunId = await lockReflectionEvaluation(tx, gameId);
+      const metadata = performance.metadata as Record<string, unknown> | null;
+      const refresh =
+        force ||
+        !!(
+          evaluationRunId &&
+          performance.reflectionGenerated &&
+          metadata?.reflectionEvaluationRunId !== evaluationRunId
+        );
+      if (performance.reflectionGenerated && !refresh) return null;
+      const review = await this.gameReviewService.loadReview(gameId, tx);
+      if (!review) throw new Error(`Game ${gameId} 尚无对局复盘，无法生成玩家反思`);
+      const myJudgments = await tx.decisionJudgment.findMany({
+        where: {
+          gameId,
+          playerId,
+          evaluationVersion: EVALUATION_VERSION,
+          ...(evaluationRunId ? { evaluationRunId } : {}),
+        },
+        select: {
+          playerId: true,
+          actionType: true,
+          day: true,
+          targetSeatNo: true,
+          verdict: true,
+          score: true,
+          reasoning: true,
+        },
+        orderBy: { day: 'asc' },
+      });
+      return { evaluationRunId, refresh, review, myJudgments };
+    });
+    if (!snapshot) {
       this.logger.log({ gameId, playerId }, '反思已生成，跳过');
       return 0;
     }
-
-    const review = await this.gameReviewService.loadReview(gameId);
-    if (!review) {
-      throw new Error(`Game ${gameId} 尚无对局复盘，无法生成玩家反思`);
-    }
-
-    const [others, myJudgments, mySpeechEvents, trustMisreads, initialModelSnapshot] =
-      await Promise.all([
-        this.loadOpponents(gameId, playerId),
-        this.prisma.decisionJudgment.findMany({
-          where: { gameId, playerId, evaluationVersion: EVALUATION_VERSION },
-          select: {
-            playerId: true,
-            actionType: true,
-            day: true,
-            targetSeatNo: true,
-            verdict: true,
-            score: true,
-            reasoning: true,
-          },
-          orderBy: { day: 'asc' },
-        }),
-        this.prisma.event.findMany({
-          where: { gameId, actorId: playerId, actionType: ACTION_TYPES.SPEECH },
-          select: { day: true, phase: true, visibility: true, content: true },
-          orderBy: { sequence: 'asc' },
-        }),
-        this.loadTrustMisreads(gameId, player.agentId),
-        this.loadExistingPlayerModelSnapshot(player.agentId, player.memoryLabelSnapshot),
-      ]);
+    const { evaluationRunId, refresh, review, myJudgments } = snapshot;
+    const [others, mySpeechEvents, trustMisreads, initialModelSnapshot] = await Promise.all([
+      this.loadOpponents(gameId, playerId),
+      this.prisma.event.findMany({
+        where: { gameId, actorId: playerId, actionType: ACTION_TYPES.SPEECH },
+        select: { day: true, phase: true, visibility: true, content: true },
+        orderBy: { sequence: 'asc' },
+      }),
+      this.loadTrustMisreads(gameId, player.agentId),
+      this.loadExistingPlayerModelSnapshot(player.agentId, player.memoryLabelSnapshot),
+    ]);
 
     const label = player.memoryLabelSnapshot;
     const opponentByName = new Map(others.map((o) => [o.agentName, o]));
@@ -194,17 +210,22 @@ export class ReflectionService {
         role: player.role,
         promptName: userPrompt.name,
         promptVersion: userPrompt.version,
+        promptSource: userPrompt.source,
+        promptOrigin: userPrompt.origin,
       });
 
       if (!writeLearning) {
         // 实验反思仅作该局分析材料，原子合并 metadata，不进入经验、建模或向量库。
-        await this.prisma.$executeRaw`
+        await this.prisma.$transaction(async (tx) => {
+          await lockReflectionEvaluation(tx, gameId, { runId: evaluationRunId });
+          await tx.$executeRaw`
           UPDATE agent_performances
-          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{experimentReflection}', ${JSON.stringify(output)}::jsonb),
+          SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ experimentReflection: output, ...(evaluationRunId ? { reflectionEvaluationRunId: evaluationRunId } : {}) })}::jsonb,
               reflection_generated = true
           WHERE game_id = ${gameId}::uuid AND player_id = ${playerId}::uuid
-            AND (${force} OR reflection_generated = false)
+            AND (${refresh} OR reflection_generated = false)
         `;
+        });
         return 0;
       }
 
@@ -222,6 +243,7 @@ export class ReflectionService {
           content: output.summary,
           importance: 0.3, // 复盘全文只作提炼原料与人工查阅，不参与注入
           source: MEMORY_SOURCE,
+          ...(evaluationRunId ? { metadata: { evaluationRunId } } : {}),
         },
         ...output.lessons.map((lesson) => ({
           agentId: player.agentId,
@@ -236,6 +258,7 @@ export class ReflectionService {
           importance: lesson.importance,
           source: MEMORY_SOURCE,
           metadata: {
+            ...(evaluationRunId ? { evaluationRunId } : {}),
             trigger: lesson.trigger,
             action: lesson.action,
             evidence: lesson.evidence,
@@ -254,6 +277,7 @@ export class ReflectionService {
           confidence: model.confidence,
           source: MEMORY_SOURCE,
           metadata: {
+            ...(evaluationRunId ? { evaluationRunId } : {}),
             targetAgentId: opponentByName.get(model.agentName)!.agentId,
             targetAgentName: model.agentName,
           },
@@ -264,6 +288,7 @@ export class ReflectionService {
       );
 
       const persisted = await this.prisma.$transaction(async (tx) => {
+        await lockReflectionEvaluation(tx, gameId, { runId: evaluationRunId });
         // 所有自动反思写入都遵守同一 agent+label 锁；锁内重读版本，防止两个跨局任务
         // 都基于同一份旧建模生成后发生 last-writer-wins 丢失更新。
         await tx.$queryRaw`
@@ -288,13 +313,20 @@ export class ReflectionService {
           where: {
             gameId,
             playerId,
-            ...(!force ? { reflectionGenerated: false } : {}),
+            ...(!refresh ? { reflectionGenerated: false } : {}),
           },
           data: { reflectionGenerated: true },
         });
         if (claim.count === 0) return { status: 'skipped' as const };
+        if (evaluationRunId) {
+          await tx.$executeRaw`
+            UPDATE agent_performances
+            SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reflectionEvaluationRunId}', ${JSON.stringify(evaluationRunId)}::jsonb)
+            WHERE game_id = ${gameId}::uuid AND player_id = ${playerId}::uuid
+          `;
+        }
 
-        if (force) {
+        if (refresh) {
           // 只替换本流程在当前标签下生成的三类记忆，保留同局 manual/seed/refined 记忆。
           await tx.memory.updateMany({
             where: {

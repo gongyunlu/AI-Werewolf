@@ -433,15 +433,12 @@ export class GamesService {
       throw new BadRequestException(`对局已结束，无法取消`);
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.game.update({
-        where: { id: gameId },
-        data: {
-          status: GAME_STATUSES.ABORTED,
-          endedAt: new Date(),
-        },
-      });
+    // 条件更新会在数据库持锁后复核，不能覆盖读取状态后刚提交的正常终局。
+    const cancelled = await this.prisma.game.updateMany({
+      where: { id: gameId, status: { notIn: [GAME_STATUSES.FINISHED, GAME_STATUSES.ABORTED] } },
+      data: { status: GAME_STATUSES.ABORTED, endedAt: new Date() },
     });
+    if (!cancelled.count) throw new BadRequestException('对局已结束，无法取消');
 
     this.gameExecutor.abortGame(gameId);
     this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });
@@ -454,13 +451,15 @@ export class GamesService {
    * 清理所有待恢复对局（标记为 aborted）
    */
   async clearPendingRecovery(): Promise<number> {
-    const result = await this.prisma.game.updateMany({
+    const result = await this.prisma.game.updateManyAndReturn({
       where: { status: GAME_STATUSES.PENDING_RECOVERY },
       data: {
         status: GAME_STATUSES.ABORTED,
         endedAt: new Date(),
       },
+      select: { id: true },
     });
-    return result.count;
+    for (const game of result) this.broadcaster.complete(game.id);
+    return result.length;
   }
 }

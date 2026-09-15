@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { StructuredLlmService } from './structured-llm.service';
+import { ChatOpenAI } from '@langchain/openai';
 
 const schema = z.object({ score: z.number() });
 
@@ -70,5 +71,51 @@ describe('StructuredLlmService', () => {
     expect(result).toEqual({ output: { score: 60 }, modelName: 'glm-4' });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(refineUser).toHaveBeenCalledWith({ score: 90 });
+  });
+
+  it('运行冻结后端点发生变化时，在构造请求前拒绝把最新密钥发往旧端点', async () => {
+    const configuration: Record<string, string> = {
+      JUDGE_MODEL: 'judge-v1',
+      ARK_BASE_URL: 'https://old-model.invalid/v1',
+      ARK_API_KEY: 'old-key',
+    };
+    const service = new StructuredLlmService(
+      { get: (key: string) => configuration[key] } as never,
+      { trace: jest.fn(() => ({})) } as never,
+    );
+    const frozen = service.captureConfiguration();
+    configuration.ARK_BASE_URL = 'https://new-model.invalid/v1';
+    configuration.ARK_API_KEY = 'new-endpoint-key';
+    mockInvoke.mockResolvedValue({ score: 80 });
+    await expect(service.invoke({ ...baseOptions, ...frozen })).rejects.toThrow(/端点/);
+    expect(ChatOpenAI).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it('同端点密钥轮换后沿用冻结模型，并在本次调用读取最新密钥', async () => {
+    const configuration: Record<string, string> = {
+      JUDGE_MODEL: 'judge-v1',
+      ARK_BASE_URL: 'https://same-model.invalid/v1',
+      ARK_API_KEY: 'old-key',
+    };
+    const service = new StructuredLlmService(
+      { get: (key: string) => configuration[key] } as never,
+      { trace: jest.fn(() => ({})) } as never,
+    );
+    const frozen = service.captureConfiguration();
+    configuration.JUDGE_MODEL = 'judge-v2';
+    configuration.ARK_API_KEY = 'rotated-key';
+    mockInvoke.mockResolvedValue({ score: 80 });
+    await expect(service.invoke({ ...baseOptions, ...frozen })).resolves.toMatchObject({
+      modelName: 'judge-v1',
+    });
+    expect(ChatOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'judge-v1',
+        apiKey: 'rotated-key',
+        configuration: { baseURL: 'https://same-model.invalid/v1' },
+      }),
+    );
+    expect(frozen).toEqual({ modelName: 'judge-v1', baseUrl: 'https://same-model.invalid/v1' });
   });
 });

@@ -55,7 +55,6 @@ export async function createMockGame(
     TURN_REFLECTION_MAX_ROUNDS: 0,
     GAME_MAX_DAYS: 5,
     GAME_MAX_DURATION_MS: 60_000,
-    GAME_MAX_MODEL_FALLBACKS: 2,
     LLM_CALL_TIMEOUT_MS: 1000,
     LLM_FIRST_CHUNK_TIMEOUT_MS: 1000,
     LLM_STREAM_IDLE_TIMEOUT_MS: 1000,
@@ -71,7 +70,13 @@ export async function createMockGame(
       published.push(event);
     }),
   };
-  const broadcaster = { emit: jest.fn(), complete: jest.fn(), getOrCreate: jest.fn() };
+  const emit = jest.fn();
+  const broadcaster = {
+    emit,
+    complete: jest.fn(),
+    getOrCreate: jest.fn(),
+    forExecution: () => ({ emit }),
+  };
   const memory = {
     retrieveActiveMemories: jest.fn(async () => []),
     retrieveExperience: jest.fn(async () => ({

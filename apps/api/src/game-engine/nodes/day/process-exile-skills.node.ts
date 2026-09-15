@@ -74,6 +74,8 @@ async function processExileSkillsNode(
 
     // 写入白痴翻牌事件
     const event = await context.eventWriter.writeIdiotRevealEvent({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       day: state.currentDay,
       playerId: exiledPlayer.id,

@@ -13,7 +13,6 @@ import type { GameExecution, Prisma } from '../src/generated/prisma/client';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
 import { EventWriterService } from '../src/game-engine/events/event-writer.service';
-import type { RedisService } from '../src/redis/redis.service';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -105,18 +104,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   }
 
   function settlementWriter(recoverable: boolean) {
-    let sequence = 0;
-    const redis = {
-      incr: async () => ++sequence,
-      set: async (_key: string, value: number) => {
-        sequence = value;
-      },
-    };
-    return new EventWriterService(
-      prisma,
-      redis as unknown as RedisService,
-      recoverable ? recovery : undefined,
-    );
+    return new EventWriterService(prisma, recoverable ? recovery : undefined);
   }
 
   it.each([false, true])(
@@ -126,6 +114,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       const writer = settlementWriter(recoverable);
       const commit = () =>
         writer.commitNightResolution({
+          phaseInstanceId: 'node/0/settlement',
           gameId,
           day: 2,
           deaths: [
@@ -148,6 +137,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       const writer = settlementWriter(recoverable);
       const commit = () =>
         writer.commitExile({
+          phaseInstanceId: 'node/0/settlement',
           gameId,
           day: 2,
           targetId: randomUUID(),
@@ -168,11 +158,13 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       const commit = () =>
         kind === 'night'
           ? writer.commitNightResolution({
+              phaseInstanceId: 'node/0/settlement',
               gameId,
               day: 2,
               deaths: [{ playerId: player.id, seatNo: 1, cause: 'night_kill' }],
             })
           : writer.commitExile({
+              phaseInstanceId: 'node/0/settlement',
               gameId,
               day: 2,
               targetId: player.id,
@@ -186,7 +178,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
         }),
       ).rejects.toThrow('结算响应丢失');
       const [original] = await events();
-      await expect(run(commit)).resolves.toEqual(original);
+      await expect(run(commit)).resolves.toEqual({ ...original, replayed: true });
       expect(await events()).toHaveLength(1);
       expect(await steps()).toHaveLength(1);
       expect(await prisma.player.findUniqueOrThrow({ where: { id: player.id } })).toMatchObject({
@@ -203,6 +195,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       await recovery.interrupt(gameId, execution.generation);
       await expect(
         writer.commitNightResolution({
+          phaseInstanceId: 'node/0/settlement',
           gameId,
           day: 2,
           deaths: [{ playerId: player.id, seatNo: 1, cause: 'night_kill' }],

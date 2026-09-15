@@ -36,7 +36,9 @@ export const createNightResolveNode: NodeFactory = (context) => {
     });
 
     context.signal?.throwIfAborted();
-    await context.eventWriter.commitNightResolution({
+    const event = await context.eventWriter.commitNightResolution({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       day: state.currentDay,
       deaths: nightDeaths.map((death) => ({
@@ -45,15 +47,7 @@ export const createNightResolveNode: NodeFactory = (context) => {
       })),
     });
 
-    // 广播死亡状态，供前端实时更新头像状态
-    for (const death of nightDeaths) {
-      context.broadcaster?.emit(state.gameId, {
-        type: 'player.died',
-        playerId: death.playerId,
-        deathDay: state.currentDay,
-        deathCause: death.cause,
-      });
-    }
+    await context.eventBus?.publish(event);
 
     return {
       players: updatedPlayers,

@@ -3,6 +3,7 @@ import type { Event } from '../generated/prisma/client';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import type { ConnectionReadyEvent, SseMessage } from '../sse/sse-event.types';
 import { EventBusService } from './event-bus.service';
+import { projectEvent } from './event-projection';
 
 const gameId = 'game-1';
 
@@ -23,6 +24,9 @@ function createEvent(
     visibility: 'public',
     actorId: 'player-1',
     targetIds: [],
+    effectKey: null,
+    payloadHash: null,
+    source: null,
     createdAt: new Date('2026-09-10T00:00:00Z'),
   } as Event;
 }
@@ -38,6 +42,7 @@ function snapshot(broadcaster: SseBroadcasterService): ConnectionReadyEvent {
 
 function createHarness(events: Event[]) {
   const prisma = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
     event: { findMany: jest.fn().mockResolvedValue(events) },
     player: { findMany: jest.fn().mockResolvedValue([]) },
   };
@@ -110,32 +115,38 @@ describe('EventBusService persisted history recovery', () => {
     ]);
   });
 
-  it('投票事件实时出卡时把本轮思考补在正文之后，且只有一张卡片', async () => {
-    const { service, broadcaster } = createHarness([]);
+  it('投票最终结果一次携带完整思考与正文，不以追加消息重放', async () => {
+    const { broadcaster } = createHarness([]);
     const messages: SseMessage[] = [];
     broadcaster.getOrCreate(gameId).subscribe((message) => messages.push(message));
 
-    await service.publish(
-      createEvent('vote-event', 1, ACTION_TYPES.VOTE, {
-        voterSeatNo: 1,
-        targetSeatNo: 2,
-        thinking: '2号首夜发言回避刀口，先归票他。',
-      }),
-    );
-
-    expect(messages.map((message) => message.type)).toEqual([
-      'scene.open',
-      'scene.append',
-      'scene.close',
-    ]);
-    expect(messages[1]).toMatchObject({
-      sceneId: 'vote-event',
-      contentType: 'thinking',
-      token: '2号首夜发言回避刀口，先归票他。',
+    const event = createEvent('vote-event', 1, ACTION_TYPES.VOTE, {
+      voterSeatNo: 1,
+      targetSeatNo: 2,
+      thinking: '2号首夜发言回避刀口，先归票他。',
+    });
+    broadcaster.emitCommitted(gameId, {
+      type: 'events.committed',
+      deliveryKey: 'event/vote-event',
+      firstSequence: 1,
+      lastSequence: 1,
+      scenes: [projectEvent(event)!],
+      playerDeaths: [],
+    });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      type: 'events.committed',
+      scenes: [
+        expect.objectContaining({
+          eventId: 'vote-event',
+          content: '1号位投票给 2号位',
+          thinking: '2号首夜发言回避刀口，先归票他。',
+        }),
+      ],
     });
   });
 
-  it('正常实时发布仍由节点广播 speech，避免落库后增加第二张卡片', async () => {
+  it('节点发布仅唤醒持久消费者，不直接追加 speech 卡片', async () => {
     const { service, broadcaster } = createHarness([]);
     broadcaster.getOrCreate(gameId);
 

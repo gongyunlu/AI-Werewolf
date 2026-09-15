@@ -25,10 +25,10 @@ import {
   type ReflectJobData,
 } from '../src/reflection/reflection-queue.service';
 import { ReflectionWorkerService } from '../src/reflection/reflection.worker';
-import type { ReflectionService } from '../src/reflection/reflection.service';
+import { ReflectionService } from '../src/reflection/reflection.service';
 import { JudgeService } from '../src/evaluation/judge.service';
 import { loadKnowledgeScoredEvents } from '../src/evaluation/learning-knowledge-comparison';
-import type { GameReviewService } from '../src/reflection/game-review.service';
+import { GameReviewService } from '../src/reflection/game-review.service';
 import type { RedisService } from '../src/redis/redis.service';
 import { createAgentRuntime } from '../src/testing/agent-runtime.fixture';
 import type { ConfigService } from '@nestjs/config';
@@ -452,7 +452,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
     expect(llm.invoke).not.toHaveBeenCalled();
   });
 
-  it('固化后向量失败仍保留策略与溯源，现有回填入口可补齐', async () => {
+  it('固化后向量失败的策略仍可直读且溯源完整，回填不消耗策略 embedding', async () => {
     const sources = await games(100);
     for (let i = 0; i < 3; i++) await lesson({ embedding: clusterVector(i) });
     embedding.embedTexts.mockRejectedValueOnce(new Error('mock embedding unavailable'));
@@ -468,11 +468,117 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
         })
       )[0].id,
     ).toBe(strategy.id);
-    expect(await memories.backfillEmbeddings()).toBe(1);
+    const embeddingCalls = embedding.embedTexts.mock.calls.length;
+    expect(await memories.backfillEmbeddings()).toBe(0);
+    expect(embedding.embedTexts).toHaveBeenCalledTimes(embeddingCalls);
     expect(
       (await prisma.memory.findUniqueOrThrow({ where: { id: strategy.id } })).embeddingDimension,
-    ).toBe(2048);
+    ).toBeNull();
   });
+
+  it.each([true, false])(
+    '平台评分采用后刷新复盘与反思，事务保留历史元数据及旧记忆（写经验=%s）',
+    async (writeLearning) => {
+      const g = await game();
+      const playerId = g.players[0].id;
+      const event = await scoredVote(g);
+      await prisma.event.update({
+        where: { id: event.id },
+        data: { content: { voterSeatNo: 1, targetSeatNo: 2 } },
+      });
+      const runId = `reflection-${randomUUID()}`;
+      await prisma.evaluationRun.create({
+        data: {
+          id: runId,
+          gameId: g.id,
+          status: 'complete',
+          expectedEventIds: [event.id],
+          definition: { id: '隔离测试评分定义' },
+        },
+      });
+      await prisma.decisionJudgment.update({
+        where: { eventId: event.id },
+        data: { evaluationRunId: runId },
+      });
+      await prisma.gameSummary.create({
+        data: {
+          gameId: g.id,
+          totalDays: 1,
+          winnerFaction: 'villager',
+          villagerAliveCount: 1,
+          werewolfAliveCount: 0,
+          totalSpeechCount: 0,
+          narrative: JSON.stringify({ narrative: '旧复盘', patterns: [], turningPoints: [] }),
+        },
+      });
+      await prisma.agentPerformance.create({
+        data: {
+          gameId: g.id,
+          playerId,
+          role: 'villager',
+          faction: 'villager',
+          survivalDays: 1,
+          isWinner: true,
+          reflectionGenerated: true,
+          metadata: { historical: { preserved: true }, reflectionEvaluationRunId: 'old-run' },
+        },
+      });
+      const oldMemory = await prisma.memory.create({
+        data: {
+          agentId,
+          gameId: g.id,
+          label: 'test',
+          type: 'reflection',
+          source: 'auto',
+          title: '旧反思',
+          content: '旧内容',
+        },
+      });
+      const prompts = {
+        render: jest.fn().mockResolvedValue({ text: '隔离测试', name: 'test', version: null }),
+      } as unknown as PromptService;
+      const reviewOutput = { narrative: '新复盘', patterns: [], turningPoints: [] };
+      const reviewLlm = { invoke: jest.fn().mockResolvedValue({ output: reviewOutput }) };
+      const review = new GameReviewService(
+        prisma,
+        prompts,
+        reviewLlm as unknown as StructuredLlmService,
+      );
+      const reflectionOutput = { summary: '新反思', lessons: [], playerModels: [] };
+      const reflectionLlm = { invoke: jest.fn().mockResolvedValue({ output: reflectionOutput }) };
+      const reflection = new ReflectionService(
+        prisma,
+        prompts,
+        reflectionLlm as unknown as StructuredLlmService,
+        memories,
+        review,
+      );
+
+      expect(await review.loadReview(g.id)).toBeNull();
+      await review.reviewGame(g.id);
+      expect(
+        JSON.parse(
+          (await prisma.gameSummary.findUniqueOrThrow({ where: { gameId: g.id } })).narrative!,
+        ),
+      ).toEqual({ ...reviewOutput, evaluationRunId: runId });
+      expect(await reflection.reflect(g.id, playerId, false, writeLearning)).toBe(
+        writeLearning ? 1 : 0,
+      );
+      const performance = await prisma.agentPerformance.findUniqueOrThrow({
+        where: { gameId_playerId: { gameId: g.id, playerId } },
+      });
+      expect(performance.metadata).toMatchObject({
+        historical: { preserved: true },
+        reflectionEvaluationRunId: runId,
+        ...(!writeLearning ? { experimentReflection: reflectionOutput } : {}),
+      });
+      expect(
+        (await prisma.memory.findUniqueOrThrow({ where: { id: oldMemory.id } })).isActive,
+      ).toBe(!writeLearning);
+      expect(await reflection.reflect(g.id, playerId, false, writeLearning)).toBe(0);
+      expect(reflectionLlm.invoke).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     { role: 'seer', scenario: 'any', conditions: [] },
@@ -650,6 +756,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
         prisma,
         {} as PromptService,
         llm as unknown as StructuredLlmService,
+        undefined as never,
       );
       await expect(judge.backfillRewards(g.id)).resolves.toBe(1);
       expect(await prisma.memoryUsage.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject(
@@ -701,6 +808,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
       prisma,
       {} as PromptService,
       llm as unknown as StructuredLlmService,
+      undefined as never,
     );
     await expect(judge.backfillRewards(g.id)).resolves.toBe(0);
     expect(await prisma.memoryUsage.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject({

@@ -33,7 +33,7 @@ describe('ReflectionWorkerService', () => {
     player: { findMany: jest.fn() },
   };
   const judge = { backfillRewards: jest.fn(), aggregatePlayerScores: jest.fn() };
-  const gameReview = { reviewGame: jest.fn(), loadReview: jest.fn() };
+  const gameReview = { reviewGame: jest.fn(), loadStoredReview: jest.fn() };
   const reflection = { reflect: jest.fn() };
   const globalMemory = { promotePatterns: jest.fn() };
   const maintenance = { enqueueForGame: jest.fn() };
@@ -48,7 +48,7 @@ describe('ReflectionWorkerService', () => {
     judge.backfillRewards.mockResolvedValue(0);
     judge.aggregatePlayerScores.mockResolvedValue(undefined);
     gameReview.reviewGame.mockResolvedValue({});
-    gameReview.loadReview.mockResolvedValue(null);
+    gameReview.loadStoredReview.mockResolvedValue(null);
     globalMemory.promotePatterns.mockResolvedValue(0);
     maintenance.enqueueForGame.mockResolvedValue(undefined);
     queue.enqueuePlayers.mockResolvedValue(playerIds.length);
@@ -66,7 +66,7 @@ describe('ReflectionWorkerService', () => {
 
   it('实验手动分析生成复盘和玩家任务，但不晋升或维护记忆', async () => {
     prisma.game.findUnique.mockResolvedValue({ experiment: { arm: 'on' } });
-    gameReview.loadReview.mockResolvedValue({ patterns: [{ title: '不应晋升的规律' }] });
+    gameReview.loadStoredReview.mockResolvedValue({ patterns: [{ title: '不应晋升的规律' }] });
     await worker.process(fanoutJob({ gameId }));
     expect(judge.aggregatePlayerScores).toHaveBeenCalledWith(gameId);
     expect(reflection.reflect).not.toHaveBeenCalled();
@@ -77,6 +77,16 @@ describe('ReflectionWorkerService', () => {
       force: undefined,
       suffix: undefined,
     });
+  });
+
+  it('重试复用已落库复盘时照常晋升规律，不因评分运行变化而跳过', async () => {
+    const job = fanoutJob({ gameId, reviewCompleted: true });
+    gameReview.loadStoredReview.mockResolvedValue({ patterns: [{ title: '晋升的规律' }] });
+
+    await worker.process(job);
+
+    expect(gameReview.reviewGame).not.toHaveBeenCalled();
+    expect(globalMemory.promotePatterns).toHaveBeenCalledWith(gameId, [{ title: '晋升的规律' }]);
   });
 
   it('force fanout 在玩家投递失败后重试时复用同一份已落库复盘', async () => {

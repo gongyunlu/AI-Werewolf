@@ -18,29 +18,24 @@ export class JudgeWorkerService extends WorkerHost {
   }
 
   async process(job: Job<JudgeJobData>): Promise<void> {
-    const { gameId, eventId, playerId } = job.data;
+    const { gameId, eventId, playerId, runId } = job.data;
     try {
       if (job.name === JUDGE_JOB_NAMES.complete) {
-        // completion 只有在全部评分 child 成功后才会运行；回填失败必须重试，不能静默留下旧 reward。
-        await this.judgeService.backfillRewards(gameId);
+        // completion 只有在全部评分 child 成功后才会运行；落投影与刷新 reward 在同一事务里，
+        // 任一环节失败都会让整次 completion 重试，不在 worker 里再补一遍回填。
+        await this.judgeService.completeEvaluation(gameId, runId);
         await this.judgeService.aggregatePlayerScores(gameId);
-        if (job.data.runId) await this.judgeService.completeEvaluation(gameId, job.data.runId);
         return;
       }
 
       if (job.name === JUDGE_JOB_NAMES.speeches) {
         if (!playerId) throw new Error(`发言评估任务缺少 playerId: ${job.id}`);
-        await this.judgeService.judgeSpeeches(
-          gameId,
-          playerId,
-          undefined,
-          job.data.runId ?? job.id,
-        );
+        await this.judgeService.judgeSpeeches(gameId, playerId, undefined, runId);
         return;
       }
 
       if (!eventId) throw new Error(`决策评估任务缺少 eventId: ${job.id}`);
-      await this.judgeService.judgeEvent(gameId, eventId, job.data.runId ?? job.id);
+      await this.judgeService.judgeEvent(gameId, eventId, runId);
     } catch (error) {
       this.logger.error(
         {

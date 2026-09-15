@@ -60,6 +60,8 @@ export const createCalculateSpeechOrderNode: NodeFactory = (context) => {
 
     // 写入 Event（记录发言顺序）
     const event = await context.eventWriter.writeSpeechOrderDeterminedEvent({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       day: state.currentDay,
       speechOrder: orderResult.speechOrder,

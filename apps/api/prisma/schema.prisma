@@ -51,6 +51,8 @@ model Game {
   patternCandidates PatternCandidate[]
   knowledgeUsages   KnowledgeUsage[]
   execution         GameExecution?
+  effectBatchCommits EffectBatchCommit[]
+  eventDeliveries   EventDeliveryOutbox[]
 
   @@map("games")
 }
@@ -125,6 +127,9 @@ model Event {
   id         String   @id @default(uuid()) @db.Uuid
   gameId     String   @map("game_id") @db.Uuid // 所属对局
   sequence   Int      @db.Integer // 对局内全局递增顺序号（从1开始），用于保证事件严格有序
+  effectKey  String?  @unique @map("effect_key") @db.VarChar(300) // 历史事件保持 NULL，不推测业务键
+  payloadHash String? @map("payload_hash") @db.Char(64)
+  source     Json?    @db.JsonB // 已采用模型产物引用；与事件同事务保存，历史保持 NULL
   day        Int?     @db.SmallInt // 游戏天数，0=准备阶段，null=对局外的元事件
   phase      String   @db.VarChar(32) // 阶段，取值口径见 packages/shared 的 PHASES（night/day_announce/speech/vote/execute/check_win）
   actionType String   @map("action_type") @db.VarChar(64) // 事件类型，取值口径见 packages/shared 的 ACTION_TYPES；决定同行 content(JSON)的负载结构如何解读
@@ -151,6 +156,42 @@ model Event {
 
   @@unique([gameId, sequence]) // 事件溯源要求对局内 sequence 严格有序不重号，用约束而非 worker 并发度来保证
   @@map("events")
+}
+
+// 同时行动的最小提交凭证；包括无事件结果，不承担玩家认知或消息交付状态。
+model EffectBatchCommit {
+  batchKey    String   @id @map("batch_key") @db.VarChar(300)
+  gameId      String   @map("game_id") @db.Uuid
+  payloadHash String   @map("payload_hash") @db.Char(64)
+  outcomes    Json     @db.JsonB
+  eventIds    String[] @map("event_ids") @db.Uuid
+  committedAt DateTime @default(now()) @map("committed_at") @db.Timestamptz
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId])
+  @@map("effect_batch_commits")
+}
+
+// 与领域事实同事务保存交付意图；完成仅表示已交给广播层，不代表浏览器确认。
+model EventDeliveryOutbox {
+  deliveryKey   String    @id @map("delivery_key") @db.VarChar(350)
+  gameId        String    @map("game_id") @db.Uuid
+  batchKey      String?   @unique @map("batch_key") @db.VarChar(300)
+  eventIds      String[]  @map("event_ids") @db.Uuid
+  firstSequence Int       @map("first_sequence")
+  lastSequence  Int       @map("last_sequence")
+  playerDeaths  Json      @map("player_deaths") @db.JsonB
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz
+  leaseToken    String?   @map("lease_token") @db.Uuid
+  leaseUntil    DateTime? @map("lease_until") @db.Timestamptz
+  deliveredAt   DateTime? @map("delivered_at") @db.Timestamptz
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  game          Game      @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, firstSequence])
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("event_delivery_outbox")
 }
 
 // Agent 长期记忆表，跨对局持久化，用于自我进化。
@@ -345,8 +386,9 @@ model GameSummary {
 }
 
 // 决策质量评估（LLM-as-judge），对可归属到单个玩家的关键决策（查验/用药/投票）打分。
-// 每个被评估的决策事件对应一行，@@unique(eventId) 保证同一决策只评估一次（幂等）。
+// 每个已提交决策仅保留一行采用投影，完整结果和重评历史由 Langfuse 管理。
 model DecisionJudgment {
+  source Json? @db.JsonB // 仅为已采用的 Langfuse Score 引用；旧评分保持 NULL
   evaluationRunId String? @map("evaluation_run_id") @db.VarChar(200)
   id           String   @id @default(uuid()) @db.Uuid
   gameId       String   @map("game_id") @db.Uuid
@@ -455,7 +497,7 @@ model KnowledgeChunk {
 
 // 攻略注入使用记录：某次已落库行为注入了哪些知识块。
 // 与 MemoryUsage 同构——注入候选先暂存在 AgentContext，行为 Event 写入成功后才以 eventId 精确落库，
-// 避免失败/降级调用污染样本；rewardScore 由 judge 回填与该行为评分（DecisionJudgment.score），
+// 避免失败/降级调用污染样本；质量分析通过 Event 关联当前采用的 DecisionJudgment，
 // 供度量「攻略是否提升对局质量」（注入 vs 未注入组的评分对比）。
 model KnowledgeUsage {
   id       String @id @default(uuid()) @db.Uuid
@@ -468,7 +510,7 @@ model KnowledgeUsage {
   // 本次注入服务的行为类型，取值口径见 packages/shared 的 ACTION_TYPES
   actionType String @map("action_type") @db.VarChar(64)
   day        Int @db.SmallInt
-  // 关联行为的评分，由 judge.service.backfillRewards 回填，尚未回填时为 NULL
+  // 历史兼容列：停止回填，现有值保留；质量分析通过 Event 读取采用评分
   rewardScore Int? @map("reward_score") @db.SmallInt
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
 
@@ -539,6 +581,7 @@ model DecisionContext {
 }
 
 model TeamJudgment {
+  source Json? @db.JsonB // 已采用的平台评分引用，不保存新评分历史
   evaluationRunId String? @map("evaluation_run_id") @db.VarChar(200)
   eventId String @id @map("event_id") @db.Uuid
   gameId String @map("game_id") @db.Uuid
@@ -562,6 +605,10 @@ model EvaluationRun {
   status String @default("pending") @db.VarChar(16)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   completedAt DateTime? @map("completed_at") @db.Timestamptz
+  definition Json? @db.JsonB // 未完成时冻结 evaluator 输入定义；完成后仅保留平台版本引用
+  pendingResults Json @default("{}") @map("pending_results") @db.JsonB // 暂存判分及交付凭据，采用后清空
+  deliveredEventIds String[] @default([]) @map("delivered_event_ids") @db.Uuid
+  selection Json? @db.JsonB // 显式采用的外部 Score 身份；普通 evaluator 结果按 run/event 推导
   @@index([gameId, createdAt])
   @@map("evaluation_runs")
 }

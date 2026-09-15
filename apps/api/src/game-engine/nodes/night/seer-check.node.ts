@@ -1,5 +1,5 @@
 import { ModelCallError } from '@/llm/model-call-guard';
-import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
+import { failAfterEffect, failModelCall } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES, ACTION_TYPES } from '@ai-werewolf/shared';
 import { z } from 'zod';
@@ -7,7 +7,6 @@ import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { saveNodeValue } from '../node.types';
 import { checkSeerResult } from '../../rules/seer-check';
-import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
 /**
@@ -47,6 +46,8 @@ export class SeerCheckNode {
       }
 
       const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         content: '预言家，请睁眼。',
@@ -88,50 +89,42 @@ export class SeerCheckNode {
           context.signal,
         );
 
-        // 执行决策
-        if (decision.action === 'check_identity') {
-          const targetPlayer = state.players.find((p) => p.seatNo === decision.targetSeatNo);
+        const targetPlayer = state.players.find((p) => p.seatNo === decision.targetSeatNo);
 
-          // 硬校验：目标必须存活、非自己、未查验过
-          if (
-            !targetPlayer ||
-            !targetPlayer.isAlive ||
-            targetPlayer.seatNo === seer.seatNo ||
-            checkedSeatNos.has(decision.targetSeatNo)
-          ) {
-            throw new ModelCallError('invalid_output');
-          }
-
-          const checkResult = checkSeerResult(targetPlayer);
-
-          effectStarted = true;
-          const seerCheckEvent = await context.eventWriter.writeSeerCheckEvent({
-            gameId: state.gameId,
-            day: state.currentDay,
-            actorId: seer.id,
-            targetSeatNo: targetPlayer.seatNo,
-            result: checkResult,
-            thinking: reasoning,
-          });
-          await this.agentRuntime.recordExperienceUsages(contextData, seerCheckEvent);
-          await context.eventBus?.publish(seerCheckEvent);
-
-          return {
-            seerCheckTarget: decision.targetSeatNo,
-            seerCheckResult: { targetSeatNo: decision.targetSeatNo, result: checkResult },
-          };
-        } else {
-          gameLogger.warn('[预言家查验] 决策格式错误，降级为随机查验');
-          return this.fallbackToRandom(state, seer, context, checkedSeatNos);
+        // 硬校验：目标必须存活、非自己、未查验过
+        if (
+          !targetPlayer ||
+          !targetPlayer.isAlive ||
+          targetPlayer.seatNo === seer.seatNo ||
+          checkedSeatNos.has(decision.targetSeatNo)
+        ) {
+          throw new ModelCallError('invalid_output');
         }
+
+        const checkResult = checkSeerResult(targetPlayer);
+
+        effectStarted = true;
+        const seerCheckEvent = await context.eventWriter.writeSeerCheckEvent({
+          source: contextData.source,
+          phaseInstanceId: state.phaseInstanceId,
+          signal: context.signal,
+          gameId: state.gameId,
+          day: state.currentDay,
+          actorId: seer.id,
+          targetSeatNo: targetPlayer.seatNo,
+          result: checkResult,
+          thinking: reasoning,
+        });
+        await this.agentRuntime.recordExperienceUsages(contextData, seerCheckEvent);
+        await context.eventBus?.publish(seerCheckEvent);
+
+        return {
+          seerCheckTarget: decision.targetSeatNo,
+          seerCheckResult: { targetSeatNo: decision.targetSeatNo, result: checkResult },
+        };
       } catch (error) {
         if (effectStarted) failAfterEffect(error);
-
-        await allowModelFallback(error, context, 'check');
-        gameLogger.error(
-          `[预言家查验] 执行异常，降级为随机查验: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return this.fallbackToRandom(state, seer, context, checkedSeatNos);
+        failModelCall(error, context, '[预言家查验] 执行异常');
       }
     };
   }
@@ -147,6 +140,7 @@ export class SeerCheckNode {
   ) {
     // 复用 AgentRuntimeService 的 prepareContextPublic
     return this.agentRuntime.prepareContextPublic({
+      phaseInstanceId: state.phaseInstanceId,
       gameId: state.gameId,
       playerId: playerId,
       scenario: 'night_action',
@@ -159,44 +153,5 @@ export class SeerCheckNode {
       },
       additionalContext: additionalContext,
     });
-  }
-
-  /**
-   * 降级策略：随机查验
-   */
-  private async fallbackToRandom(
-    state: GameGraphState,
-    seer: any,
-    context: any,
-    checkedSeatNos: Set<number>,
-  ) {
-    const candidates = state.players.filter(
-      (p) => p.isAlive && p.id !== seer.id && !checkedSeatNos.has(p.seatNo),
-    );
-
-    if (candidates.length > 0) {
-      const target = await saveNodeValue(
-        context,
-        'fallback-target',
-        () => candidates[Math.floor(Math.random() * candidates.length)],
-      );
-      const checkResult = checkSeerResult(target);
-
-      const event = await context.eventWriter.writeSeerCheckEvent({
-        gameId: state.gameId,
-        day: state.currentDay,
-        actorId: seer.id,
-        targetSeatNo: target.seatNo,
-        result: checkResult === 'werewolf' ? 'werewolf' : 'good',
-      });
-      await context.eventBus?.publish(event);
-
-      return {
-        seerCheckTarget: target.seatNo,
-        seerCheckResult: { targetSeatNo: target.seatNo, result: checkResult },
-      };
-    }
-
-    return {};
   }
 }

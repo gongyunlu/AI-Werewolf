@@ -327,6 +327,8 @@ export class MemoryMaintenanceService {
         playerId,
         promptName: userPrompt.name,
         promptVersion: userPrompt.version,
+        promptSource: userPrompt.source,
+        promptOrigin: userPrompt.origin,
       });
 
       const importance = Math.max(...members.map((m) => m.importance));

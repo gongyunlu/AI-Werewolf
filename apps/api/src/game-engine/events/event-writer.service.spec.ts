@@ -1,248 +1,127 @@
-import { ACTION_TYPES, GAME_STATUSES } from '@ai-werewolf/shared';
+import { ACTION_TYPES } from '@ai-werewolf/shared';
 import type { PrismaService } from '../../prisma/prisma.service';
-import type { RedisService } from '../../redis/redis.service';
 import { EventWriterService } from './event-writer.service';
+import { MockGameStore } from '../testing/mock-game-store';
+import { normalizeSubmission, submissionHash } from './submission-protocol';
 
-describe('EventWriterService.writeGameEndEvent', () => {
-  const params = {
-    gameId: '00000000-0000-4000-8000-000000000001',
-    winner: 'werewolf',
-    winnerFaction: 'werewolf',
-    totalDays: 3,
-    endedAt: new Date('2026-09-01T00:00:00.000Z'),
+function setup() {
+  const store = new MockGameStore();
+  const writer = new EventWriterService(store.prisma as unknown as PrismaService);
+  const scope = { gameId: store.gameId, phaseInstanceId: 'node/7/vote', day: 1 };
+  const input = {
+    ...scope,
+    expectedActorIds: ['player-1', 'player-2'],
+    votes: [
+      { actorId: 'player-2', voterSeatNo: 2, targetSeatNo: 0 },
+      { actorId: 'player-1', voterSeatNo: 1, targetSeatNo: 2 },
+    ],
   };
+  return { store, writer, scope, input };
+}
 
-  function createHarness() {
-    const event = { id: 'event-1', gameId: params.gameId, sequence: 7 };
-    const tx = {
-      event: { create: jest.fn().mockResolvedValue(event) },
-      game: { update: jest.fn().mockResolvedValue(undefined) },
-    };
-    const prisma = {
-      $transaction: jest.fn(async (task: (client: typeof tx) => Promise<unknown>) => task(tx)),
-      event: { findFirst: jest.fn() },
-    };
-    const redis = {
-      incr: jest.fn().mockResolvedValue(7),
-      set: jest.fn(),
-    };
-    const service = new EventWriterService(
-      prisma as unknown as PrismaService,
-      redis as unknown as RedisService,
-    );
-    return { service, prisma, redis, tx, event };
-  }
-
-  it('在同一个 Prisma transaction 内写 GAME_ENDED 与 FINISHED', async () => {
-    const { service, prisma, tx, event } = createHarness();
-
-    await expect(service.writeGameEndEvent(params)).resolves.toBe(event);
-
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(tx.event.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        gameId: params.gameId,
-        sequence: 7,
-        actionType: ACTION_TYPES.GAME_ENDED,
-        content: { winner: 'werewolf' },
-      }),
-    });
-    expect(tx.game.update).toHaveBeenCalledWith({
-      where: { id: params.gameId },
-      data: {
-        status: GAME_STATUSES.FINISHED,
-        winnerFaction: 'werewolf',
-        totalDays: 3,
-        endedAt: params.endedAt,
-      },
-    });
+describe('领域提交规范化', () => {
+  it('对象字段顺序和 undefined 缺省等价，null 与缺省不同', () => {
+    expect(submissionHash({ b: 2, a: 1, c: undefined })).toBe(submissionHash({ a: 1, b: 2 }));
+    expect(submissionHash({ a: null })).not.toBe(submissionHash({}));
   });
-
-  it('sequence 冲突时先让整笔事务回滚，再重建计数器重试整笔终局写入', async () => {
-    const { service, prisma, redis, tx, event } = createHarness();
-    prisma.$transaction
-      .mockRejectedValueOnce({ code: 'P2002' })
-      .mockImplementationOnce(async (task: (client: typeof tx) => Promise<unknown>) => task(tx));
-    prisma.event.findFirst.mockResolvedValue({ sequence: 9 });
-    redis.incr.mockResolvedValueOnce(7).mockResolvedValueOnce(10);
-
-    await expect(service.writeGameEndEvent(params)).resolves.toBe(event);
-
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
-    expect(redis.set).toHaveBeenCalledWith(`game:${params.gameId}:event_seq`, 9);
-    expect(tx.event.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ sequence: 10 }),
-    });
+  it('保留一般数组的顺序，不把发言顺序当集合', () => {
+    expect(submissionHash({ speechOrder: [1, 2] })).not.toBe(
+      submissionHash({ speechOrder: [2, 1] }),
+    );
+  });
+  it.each([NaN, Infinity, new Date(), [undefined]])('拒绝非 JSON 输入：%s', (value) => {
+    expect(() => normalizeSubmission(value)).toThrow();
   });
 });
 
-describe('EventWriterService.writeVoteBatch', () => {
-  function createHarness() {
-    const tx = {
-      event: {
-        create: jest.fn(
-          async ({ data }: { data: { sequence: number; content: Record<string, unknown> } }) => ({
-            id: `event-${data.sequence}`,
-            sequence: data.sequence,
-          }),
-        ),
-      },
-      findFirst: jest.fn(),
-    };
-    const prisma = {
-      $transaction: jest.fn(async (task: (client: typeof tx) => Promise<unknown>) => task(tx)),
-      event: { findFirst: jest.fn() },
-    };
-    const redis = { incrby: jest.fn().mockResolvedValue(12), set: jest.fn() };
-    const service = new EventWriterService(
-      prisma as unknown as PrismaService,
-      redis as unknown as RedisService,
-    );
-    return { service, prisma, tx, redis };
-  }
-
-  it('整批投票在同一个 Prisma transaction 内按连续序号写入', async () => {
-    const { service, prisma, tx, redis } = createHarness();
-
-    const events = await service.writeVoteBatch({
-      gameId: 'g',
-      day: 1,
-      votes: [
-        { actorId: 'p1', voterSeatNo: 1, targetSeatNo: 2 },
-        { actorId: 'p2', voterSeatNo: 2, targetSeatNo: 0 },
-      ],
-    });
-
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(redis.incrby).toHaveBeenCalledWith('game:g:event_seq', 2);
-    expect(tx.event.create.mock.calls.map(([args]) => args.data.sequence)).toEqual([11, 12]);
-    expect(tx.event.create.mock.calls.map(([args]) => args.data.content)).toEqual([
-      { voteRound: 0, voterSeatNo: 1, targetSeatNo: 2 },
-      { voteRound: 0, voterSeatNo: 2, targetSeatNo: 0 },
-    ]);
-    expect(events.map((event) => event.id)).toEqual(['event-11', 'event-12']);
+describe('EventWriterService 提交与状态边界', () => {
+  it('整批在同一事务写入，按玩家稳定排序，弃票也是事件', async () => {
+    const { store, writer, input } = setup();
+    const transaction = jest.spyOn(store.prisma, '$transaction');
+    const events = await writer.writeVoteBatch(input);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => event.actorId)).toEqual(['player-1', 'player-2']);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(events[1].content).toEqual({ voteRound: 0, voterSeatNo: 2, targetSeatNo: 0 });
+    expect(store.batches.size).toBe(1);
   });
 
-  it('批内任一条写入失败时整批失败', async () => {
-    const { service, tx, prisma } = createHarness();
-    tx.event.create
-      .mockResolvedValueOnce({ id: 'event-11', sequence: 11 })
-      .mockRejectedValueOnce(new Error('批内第二条写入失败'));
+  it('批内第二条写入失败时事件和批次记录一起回滚', async () => {
+    const { store, writer, input } = setup();
+    store.afterEventCreated = (event) => {
+      if (event.sequence === 2) throw new Error('第二项写入失败');
+    };
+    await expect(writer.writeVoteBatch(input)).rejects.toThrow('第二项写入失败');
+    expect(store.events).toHaveLength(0);
+    expect(store.batches.size).toBe(0);
+  });
 
+  it('批次顺序与缺省 voteRound 不影响重试，内容变化报冲突', async () => {
+    const { writer, input, store } = setup();
+    const first = await writer.writeVoteBatch(input);
+    const retry = await writer.writeVoteBatch({
+      ...input,
+      expectedActorIds: input.expectedActorIds.toReversed(),
+      votes: input.votes.toReversed().map((vote) => ({ ...vote, voteRound: 0 })),
+    });
+    expect(retry.map((event) => event.id)).toEqual(first.map((event) => event.id));
+    expect(retry.every((event) => event.replayed)).toBe(true);
     await expect(
-      service.writeVoteBatch({
-        gameId: 'g',
-        day: 1,
-        votes: [
-          { actorId: 'p1', voterSeatNo: 1, targetSeatNo: 2 },
-          { actorId: 'p2', voterSeatNo: 2, targetSeatNo: 1 },
-        ],
+      writer.writeVoteBatch({
+        ...input,
+        votes: input.votes.map((vote) => ({ ...vote, targetSeatNo: 3 })),
       }),
-    ).rejects.toThrow('批内第二条写入失败');
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    ).rejects.toThrow('冲突');
+    expect(store.events).toHaveLength(2);
   });
 
-  it('序号冲突时先让整批回滚，再重建计数器重试整批', async () => {
-    const { service, prisma, tx, redis } = createHarness();
-    prisma.$transaction
-      .mockRejectedValueOnce({ code: 'P2002' })
-      .mockImplementationOnce(async (task: (client: typeof tx) => Promise<unknown>) => task(tx));
-    prisma.event.findFirst.mockResolvedValue({ sequence: 9 });
-    redis.incrby.mockResolvedValueOnce(12).mockResolvedValueOnce(15);
-
-    const events = await service.writeVoteBatch({
-      gameId: 'g',
-      day: 1,
-      votes: [
-        { actorId: 'p1', voterSeatNo: 1, targetSeatNo: 2 },
-        { actorId: 'p2', voterSeatNo: 2, targetSeatNo: 0 },
-        { actorId: 'p3', voterSeatNo: 3, targetSeatNo: 1 },
-      ],
-    });
-
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
-    expect(redis.set).toHaveBeenCalledWith('game:g:event_seq', 9);
-    expect(events.map((event) => event.sequence)).toEqual([13, 14, 15]);
+  it('空批次也提交完成记录，重复提交不新增批次也不写事件', async () => {
+    const { writer, scope, store } = setup();
+    const input = { ...scope, expectedActorIds: [], votes: [] };
+    expect(await writer.writeVoteBatch(input)).toEqual([]);
+    expect(await writer.writeVoteBatch(input)).toEqual([]);
+    expect(store.batches.size).toBe(1);
+    expect(store.events).toHaveLength(0);
   });
 
-  it('没有投票时不开启事务', async () => {
-    const { service, prisma, redis } = createHarness();
-
-    await expect(service.writeVoteBatch({ gameId: 'g', day: 1, votes: [] })).resolves.toEqual([]);
-
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-    expect(redis.incrby).not.toHaveBeenCalled();
-  });
-});
-
-describe('EventWriterService.writeJudgeEvent', () => {
-  function createHarness() {
-    const event = { id: 'event-1' };
-    const calls: string[] = [];
-    const createEvent = jest.fn(async () => {
-      calls.push('event');
-      return event;
-    });
-    const tx = {
-      event: { create: createEvent },
-      player: {
-        update: jest.fn(async () => {
-          calls.push('player');
-        }),
-      },
-    };
-    const prisma = {
-      $transaction: jest.fn(async (task: (client: typeof tx) => Promise<unknown>) => task(tx)),
-      event: { create: createEvent, findFirst: jest.fn() },
-    };
-    const service = new EventWriterService(
-      prisma as unknown as PrismaService,
-      { incr: jest.fn().mockResolvedValue(3), set: jest.fn() } as unknown as RedisService,
-    );
-    return { service, prisma, tx, calls };
-  }
-
-  it('播报与它宣告的状态变更在同一个 Prisma transaction 内提交', async () => {
-    const { service, prisma, tx, calls } = createHarness();
-
-    await service.writeJudgeEvent({
-      gameId: 'g',
-      day: 1,
-      content: '1号位狼人自爆，进入黑夜。',
-      updateState: async (client) => {
-        await client.player.update({ where: { id: 'p' }, data: { deathDay: 1 } });
-      },
-    });
-
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(tx.event.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ actionType: ACTION_TYPES.JUDGE_ANNOUNCE }),
-    });
-    expect(calls).toEqual(['event', 'player']);
-  });
-
-  it('状态变更失败时播报写入一并失败，不留下半个效果', async () => {
-    const { service, tx } = createHarness();
-    tx.player.update.mockRejectedValue(new Error('状态写入失败'));
-
+  it('自爆播报与明确死亡事实同事务，死亡失败时播报回滚', async () => {
+    const { writer, scope, store } = setup();
+    store.prisma.player.update.mockRejectedValueOnce(new Error('死亡写入失败'));
     await expect(
-      service.writeJudgeEvent({
-        gameId: 'g',
-        day: 1,
-        content: '1号位狼人自爆，进入黑夜。',
-        updateState: async (client) => {
-          await client.player.update({ where: { id: 'p' }, data: { deathDay: 1 } });
-        },
+      writer.writeJudgeEvent({
+        ...scope,
+        content: '1号自爆',
+        death: { playerId: 'player-1', cause: 'self_destruct' },
       }),
-    ).rejects.toThrow('状态写入失败');
+    ).rejects.toThrow('死亡写入失败');
+    expect(store.events).toHaveLength(0);
+    const event = await writer.writeJudgeEvent({
+      ...scope,
+      content: '1号自爆',
+      death: { playerId: 'player-1', cause: 'self_destruct' },
+    });
+    expect(event.actionType).toBe(ACTION_TYPES.JUDGE_ANNOUNCE);
+    expect(store.players[0].deathCause).toBe('self_destruct');
+    await expect(
+      writer.writeJudgeEvent({
+        ...scope,
+        content: '1号自爆',
+        death: { playerId: 'player-2', cause: 'self_destruct' },
+      }),
+    ).rejects.toThrow('冲突');
+    expect(store.players[1].deathDay).toBeNull();
   });
 
-  it('没有状态变更时按单条事件写入', async () => {
-    const { service, prisma, calls } = createHarness();
-
-    await service.writeJudgeEvent({ gameId: 'g', day: 1, content: '天亮了' });
-
-    expect(calls).toEqual(['event']);
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+  it('终局事件与状态同事务，重试保留首次结束时间并比较状态内容', async () => {
+    const { writer, scope, store } = setup();
+    const input = { ...scope, winner: 'werewolf', winnerFaction: 'werewolf', totalDays: 3 };
+    const first = await writer.writeGameEndEvent(input);
+    const endedAt = store.game.endedAt;
+    const retry = await writer.writeGameEndEvent(input);
+    expect(retry.id).toBe(first.id);
+    expect(store.game.status).toBe('finished');
+    expect(store.game.endedAt).toEqual(endedAt);
+    await expect(writer.writeGameEndEvent({ ...input, totalDays: 4 })).rejects.toThrow('冲突');
+    expect(store.game.totalDays).toBe(3);
   });
 });

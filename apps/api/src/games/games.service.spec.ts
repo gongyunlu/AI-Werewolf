@@ -10,7 +10,7 @@ function createService() {
       create: jest.fn(),
       findUnique: jest.fn(),
       findUniqueOrThrow: jest.fn(),
-      updateMany: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     $transaction: jest.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
       callback({ game: { update: jest.fn().mockResolvedValue(undefined) } }),

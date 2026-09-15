@@ -66,10 +66,50 @@ export class MockGameStore {
   }));
   readonly events: Event[] = [];
   readonly snapshots = new Map<string, unknown>();
+  readonly batches = new Map<
+    string,
+    { batchKey: string; gameId: string; payloadHash: string; outcomes: unknown; eventIds: string[] }
+  >();
   readonly counters = new Map<string, number>();
+  readonly deliveries = new Map<string, Record<string, unknown>>();
   afterEventCreated?: (event: Event) => void;
+  afterTransactionCommitted?: (events: Event[]) => void;
+  private transactionTail: Promise<void> = Promise.resolve();
 
   readonly prisma = {
+    eventDeliveryOutbox: {
+      create: jest.fn(
+        async ({ data }: { data: { deliveryKey: string } & Record<string, unknown> }) => {
+          if (this.deliveries.has(data.deliveryKey)) throw new Error('重复交付意图');
+          this.deliveries.set(data.deliveryKey, structuredClone(data));
+          return structuredClone(data);
+        },
+      ),
+    },
+    $queryRaw: jest.fn(async () => [{ status: this.game.status }]),
+    effectBatchCommit: {
+      findUnique: jest.fn(async ({ where }: { where: { batchKey: string } }) =>
+        structuredClone(this.batches.get(where.batchKey) ?? null),
+      ),
+      create: jest.fn(
+        async ({
+          data,
+        }: {
+          data: {
+            batchKey: string;
+            gameId: string;
+            payloadHash: string;
+            outcomes: unknown;
+            eventIds: string[];
+          };
+        }) => {
+          if (this.batches.has(data.batchKey))
+            throw Object.assign(new Error('重复批次'), { code: 'P2002' });
+          this.batches.set(data.batchKey, structuredClone(data));
+          return structuredClone(data);
+        },
+      ),
+    },
     game: {
       findUnique: jest.fn(async ({ where }: Query) =>
         matches(this.game, where)
@@ -101,16 +141,22 @@ export class MockGameStore {
       }),
     },
     event: {
+      findUnique: jest.fn(async (query: Query) => selectRows(this.events, query)[0] ?? null),
+      count: jest.fn(async (query: Query) => selectRows(this.events, query).length),
       findMany: jest.fn(async (query: Query) => selectRows(this.events, query)),
       findFirst: jest.fn(async (query: Query) => selectRows(this.events, query)[0] ?? null),
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
         if (
           this.events.some(
-            (event) => event.gameId === data.gameId && event.sequence === data.sequence,
+            (event) =>
+              (event.gameId === data.gameId && event.sequence === data.sequence) ||
+              (data.effectKey && event.effectKey === data.effectKey),
           )
         )
           throw Object.assign(new Error('duplicate sequence'), { code: 'P2002' });
         const event = {
+          effectKey: null,
+          payloadHash: null,
           ...JSON.parse(JSON.stringify(data)),
           id: `event-${data.sequence}`,
           createdAt: new Date(),
@@ -134,19 +180,36 @@ export class MockGameStore {
       ),
     },
     $transaction: async <T>(action: (tx: MockGameStore['prisma']) => Promise<T>): Promise<T> => {
+      const previous = this.transactionTail;
+      let release!: () => void;
+      this.transactionTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
       const before = structuredClone({
         game: this.game,
         events: this.events,
         players: this.players,
+        batches: this.batches,
+        deliveries: this.deliveries,
       });
+      let result: T;
       try {
-        return await action(this.prisma);
+        result = await action(this.prisma);
       } catch (error) {
         Object.assign(this.game, before.game);
         this.events.splice(0, this.events.length, ...before.events);
         this.players.splice(0, this.players.length, ...before.players);
+        this.batches.clear();
+        for (const [key, value] of before.batches) this.batches.set(key, value);
+        this.deliveries.clear();
+        for (const [key, value] of before.deliveries) this.deliveries.set(key, value);
         throw error;
+      } finally {
+        release();
       }
+      this.afterTransactionCommitted?.(this.events.slice(before.events.length));
+      return result;
     },
   };
 

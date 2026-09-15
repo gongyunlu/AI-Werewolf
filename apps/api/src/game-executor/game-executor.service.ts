@@ -7,7 +7,6 @@ import { decodeRecoveryValue } from '../game-recovery/recovery-value';
 import { PLAYER_TURN_PROMPT_NAMES, PROMPT_NAMES } from '../observability/prompt-templates';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentRuntimeService } from '../agent-runtime/agent-runtime.service';
-import { EventWriterService } from '../game-engine/events/event-writer.service';
 import { GameEngineFactory } from './game-engine.factory';
 import { ALL_PRESETS } from '../game-engine/presets/game-presets';
 import type { GameGraphState, PlayerState } from '../game-engine/core/types';
@@ -42,7 +41,6 @@ export class GameExecutorService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRuntime: AgentRuntimeService,
-    private readonly eventWriter: EventWriterService,
     private readonly configService: ConfigService<Env, true>,
     private readonly broadcaster: SseBroadcasterService,
     private readonly eventBus: EventBusService,
@@ -90,9 +88,6 @@ export class GameExecutorService {
       skillVersion: game.skillVersion,
       roles: game.players.map((player) => player.role).filter((role): role is string => !!role),
     });
-
-    // 初始化 Redis sequence 计数器（处理 Redis 重启或游戏恢复场景）
-    await this.eventWriter.initializeSequenceCounter(gameId);
 
     // 旧对局没有执行记录，不能通过重新初始化来冒充恢复。
     let execution;
@@ -241,6 +236,7 @@ export class GameExecutorService {
     return {
       gameId: game.id,
       currentDay: 1,
+      phaseInstanceId: 'node/0/init',
       currentPhase: 'night',
       players: playerStates,
       eventSequence: 0,

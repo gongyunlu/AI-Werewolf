@@ -73,7 +73,7 @@ export class ReflectionWorkerService extends WorkerHost {
 
       // 全局 pattern 晋升：幂等，无论本次还是上次重试生成的复盘，都从已存 narrative 取回聚类。
       // 放在 reviewCompleted 检查点之外，避免 reviewGame 成功但后续步骤失败重试时漏跑晋升。
-      const review = await this.gameReviewService.loadReview(gameId);
+      const review = await this.gameReviewService.loadStoredReview(gameId);
       if (review && writeLearning) {
         await this.globalMemoryService.promotePatterns(gameId, review.patterns);
       }

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { PromptOrigin } from './langfuse-project';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
@@ -22,6 +23,11 @@ export interface StructuredInvokeOptions<T> {
   role?: string | null;
   promptName?: string;
   promptVersion?: number | null;
+  promptSource?: 'langfuse' | 'local_release' | 'local_default';
+  promptOrigin?: PromptOrigin;
+  source?: import('./action-source').ActionSource;
+  /** 评估运行冻结的端点；密钥始终读取当前配置。 */
+  baseUrl?: string;
   /** 缺省取 JUDGE_MODEL，再回落 ARK_DEFAULT_MODEL */
   modelName?: string;
 }
@@ -41,8 +47,20 @@ export class StructuredLlmService {
     private readonly langfuse: LangfuseService,
   ) {}
 
+  captureConfiguration(modelName?: string): { modelName: string; baseUrl: string } {
+    return {
+      modelName:
+        modelName ??
+        this.configService.get('JUDGE_MODEL') ??
+        this.configService.get('ARK_DEFAULT_MODEL', { infer: true }),
+      baseUrl: this.configService.get('ARK_BASE_URL', { infer: true }),
+    };
+  }
+
   async invoke<T>(options: StructuredInvokeOptions<T>): Promise<{ output: T; modelName: string }> {
     const { schema, system, user, runName, scenario, gameId, playerId } = options;
+    if (options.baseUrl && options.baseUrl !== this.configService.get('ARK_BASE_URL'))
+      throw new Error('裁判端点已变化，不能把当前密钥用于冻结的旧端点；请显式创建新评估运行');
     const modelName: string =
       options.modelName ??
       this.configService.get('JUDGE_MODEL') ??
@@ -51,7 +69,7 @@ export class StructuredLlmService {
     const baseModel = new ChatOpenAI({
       apiKey: this.configService.get('ARK_API_KEY'),
       model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
+      configuration: { baseURL: options.baseUrl ?? this.configService.get('ARK_BASE_URL') },
       streaming: false,
       // 单次调用超时：火山方舟偶发 hang 时，5 分钟后抛超时异常而非永远 pending，
       // 否则 concurrency=2 的 worker 槽会被占死、队列堆积。
@@ -74,6 +92,9 @@ export class StructuredLlmService {
       role: options.role,
       promptName: options.promptName,
       promptVersion: options.promptVersion,
+      promptSource: options.promptSource,
+      promptOrigin: options.promptOrigin,
+      source: options.source,
     };
 
     const baseMessages: BaseMessage[] = [
@@ -126,11 +147,20 @@ export class StructuredLlmService {
       refineSystem: string;
       refinePromptName?: string;
       refinePromptVersion?: number | null;
+      refinePromptSource?: 'langfuse' | 'local_release' | 'local_default';
+      refinePromptOrigin?: PromptOrigin;
       refineUser: (first: T) => string;
     },
   ): Promise<{ output: T; modelName: string }> {
-    const { refineSystem, refinePromptName, refinePromptVersion, refineUser, ...firstOptions } =
-      options;
+    const {
+      refineSystem,
+      refinePromptName,
+      refinePromptVersion,
+      refinePromptSource,
+      refinePromptOrigin,
+      refineUser,
+      ...firstOptions
+    } = options;
 
     const first = await this.invoke(firstOptions);
 
@@ -141,6 +171,8 @@ export class StructuredLlmService {
       runName: `${options.runName}-refine`,
       promptName: refinePromptName ?? firstOptions.promptName,
       promptVersion: refinePromptVersion ?? firstOptions.promptVersion,
+      promptSource: refinePromptSource,
+      promptOrigin: refinePromptOrigin,
     });
 
     return refined;

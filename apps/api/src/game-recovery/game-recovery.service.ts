@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, Optional } from '@nestjs/common';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import type { GameExecution, Prisma } from '../generated/prisma/client';
@@ -11,6 +11,7 @@ import {
   type ModelFailureDetails,
 } from '../llm/model-call-guard';
 import { decodeRecoveryValue, encodeRecoveryValue } from './recovery-value';
+import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 
 /** version 只保护持久化格式本身；格式不变的其他差异一律允许续跑。 */
 export interface RecoveryManifest {
@@ -43,7 +44,10 @@ export class ExecutionOwnershipError extends Error {
 export class GameRecoveryService {
   private readonly storage = new AsyncLocalStorage<ExecutionScope>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly broadcaster?: SseBroadcasterService,
+  ) {}
 
   get current() {
     return this.storage.getStore();
@@ -195,6 +199,11 @@ export class GameRecoveryService {
   async effect<T>(
     label: string,
     callback: (tx: Prisma.TransactionClient) => Promise<T>,
+    options?: {
+      replay: (tx: Prisma.TransactionClient, saved: T) => Promise<T>;
+      /** 仅供自带业务键与终态写入保护的提交器核实原结果。 */
+      allowFinished?: boolean;
+    },
   ): Promise<T> {
     const scope = this.current;
     if (!scope) return callback(this.prisma);
@@ -205,8 +214,13 @@ export class GameRecoveryService {
       const saved = await tx.gameExecutionStep.findUnique({
         where: { gameId_key: { gameId: scope.execution.gameId, key } },
       });
-      if (saved?.completed) return this.unpack<T>(saved.output);
-      await this.fence(tx, scope);
+      if (saved?.completed) {
+        const value = this.unpack<T>(saved.output);
+        const result = options ? await options.replay(tx, value) : value;
+        scope.signal.throwIfAborted();
+        return result;
+      }
+      await this.fence(tx, scope, options?.allowFinished);
       const value = await callback(tx);
       scope.signal.throwIfAborted();
       await tx.gameExecutionStep.create({
@@ -252,7 +266,7 @@ export class GameRecoveryService {
 
   /** 只在队列已确认任务失锁后调用；启动另一个 API 本身不是中断证据。 */
   async interrupt(gameId: string, generation?: number) {
-    return this.prisma.$transaction(async (tx) => {
+    const interrupted = await this.prisma.$transaction(async (tx) => {
       // 与领域提交保持 execution → game 的加锁顺序。
       await tx.gameExecution.updateMany({
         where: { gameId },
@@ -282,10 +296,13 @@ export class GameRecoveryService {
         });
       return changed.count > 0;
     });
+    if (interrupted) this.broadcaster?.complete(gameId);
+    return interrupted;
   }
 
   async prepareResume(gameId: string) {
-    return this.prisma.$transaction(async (tx) => {
+    let resumed = false;
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.gameExecution.updateMany({
         where: { gameId },
         data: { generation: { increment: 0 } },
@@ -304,11 +321,14 @@ export class GameRecoveryService {
         data: { status: GAME_STATUSES.RUNNING },
       });
       if (!claimed.count) throw new ConflictException('只有待恢复的对局可以恢复');
+      resumed = true;
       return tx.gameExecution.update({
         where: { gameId },
         data: { generation: { increment: 1 }, owner: null, dispatchPending: true },
       });
     });
+    if (resumed) this.broadcaster?.complete(gameId);
+    return result;
   }
 
   async renewDispatch(gameId: string, generation: number) {

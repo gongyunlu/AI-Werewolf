@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
 import { StructuredLlmService } from '../observability/structured-llm.service';
@@ -6,6 +7,11 @@ import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { GameReviewOutputSchema, type GameReviewOutput } from './reflection-schema';
 import { buildGameReviewVariables, type ReviewPlayer } from './reflection-prompt';
 import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
+import {
+  loadPlatformEvaluationRun,
+  lockReflectionEvaluation,
+  reviewMatchesEvaluation,
+} from './evaluation-reference';
 
 /** 复盘结果，作为各玩家反思的共同输入 */
 export interface GameReviewResult {
@@ -29,16 +35,38 @@ export class GameReviewService {
     private readonly structuredLlm: StructuredLlmService,
   ) {}
 
-  /** 读取已生成的复盘；未生成时返回 null */
-  async loadReview(gameId: string): Promise<GameReviewOutput | null> {
+  /** 读取已生成的复盘；未生成或与当前评分运行对不上时返回 null */
+  async loadReview(
+    gameId: string,
+    db: Prisma.TransactionClient = this.prisma,
+  ): Promise<GameReviewOutput | null> {
+    const [summary, run] = await Promise.all([
+      db.gameSummary.findUnique({ where: { gameId }, select: { narrative: true } }),
+      loadPlatformEvaluationRun(db, gameId),
+    ]);
+    if (!summary?.narrative) return null;
+    if (run && (run.status !== 'complete' || !reviewMatchesEvaluation(summary.narrative, run.id)))
+      return null;
+    return this.parseReviewOutput(gameId, summary.narrative);
+  }
+
+  /**
+   * 读取已存复盘，不校验评分运行。
+   *
+   * 复盘生成后紧接着的规律晋升要用这条路径：它取的是刚写进去的那一份，
+   * 而重评会让「当前评分运行」对不上，不代表已存聚类失效。
+   */
+  async loadStoredReview(gameId: string): Promise<GameReviewOutput | null> {
     const summary = await this.prisma.gameSummary.findUnique({
       where: { gameId },
       select: { narrative: true },
     });
-    if (!summary?.narrative) return null;
+    return summary?.narrative ? this.parseReviewOutput(gameId, summary.narrative) : null;
+  }
 
+  private parseReviewOutput(gameId: string, narrative: string): GameReviewOutput | null {
     try {
-      const parsed = GameReviewOutputSchema.safeParse(JSON.parse(summary.narrative));
+      const parsed = GameReviewOutputSchema.safeParse(JSON.parse(narrative));
       return parsed.success ? parsed.data : null;
     } catch (error) {
       this.logger.warn(
@@ -56,53 +84,62 @@ export class GameReviewService {
    */
   async reviewGame(gameId: string, force = false): Promise<GameReviewResult> {
     const players = await this.loadPlayers(gameId);
-
-    if (!force) {
-      const existing = await this.loadReview(gameId);
-      if (existing) {
-        this.logger.log({ gameId }, '复盘已存在，跳过生成');
-        return { review: existing, players };
+    const snapshot = await this.prisma.$transaction(async (tx) => {
+      const evaluationRunId = await lockReflectionEvaluation(tx, gameId);
+      if (!force) {
+        const existing = await this.loadReview(gameId, tx);
+        if (existing) return { existing };
       }
-    }
 
-    const summary = await this.prisma.gameSummary.findUnique({
-      where: { gameId },
-      select: { winnerFaction: true, totalDays: true },
+      const summary = await tx.gameSummary.findUnique({
+        where: { gameId },
+        select: { winnerFaction: true, totalDays: true },
+      });
+      if (!summary) {
+        throw new Error(`Game ${gameId} 尚未结算，无法复盘`);
+      }
+
+      const [events, speechSummaries, judgments] = await Promise.all([
+        tx.event.findMany({
+          where: { gameId },
+          select: {
+            sequence: true,
+            day: true,
+            actionType: true,
+            visibility: true,
+            actorId: true,
+            content: true,
+          },
+          orderBy: { sequence: 'asc' },
+        }),
+        tx.speechSummary.findMany({
+          where: { gameId },
+          select: { day: true, seatNo: true, summary: true },
+        }),
+        tx.decisionJudgment.findMany({
+          where: {
+            gameId,
+            evaluationVersion: EVALUATION_VERSION,
+            ...(evaluationRunId ? { evaluationRunId } : {}),
+          },
+          select: {
+            playerId: true,
+            actionType: true,
+            day: true,
+            targetSeatNo: true,
+            verdict: true,
+            score: true,
+            reasoning: true,
+          },
+        }),
+      ]);
+      return { evaluationRunId, summary, events, speechSummaries, judgments };
     });
-    if (!summary) {
-      throw new Error(`Game ${gameId} 尚未结算，无法复盘`);
+    if (snapshot.existing) {
+      this.logger.log({ gameId }, '复盘已存在，跳过生成');
+      return { review: snapshot.existing, players };
     }
-
-    const [events, speechSummaries, judgments] = await Promise.all([
-      this.prisma.event.findMany({
-        where: { gameId },
-        select: {
-          sequence: true,
-          day: true,
-          actionType: true,
-          visibility: true,
-          actorId: true,
-          content: true,
-        },
-        orderBy: { sequence: 'asc' },
-      }),
-      this.prisma.speechSummary.findMany({
-        where: { gameId },
-        select: { day: true, seatNo: true, summary: true },
-      }),
-      this.prisma.decisionJudgment.findMany({
-        where: { gameId, evaluationVersion: EVALUATION_VERSION },
-        select: {
-          playerId: true,
-          actionType: true,
-          day: true,
-          targetSeatNo: true,
-          verdict: true,
-          score: true,
-          reasoning: true,
-        },
-      }),
-    ]);
+    const { evaluationRunId, summary, events, speechSummaries, judgments } = snapshot;
 
     const variables = buildGameReviewVariables({
       winnerFaction: summary.winnerFaction,
@@ -136,11 +173,18 @@ export class GameReviewService {
       playerId: gameId,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
+      promptSource: userPrompt.source,
+      promptOrigin: userPrompt.origin,
     });
 
-    await this.prisma.gameSummary.update({
-      where: { gameId },
-      data: { narrative: JSON.stringify(output) },
+    await this.prisma.$transaction(async (tx) => {
+      await lockReflectionEvaluation(tx, gameId, { runId: evaluationRunId });
+      await tx.gameSummary.update({
+        where: { gameId },
+        data: {
+          narrative: JSON.stringify({ ...output, ...(evaluationRunId ? { evaluationRunId } : {}) }),
+        },
+      });
     });
 
     this.logger.log({ gameId, patterns: output.patterns.length }, '对局复盘完成');

@@ -1,5 +1,33 @@
 import { EVALUATION_VERSION } from './evaluation-version';
 import { JudgeService } from './judge.service';
+import type {
+  EvaluationProjectionService,
+  EvaluationDefinition,
+  EvaluatedResult,
+} from './evaluation-projection.service';
+import { createActionSource } from '../observability/action-source';
+
+function projectionHarness() {
+  const results = new Map<string, EvaluatedResult>();
+  const definition = {
+    modelName: 'frozen-judge',
+    baseUrl: 'https://judge.test/v3',
+    prompts: {},
+  } as EvaluationDefinition;
+  const projection = {
+    evaluate: jest.fn(
+      async (
+        ...[gameId, eventId, runId, compute]: Parameters<EvaluationProjectionService['evaluate']>
+      ) => {
+        results.set(
+          eventId,
+          await compute(definition, createActionSource(`${gameId}/${runId}/${eventId}`)),
+        );
+      },
+    ),
+  };
+  return { projection, definition, results };
+}
 
 it('发言评分保留此前查验、顺序公告及弃票，排除未来发言和公告', async () => {
   const events = [
@@ -109,10 +137,13 @@ it('发言评分保留此前查验、顺序公告及弃票，排除未来发言�
       version: 1,
     })),
   };
+  const { projection, results } = projectionHarness();
   const service = new JudgeService(
-    ...([prisma, prompts, llm] as unknown as ConstructorParameters<typeof JudgeService>),
+    ...([prisma, prompts, llm, projection] as unknown as ConstructorParameters<
+      typeof JudgeService
+    >),
   );
-  expect(await service.judgeSpeeches('g', 'p')).toBe(2);
+  expect(await service.judgeSpeeches('g', 'p', undefined, 'run')).toBe(2);
   expect(llm.invokeReflective.mock.calls[0][0].user).toContain('first statement');
   expect(llm.invokeReflective.mock.calls[0][0].user).not.toContain('future statement');
   expect(llm.invokeReflective.mock.calls[1][0].user).toContain('first statement');
@@ -130,11 +161,12 @@ it('发言评分保留此前查验、顺序公告及弃票，排除未来发言�
   expect(firstUser).not.toContain('5号位弃票');
   expect(lastUser).toContain('5号位弃票');
   expect(lastUser).not.toContain('0号位');
-  expect(judgments.upsert.mock.calls.map((call) => call[0].where.eventId)).toEqual(['e1', 'e2']);
+  expect([...results.keys()]).toEqual(['e1', 'e2']);
+  expect(judgments.upsert).not.toHaveBeenCalled();
 });
 
 it.each(['seer_check', 'wolf_kill', 'wolf_explode', 'witch_save'])(
-  '新评分 %s 保留旧分、隔离团队指标并使用事前证据',
+  '新评分 %s 向投影交付结果，保留旧历史、团队归因和事前证据',
   async (actionType) => {
     const content =
       actionType === 'seer_check'
@@ -146,7 +178,7 @@ it.each(['seer_check', 'wolf_kill', 'wolf_explode', 'witch_save'])(
             : { targetSeatNo: 4 };
     const old = {
       evaluationVersion: EVALUATION_VERSION - 1,
-      previousEvaluations: [],
+      previousEvaluations: [{ evaluationVersion: 1, score: 7 }],
       score: 12,
       verdict: 'bad',
       reasoning: 'old',
@@ -203,28 +235,35 @@ it.each(['seer_check', 'wolf_kill', 'wolf_explode', 'witch_save'])(
       }),
     };
     const prompts = {
-      render: jest.fn(async (name, variables) => ({
+      render: jest.fn(async (name, variables, _frozen?: unknown) => ({
         name,
         text: variables ? JSON.stringify(variables) : 'judge',
         version: 1,
       })),
     };
+    const { projection, definition, results } = projectionHarness();
+    const original = structuredClone(old);
     const service = new JudgeService(
-      ...([prisma, prompts, llm] as unknown as ConstructorParameters<typeof JudgeService>),
+      ...([prisma, prompts, llm, projection] as unknown as ConstructorParameters<
+        typeof JudgeService
+      >),
     );
-    await service.judgeEvent('g', 'e');
+    await service.judgeEvent('g', 'e', 'run');
     const input = llm.invokeReflective.mock.calls[0][0];
     expect(input.user).toContain('allowed evidence');
     expect(input.user).toContain('legal');
     expect(input.system).toContain('只依据决策时点');
+    expect(input.modelName).toBe(definition.modelName);
+    expect(input.baseUrl).toBe(definition.baseUrl);
+    expect(prompts.render.mock.calls.every((call) => call[2] === definition.prompts)).toBe(true);
+    expect(results.get('e')).toMatchObject({ score: 80, verdict: 'good', reasoning: 'new' });
+    expect(old).toEqual(original);
+    expect(judgments.upsert).not.toHaveBeenCalled();
+    expect(teams.upsert).not.toHaveBeenCalled();
     if (actionType === 'wolf_kill') {
-      expect(judgments.upsert).not.toHaveBeenCalled();
-      expect(teams.upsert.mock.calls[0][0].create.faction).toBe('werewolf');
-    } else {
-      const saved = judgments.upsert.mock.calls[0][0];
-      expect(saved.update.evaluationVersion).toBe(EVALUATION_VERSION);
-      expect(saved.update.previousEvaluations[0].score).toBe(12);
-      if (actionType === 'seer_check') expect(input.user).not.toContain('werewolf');
+      expect(input.user).toContain('狼人阵营集体决策');
+    } else if (actionType === 'seer_check') {
+      expect(input.user).not.toContain('werewolf');
     }
   },
 );

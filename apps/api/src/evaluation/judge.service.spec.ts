@@ -2,10 +2,11 @@ import { JudgeService } from './judge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
 import { StructuredLlmService } from '../observability/structured-llm.service';
+import type { EvaluationProjectionService } from './evaluation-projection.service';
 
 /** mock PrismaService（仅覆盖 reward 回填与个人分聚合用到的读写面） */
 function createMockPrisma() {
-  return {
+  const db = {
     teamJudgment: { findMany: jest.fn().mockResolvedValue([]) },
     decisionJudgment: { findMany: jest.fn(), groupBy: jest.fn() },
     memoryUsage: { findMany: jest.fn(), update: jest.fn() },
@@ -13,11 +14,35 @@ function createMockPrisma() {
     agentPerformance: { findMany: jest.fn(), update: jest.fn() },
     gameSummary: { update: jest.fn() },
     event: { findMany: jest.fn() },
+    $executeRaw: jest.fn(),
+    $transaction: jest.fn(),
   };
+  db.$transaction.mockImplementation(async (task) => task(db));
+  return db;
+}
+
+/** 本文件只覆盖 reward 回填与个人分聚合，提示词、模型调用与评分投影都不参与这些路径。 */
+function createJudgeService(db: ReturnType<typeof createMockPrisma>) {
+  return new JudgeService(
+    db as unknown as PrismaService,
+    {} as unknown as PromptService,
+    {} as unknown as StructuredLlmService,
+    {} as unknown as EvaluationProjectionService,
+  );
 }
 
 describe('JudgeService.backfillRewards', () => {
-  it('团队狼刀分数通过提刀事件关联回填攻略和记忆 usage', async () => {
+  it('只回填有排序消费者的记忆，不再读取或维护攻略分数副本', async () => {
+    const db = createMockPrisma();
+    db.decisionJudgment.findMany.mockResolvedValue([]);
+    db.memoryUsage.findMany.mockResolvedValue([]);
+    db.knowledgeUsage.findMany.mockResolvedValue([]);
+    const judge = createJudgeService(db);
+    await judge.backfillRewards('g');
+    expect(db.knowledgeUsage.findMany).not.toHaveBeenCalled();
+    expect(db.knowledgeUsage.update).not.toHaveBeenCalled();
+  });
+  it('团队狼刀分数通过提刀事件关联回填记忆 usage', async () => {
     const db = createMockPrisma();
     db.decisionJudgment.findMany.mockResolvedValue([]);
     db.teamJudgment.findMany.mockResolvedValue([{ eventId: 'kill', score: 88 }]);
@@ -34,11 +59,9 @@ describe('JudgeService.backfillRewards', () => {
     };
     db.memoryUsage.findMany.mockResolvedValue([usage]);
     db.knowledgeUsage.findMany.mockResolvedValue([usage]);
-    const judge = new JudgeService(
-      ...([db, {}, {}] as unknown as ConstructorParameters<typeof JudgeService>),
-    );
+    const judge = createJudgeService(db);
     await judge.backfillRewards('g');
-    for (const table of [db.memoryUsage, db.knowledgeUsage])
+    for (const table of [db.memoryUsage])
       expect(table.update).toHaveBeenCalledWith({ where: { id: 'u' }, data: { rewardScore: 88 } });
   });
   let service: JudgeService;
@@ -46,13 +69,9 @@ describe('JudgeService.backfillRewards', () => {
 
   beforeEach(() => {
     prisma = createMockPrisma();
-    // backfillRewards 现同时处理 knowledge_usages；默认无攻略注入，需覆盖时单测里 mockResolvedValue
+    // 攻略使用关系保留历史读取桩，本路径不再读取分数副本。
     (prisma.knowledgeUsage.findMany as jest.Mock).mockResolvedValue([]);
-    service = new JudgeService(
-      prisma as unknown as PrismaService,
-      {} as unknown as PromptService,
-      {} as unknown as StructuredLlmService,
-    );
+    service = createJudgeService(prisma);
   });
 
   it('通过 eventId 精确回填同一天的多条发言', async () => {
@@ -205,11 +224,7 @@ describe('JudgeService.aggregatePlayerScores', () => {
 
   beforeEach(() => {
     prisma = createMockPrisma();
-    service = new JudgeService(
-      prisma as unknown as PrismaService,
-      {} as unknown as PromptService,
-      {} as unknown as StructuredLlmService,
-    );
+    service = createJudgeService(prisma);
   });
 
   it('决策与发言各占 50% 加权合成，最高分当选 MVP', async () => {

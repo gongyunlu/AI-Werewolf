@@ -1,10 +1,9 @@
-import { allowModelFallback } from '../../core/game-failure-policy';
+import { failModelCall } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { ROLES } from '@ai-werewolf/shared';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory } from '../node.types';
 import { saveNodeValue } from '../node.types';
-import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import {
   singleWolfDecision,
@@ -32,6 +31,8 @@ export class WerewolfKillNode {
       }
 
       const nightPromptEvent = await context.eventWriter.writeNightPromptEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         content: '狼人，请睁眼。',
@@ -57,27 +58,10 @@ export class WerewolfKillNode {
           );
         }
       } catch (error) {
-        await allowModelFallback(error, context, 'kill');
-        gameLogger.error(
-          `[狼人刀人] 协作流程异常，降级为随机落刀: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        targetPlayerId = null;
+        failModelCall(error, context, '[狼人刀人] 协作流程异常');
       }
 
-      // 降级策略：随机落刀
-      if (!targetPlayerId) {
-        gameLogger.warn('[狼人刀人] Agent 决策失败，降级为随机落刀');
-        const nonWerewolves = state.players.filter((p) => p.isAlive && p.role !== ROLES.WEREWOLF);
-        if (nonWerewolves.length > 0) {
-          const randomTarget = await saveNodeValue(
-            context,
-            'fallback-target',
-            () => nonWerewolves[Math.floor(Math.random() * nonWerewolves.length)],
-          );
-          targetPlayerId = randomTarget.id;
-        }
-      }
-
+      // 单狼决策与多人投票各自在内部处理「没有可用提案」的随机落刀，这里不再补一层。
       const target = targetPlayerId ? state.players.find((p) => p.id === targetPlayerId) : null;
 
       if (targetPlayerId && !target) {
@@ -85,6 +69,8 @@ export class WerewolfKillNode {
       }
 
       const wolfKillEvent = await context.eventWriter.writeWolfKillEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         targetId: targetPlayerId ?? undefined,

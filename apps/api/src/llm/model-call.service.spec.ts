@@ -226,3 +226,56 @@ describe('发言链路的思维链开关', () => {
     expect(jest.mocked(ChatOpenAI).mock.calls[0][0]).not.toHaveProperty('modelKwargs');
   });
 });
+
+describe('发言链路的空正文重放', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  /** 按次数返回不同分片，用于模拟「首次空正文、重放成功」这类供应商行为。 */
+  type Chunk = { content: string; response_metadata?: { finish_reason: string } };
+  function stubRuns(runs: Chunk[][]) {
+    return {
+      model: 'stub-model',
+      stream: (() => {
+        let index = 0;
+        return async function* () {
+          const chunks = runs[Math.min(index, runs.length - 1)];
+          index += 1;
+          for (const chunk of chunks) yield chunk;
+        };
+      })(),
+    };
+  }
+
+  it('首次正文为空时重放同一请求，不再赔掉整轮发言', async () => {
+    jest
+      .mocked(ChatOpenAI)
+      .mockReturnValue(
+        stubRuns([[{ content: '' }], [{ content: '正' }, { content: '文' }]]) as never,
+      );
+
+    await expect(service().streamText('deepseek-flash', [], undefined)).resolves.toBe('正文');
+  });
+
+  it('重放一次仍为空就上抛，不继续重试', async () => {
+    const model = stubRuns([[{ content: '' }], [{ content: '  ' }]]);
+    jest.mocked(ChatOpenAI).mockReturnValue(model as never);
+    const stream = jest.spyOn(model, 'stream');
+
+    await expect(service().streamText('deepseek-flash', [], undefined)).rejects.toMatchObject({
+      code: 'invalid_output',
+      details: { reason: 'empty_output' },
+    });
+    expect(stream).toHaveBeenCalledTimes(2);
+  });
+
+  it('达到长度上限的截断不重放', async () => {
+    const model = stubRuns([[{ content: '', response_metadata: { finish_reason: 'length' } }]]);
+    jest.mocked(ChatOpenAI).mockReturnValue(model as never);
+    const stream = jest.spyOn(model, 'stream');
+
+    await expect(service().streamText('deepseek-flash', [], undefined)).rejects.toMatchObject({
+      details: { reason: 'truncated_output' },
+    });
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+});

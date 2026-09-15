@@ -14,6 +14,7 @@ import {
 
 import turnRelease from './turn-prompt-release.json';
 import { RedisService } from '../redis/redis.service';
+import { readPromptOrigin, type PromptOrigin } from './langfuse-project';
 
 // prompt 渲染结果
 export interface RenderedPrompt {
@@ -21,6 +22,7 @@ export interface RenderedPrompt {
   name: PromptName;
   version: number | null;
   source?: 'langfuse' | 'local_release' | 'local_default';
+  origin?: PromptOrigin;
 }
 
 // 在线 prompt 的本地缓存 TTL（秒）：在 Langfuse 面板修改 prompt 后，最多等待该时长即生效
@@ -34,6 +36,7 @@ const CACHE_TTL_SECONDS = 60;
 export class PromptService {
   private readonly logger = new Logger(PromptService.name);
   private readonly langfuse: Langfuse | null;
+  private projectOrigin?: Promise<PromptOrigin | undefined>;
 
   private readonly localSnapshots = new Map<string, Promise<FrozenPrompts>>();
 
@@ -140,7 +143,14 @@ export class PromptService {
         throw new Error(`production 版本缺少必需变量: ${missingVariables.join(', ')}`);
       }
 
-      return { text: client.prompt, name, version: client.version, source: 'langfuse' };
+      // 同一客户端的项目身份只需查询一次；失败后允许后续快照重新确认。
+      this.projectOrigin ??= readPromptOrigin(
+        this.langfuse,
+        this.configService.get('LANGFUSE_HOST'),
+      );
+      const origin = await this.projectOrigin;
+      if (!origin) this.projectOrigin = undefined;
+      return { text: client.prompt, name, version: client.version, source: 'langfuse', origin };
     } catch (error) {
       this.logger.warn(
         `prompt "${name}" 拉取或校验失败，使用本地副本: ${error instanceof Error ? error.message : String(error)}`,

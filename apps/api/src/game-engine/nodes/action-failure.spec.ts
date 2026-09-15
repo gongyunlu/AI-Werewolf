@@ -13,7 +13,6 @@ import { WitchPoisonNode } from './night/witch-poison.node';
 import { WerewolfKillNode } from './night/werewolf-kill.node';
 import { wolfVoting } from './night/werewolf-collaboration';
 import { resolveNightActions } from '../rules/night-resolution';
-import { GameFailurePolicy } from '../core/game-failure-policy';
 import { VoteTurnAdapter } from '@/game-executor/vote-turn.adapter';
 
 function setup() {
@@ -26,7 +25,6 @@ function setup() {
   const eventWriter = Object.fromEntries([
     ...[
       'writeNightPromptEvent',
-      'writePlayerVoteEvent',
       'writePlayerSpeechEvent',
       'writeSeerCheckEvent',
       'writeWitchAntidoteEvent',
@@ -34,6 +32,19 @@ function setup() {
       'writeWolfDecisionEvent',
       'writeWolfKillEvent',
     ].map((name) => [name, jest.fn().mockResolvedValue({ id: name })]),
+    [
+      'writeWolfProposalBatch',
+      jest.fn(
+        async (batch: {
+          proposals: Array<{ actorId: string; targetSeatNo: number; seatNo: number }>;
+        }) =>
+          batch.proposals.map((proposal) => ({
+            id: 'writeWolfProposalBatch',
+            actorId: proposal.actorId,
+            content: proposal,
+          })),
+      ),
+    ],
     [
       'writeVoteBatch',
       jest.fn(
@@ -74,34 +85,42 @@ function setup() {
   return { runtime, eventWriter, context, state };
 }
 
-it.each([false, true])('PK后续玩家收到准确的完成与跳过列表（首位失败=%s）', async (fails) => {
+it('PK后续玩家收到准确的完成列表', async () => {
   const { runtime, context, state } = setup();
   state.pkCandidates = [1, 2];
   state.pkRound = 1;
-  if (fails) runtime.streamSpeech.mockRejectedValueOnce(new ModelCallError('transient'));
   await new PkSpeechNode(runtime as never).create()(context as unknown as NodeContext)(state);
   expect(runtime.prepareContextPublic.mock.calls[1][0].position).toMatchObject({
-    completedSeats: fails ? [] : [1],
-    skippedSeats: fails ? [1] : [],
+    completedSeats: [1],
     order: [1, 2],
   });
 });
 
-it.each([false, true])('首夜遗言提供顺序和已完成状态（首位空发言=%s）', async (empty) => {
+it('PK发言失败时整轮中止，不跳过该玩家继续', async () => {
+  const { runtime, context, state } = setup();
+  state.pkCandidates = [1, 2];
+  state.pkRound = 1;
+  runtime.streamSpeech.mockRejectedValueOnce(new ModelCallError('transient'));
+
+  await expect(
+    new PkSpeechNode(runtime as never).create()(context as unknown as NodeContext)(state),
+  ).rejects.toMatchObject({ code: 'transient' });
+  expect(runtime.prepareContextPublic).toHaveBeenCalledTimes(1);
+});
+
+it('首夜遗言提供顺序和已完成状态', async () => {
   const { runtime, eventWriter, context, state } = setup();
   state.players.forEach((player) => {
     player.isAlive = false;
     player.deathDay = 1;
   });
-  if (empty) runtime.streamSpeech.mockResolvedValueOnce({ thinking: '无遗言', content: '' });
   await new LastWordsNode(runtime as never).create()(context as unknown as NodeContext)(state);
   expect(runtime.prepareContextPublic.mock.calls[1][0].position).toMatchObject({
     phase: '首夜死亡遗言',
     order: [1, 2],
-    completedSeats: empty ? [] : [1],
-    skippedSeats: empty ? [1] : [],
+    completedSeats: [1],
   });
-  expect(eventWriter.writePlayerSpeechEvent).toHaveBeenCalledTimes(empty ? 1 : 2);
+  expect(eventWriter.writePlayerSpeechEvent).toHaveBeenCalledTimes(2);
   expect(eventWriter.writePlayerSpeechEvent).toHaveBeenLastCalledWith(
     expect.objectContaining({
       actorId: 'q',
@@ -139,36 +158,40 @@ describe.each([
   { label: '不存在', targetSeatNo: 99 },
   { label: '已死亡', targetSeatNo: 4 },
 ])('狼刀目标$label', ({ targetSeatNo }) => {
-  it('普通局单狼仅消耗一次降级额度，耗尽后不再落刀', async () => {
+  it('单狼拿到非法目标时上抛，不落随机刀', async () => {
     const { runtime, eventWriter, context, state } = setup();
     state.players.push(createPlayer('dead', 4, false));
     runtime.decide.mockResolvedValue({
       reasoning: '提议刀目标玩家',
       decision: { action: 'propose_kill', targetSeatNo },
     });
-    const nodeContext = {
-      ...context,
-      failurePolicy: new GameFailurePolicy(1, false),
-    } as unknown as NodeContext;
-    const node = new WerewolfKillNode(runtime as never).create()(nodeContext);
-
-    await expect(node(state)).resolves.toEqual({ wolfTarget: 'p' });
-    expect(eventWriter.writeWolfDecisionEvent).not.toHaveBeenCalled();
-    expect(eventWriter.writeWolfKillEvent).toHaveBeenCalledTimes(1);
-    expect(eventWriter.writeWolfKillEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ targetId: 'p', proposalEventIds: [] }),
-    );
+    const node = new WerewolfKillNode(runtime as never).create()(context as unknown as NodeContext);
 
     await expect(node(state)).rejects.toMatchObject({
-      message: expect.stringContaining('降级次数已耗尽 (1/1)'),
-      cause: { name: 'ModelCallError', code: 'invalid_output' },
+      name: 'ModelCallError',
+      code: 'invalid_output',
     });
-    expect(runtime.decide).toHaveBeenCalledTimes(2);
+    expect(runtime.decide).toHaveBeenCalledTimes(1);
     expect(eventWriter.writeWolfDecisionEvent).not.toHaveBeenCalled();
-    expect(eventWriter.writeWolfKillEvent).toHaveBeenCalledTimes(1);
+    expect(eventWriter.writeWolfKillEvent).not.toHaveBeenCalled();
   });
 
-  it('普通局并发提案保留队友合法投票，非法提案受同一降级预算约束', async () => {
+  it('实验局的非法目标判为实验无效', async () => {
+    const { runtime, context, state } = setup();
+    state.players.push(createPlayer('dead', 4, false));
+    runtime.decide.mockResolvedValue({
+      reasoning: '提议刀目标玩家',
+      decision: { action: 'propose_kill', targetSeatNo },
+    });
+    const node = new WerewolfKillNode(runtime as never).create()({
+      ...context,
+      strictExperiment: true,
+    } as unknown as NodeContext);
+
+    await expect(node(state)).rejects.toBeInstanceOf(ExperimentInvalidError);
+  });
+
+  it('并发提案里有一位非法时整批不提交，队友的合法票也不写', async () => {
     const { runtime, eventWriter, context, state } = setup();
     const wolves = [state.players[1], createPlayer('teammate', 3, 'werewolf', 'werewolf')];
     state.players.push(wolves[1], createPlayer('dead', 4, false));
@@ -177,25 +200,12 @@ describe.each([
       reasoning: '提议刀目标玩家',
       decision: { action: 'propose_kill', targetSeatNo: playerId === 'q' ? targetSeatNo : 1 },
     }));
-    const nodeContext = {
-      ...context,
-      failurePolicy: new GameFailurePolicy(1, false),
-    } as unknown as NodeContext;
 
-    await expect(wolfVoting(wolves, state, nodeContext)).resolves.toEqual([
-      expect.objectContaining({ voterId: 'teammate', targetSeatNo: 1 }),
-    ]);
-    expect(eventWriter.writeWolfDecisionEvent).toHaveBeenCalledTimes(1);
-
-    await expect(wolfVoting(wolves, state, nodeContext)).rejects.toMatchObject({
-      message: expect.stringContaining('降级次数已耗尽 (1/1)'),
-      cause: { name: 'ModelCallError', code: 'invalid_output' },
-    });
-    expect(runtime.decide).toHaveBeenCalledTimes(4);
-    expect(eventWriter.writeWolfDecisionEvent).toHaveBeenCalledTimes(2);
-    for (const [payload] of eventWriter.writeWolfDecisionEvent.mock.calls) {
-      expect(payload).toMatchObject({ actorId: 'teammate', content: { targetSeatNo: 1 } });
-    }
+    await expect(
+      wolfVoting(wolves, state, context as unknown as NodeContext),
+    ).rejects.toMatchObject({ name: 'ModelCallError', code: 'invalid_output' });
+    expect(runtime.decide).toHaveBeenCalledTimes(2);
+    expect(eventWriter.writeWolfProposalBatch).not.toHaveBeenCalled();
   });
 });
 
@@ -210,7 +220,7 @@ const cases = [
   {
     name: 'PK',
     Node: PkVoteNode,
-    writer: 'writePlayerVoteEvent',
+    writer: 'writeVoteBatch',
     action: 'cast_vote',
     role: 'villager',
   },
@@ -245,7 +255,7 @@ const cases = [
   {
     name: '狼刀提案',
     Node: WerewolfKillNode,
-    writer: 'writeWolfDecisionEvent',
+    writer: 'writeWolfProposalBatch',
     action: 'propose_kill',
     role: 'werewolf',
   },
@@ -309,9 +319,23 @@ it.each([false, true])('PK 调用失败不随机放逐，也不补弃权票（�
   await expect(
     new PkVoteNode(runtime as never).create()(context as unknown as NodeContext)(state),
   ).rejects.toBeInstanceOf(ModelCallError);
-  expect(eventWriter.writePlayerVoteEvent).toHaveBeenCalledTimes(partial ? 1 : 0);
-  for (const [payload] of eventWriter.writePlayerVoteEvent.mock.calls)
-    expect(payload.targetSeatNo).toBe(2);
+  expect(eventWriter.writeVoteBatch).not.toHaveBeenCalled();
+});
+
+it('狼队某位生成失败时，其他已生成提案不能提前提交', async () => {
+  const { runtime, eventWriter, context, state } = setup();
+  const wolves = [state.players[1], createPlayer('teammate', 3, 'werewolf', 'werewolf')];
+  state.players.push(wolves[1]);
+  runtime.prepareContextPublic.mockImplementation(async ({ playerId }) => ({ playerId }));
+  runtime.decide.mockImplementation(async ({ playerId }: { playerId: string }) => {
+    if (playerId === 'teammate') throw new Error('提案生成中断');
+    return { reasoning: '提议刀1号', decision: { action: 'propose_kill', targetSeatNo: 1 } };
+  });
+  await expect(wolfVoting(wolves, state, context as unknown as NodeContext)).rejects.toThrow(
+    '提案生成中断',
+  );
+  expect(eventWriter.writeWolfDecisionEvent).not.toHaveBeenCalled();
+  expect(eventWriter.writeWolfProposalBatch).not.toHaveBeenCalled();
 });
 
 it.each(['antidote', 'poison'] as const)('先使用 %s 后，同晚不能使用另一瓶药', async (first) => {

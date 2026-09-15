@@ -128,6 +128,7 @@ async function main() {
       }> = [];
       const config = new ConfigService<Env, true>(validateEnv(process.env));
       langfuse = new LangfuseService(config);
+      await langfuse.onModuleInit();
       const turns = new PlayerTurnService(
         config,
         new ModelCallService(config),

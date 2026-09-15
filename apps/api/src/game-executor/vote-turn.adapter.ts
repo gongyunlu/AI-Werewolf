@@ -32,6 +32,7 @@ export class VoteTurnAdapter implements VoteTurnPort {
 
   async vote(request: VoteTurnRequest): Promise<VoteTurnCandidate> {
     const handle = await this.agentRuntime.prepareContextPublic({
+      phaseInstanceId: request.phaseInstanceId,
       gameId: request.gameId,
       playerId: request.playerId,
       scenario: 'vote',
@@ -66,7 +67,7 @@ export class VoteTurnAdapter implements VoteTurnPort {
       action,
     };
     this.handles.set(reference, handle);
-    return { reference, reasoning };
+    return { reference, reasoning, source: handle.source };
   }
 
   async confirm(reference: VoteTurnReference, event: CommittedVoteEvent): Promise<void> {

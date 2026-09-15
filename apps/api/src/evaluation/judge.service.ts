@@ -1,3 +1,5 @@
+import { backfillMemoryRewards } from './memory-reward';
+import type { AdoptScoresInput } from './evaluation-projection.service';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
@@ -14,18 +16,22 @@ import {
 import { isJudgeableAction } from './action-catalog';
 import { aggregatePlayerScores as aggregateScores } from './player-score';
 import { readExperiment } from './experiment-snapshot';
-import type { Prisma } from '../generated/prisma/client';
 import { ExperimentInvalidError } from './experiment-integrity';
 import { evaluationCompleteness, judgeableEventIds } from './evaluation-completeness';
 
-import { EVALUATION_VERSION } from './evaluation-version';
+import {
+  EvaluationProjectionService,
+  type EvaluationDefinition,
+  type EvaluatedResult,
+} from './evaluation-projection.service';
+import type { ActionSource } from '../observability/action-source';
 const EVIDENCE_POLICY =
   '\n只依据决策时点可见的本局证据及规则评估行动。过去对局记忆仅是先验，不是本局身份事实；允许引用历史风格但不得据此确认身份。不依据实际查验结果、后续死亡或最终胜负倒推决策优劣。忽略输入中的攻略质量及是否注入，不把更长的思考当成更好的决策。';
 
 /**
  * LLM-as-judge 决策质量评估服务。
  *
- * 对单个决策事件做「决策时点视角还原」，调用 judge 模型打分并落 DecisionJudgment。
+ * 对单个决策事件做「决策时点视角还原」，调用冻结的 judge 定义，结果交付 Langfuse 后由完整批次生成最小业务投影。
  */
 @Injectable()
 export class JudgeService {
@@ -35,6 +41,7 @@ export class JudgeService {
     private readonly prisma: PrismaService,
     private readonly promptService: PromptService,
     private readonly structuredLlm: StructuredLlmService,
+    private readonly projection: EvaluationProjectionService,
   ) {}
 
   /** 找出对局内所有可评估的决策事件 id */
@@ -52,8 +59,20 @@ export class JudgeService {
       .map((e) => e.id);
   }
 
-  /** 评估单个决策事件并落库 */
+  /** 评估单个已提交决策并交付平台。 */
   async judgeEvent(gameId: string, eventId: string, runId?: string): Promise<void> {
+    if (!runId) throw new Error('评分必须属于明确的评估运行');
+    await this.projection.evaluate(gameId, eventId, runId, (definition, source) =>
+      this.computeEvent(gameId, eventId, definition, source),
+    );
+  }
+
+  private async computeEvent(
+    gameId: string,
+    eventId: string,
+    definition: EvaluationDefinition,
+    source: ActionSource,
+  ): Promise<EvaluatedResult> {
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
       select: {
@@ -70,12 +89,12 @@ export class JudgeService {
 
     if (!event || event.gameId !== gameId) {
       this.logger.warn({ gameId, eventId }, '决策事件不存在或不属于该对局，跳过评估');
-      return;
+      throw new Error('评分目标不再有效');
     }
 
     const content = (event.content as Record<string, unknown>) ?? {};
     if (!isJudgeableAction(event.actionType, content)) {
-      return;
+      throw new Error('评分目标不再有效');
     }
     const isTeam = event.actionType === ACTION_TYPES.WOLF_KILL;
     const teamRepresentative = isTeam
@@ -88,7 +107,7 @@ export class JudgeService {
     const actorId = event.actorId ?? teamRepresentative?.id;
     if (!actorId) {
       this.logger.warn({ gameId, eventId }, '决策事件缺少 actorId，跳过评估');
-      return;
+      throw new Error('评分目标不再有效');
     }
 
     const player = await this.prisma.player.findUnique({
@@ -97,7 +116,7 @@ export class JudgeService {
     });
     if (!player) {
       this.logger.warn({ gameId, eventId, actorId: event.actorId }, '决策玩家不存在，跳过评估');
-      return;
+      throw new Error('评分目标不再有效');
     }
 
     const teammates = await this.loadTeammates(gameId, player.id, player.faction);
@@ -207,9 +226,9 @@ export class JudgeService {
         throw new Error('狼刀缺少提刀输入快照');
     }
     const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
-      this.promptService.render(PROMPT_NAMES.judgeSystem, undefined, experiment?.prompts),
-      this.promptService.render(PROMPT_NAMES.judgeUser, variables, experiment?.prompts),
-      this.promptService.render(PROMPT_NAMES.judgeRefineSystem, undefined, experiment?.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeSystem, undefined, definition.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeUser, variables, definition.prompts),
+      this.promptService.render(PROMPT_NAMES.judgeRefineSystem, undefined, definition.prompts),
     ]);
 
     const { output: refined, modelName } = await this.structuredLlm.invokeReflective({
@@ -217,7 +236,9 @@ export class JudgeService {
       runName: 'judge',
       scenario: 'judge',
       system: systemPrompt.text + EVIDENCE_POLICY,
-      modelName: experiment?.judgeModel,
+      modelName: definition.modelName,
+      baseUrl: definition.baseUrl,
+      source,
       user: userPrompt.text,
       gameId,
       playerId: player.id,
@@ -225,68 +246,29 @@ export class JudgeService {
       role: player.role,
       promptName: userPrompt.name,
       promptVersion: userPrompt.version,
+      promptSource: userPrompt.source,
+      promptOrigin: userPrompt.origin,
       refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
       refinePromptName: refineSystemPrompt.name,
       refinePromptVersion: refineSystemPrompt.version,
+      refinePromptSource: refineSystemPrompt.source,
+      refinePromptOrigin: refineSystemPrompt.origin,
       refineUser: (first) => buildRefineUser(userPrompt.text, first),
     });
     const { verdict, score, reasoning } = refined;
 
-    if (isTeam) {
-      await this.prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${eventId}, 0))`;
-        const old = await tx.teamJudgment.findUnique({ where: { eventId } });
-        if (runId && old?.evaluationRunId === runId) return;
-        await tx.teamJudgment.upsert({
-          where: { eventId },
-          update: {
-            verdict,
-            score,
-            reasoning,
-            modelName,
-            evaluationVersion: EVALUATION_VERSION,
-            previousEvaluations: this.archive(old),
-            evaluationRunId: runId ?? null,
-          },
-          create: {
-            eventId,
-            gameId,
-            faction: FACTIONS.WEREWOLF,
-            actionType: event.actionType,
-            verdict,
-            score,
-            reasoning,
-            modelName,
-            evaluationVersion: EVALUATION_VERSION,
-            evaluationRunId: runId ?? null,
-          },
-        });
-      });
-    } else
-      await this.saveJudgment(
-        {
-          where: { eventId },
-          update: { verdict, score, reasoning, modelName },
-          create: {
-            gameId,
-            playerId: player.id,
-            eventId,
-            actionType: event.actionType,
-            day: event.day ?? 0,
-            targetSeatNo: typeof content.targetSeatNo === 'number' ? content.targetSeatNo : null,
-            verdict,
-            score,
-            reasoning,
-            modelName,
-          },
-        },
-        runId,
-      );
-
-    this.logger.log(
-      { gameId, eventId, actionType: event.actionType, verdict, score },
-      '决策评估完成',
-    );
+    return {
+      verdict,
+      score,
+      reasoning,
+      modelName,
+      input: {
+        variables,
+        system: systemPrompt.text + EVIDENCE_POLICY,
+        user: userPrompt.text,
+        refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
+      },
+    };
   }
 
   /** 找出对局内有过发言的玩家 id，供队列按玩家调度逐条评分。 */
@@ -388,224 +370,97 @@ export class JudgeService {
       return count;
     }
 
-    if (runId) {
-      const targetId = events.find((e) => e.sequence === targetSequence)?.id;
-      if (!targetId) throw new Error('发言目标事件不存在');
-      const saved = await this.prisma.decisionJudgment.findUnique({ where: { eventId: targetId } });
+    if (!runId) throw new Error('评分必须属于明确的评估运行');
+    const targetId = events.find((event) => event.sequence === targetSequence)?.id;
+    if (!targetId || targets.length !== 1) throw new Error('发言目标事件无法唯一确定');
+    await this.projection.evaluate(gameId, targetId, runId, async (definition, source) => {
+      const game = await this.prisma.game.findUnique({
+        where: { id: gameId },
+        select: { experiment: true },
+      });
+      const experiment = readExperiment(game?.experiment);
+      if (experiment?.invalid) throw new ExperimentInvalidError(experiment.invalid.reason);
+      const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
+        this.promptService.render(PROMPT_NAMES.judgeSpeechSystem, undefined, definition.prompts),
+        this.promptService.render(PROMPT_NAMES.judgeSpeechUser, variables, definition.prompts),
+        this.promptService.render(
+          PROMPT_NAMES.judgeSpeechRefineSystem,
+          undefined,
+          definition.prompts,
+        ),
+      ]);
+
+      const { output, modelName } = await this.structuredLlm.invokeReflective({
+        schema: SpeechJudgeOutputSchema,
+        modelName: definition.modelName,
+        baseUrl: definition.baseUrl,
+        source,
+        runName: 'judge-speeches',
+        scenario: 'judge',
+        system: systemPrompt.text + EVIDENCE_POLICY,
+        user: userPrompt.text,
+        gameId,
+        playerId: player.id,
+        seatNo: player.seatNo,
+        role: player.role,
+        promptName: userPrompt.name,
+        promptVersion: userPrompt.version,
+        promptSource: userPrompt.source,
+        promptOrigin: userPrompt.origin,
+        refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
+        refinePromptName: refineSystemPrompt.name,
+        refinePromptVersion: refineSystemPrompt.version,
+        refinePromptSource: refineSystemPrompt.source,
+        refinePromptOrigin: refineSystemPrompt.origin,
+        refineUser: (first) => buildRefineUser(userPrompt.text, first),
+      });
+
+      // 弱模型频繁漏标 index：条数对齐且全部漏标时按输出顺序回填（全漏标说明模型只是
+      // 没写该字段而非乱序，顺序即时间线顺序，无错位风险）。部分漏标仍交 validateSpeechOutput
+      // 抛错重试，不静默错位。
       if (
-        saved?.evaluationVersion === EVALUATION_VERSION &&
-        (saved.evaluationRunId === runId ||
-          (Array.isArray(saved.previousEvaluations) &&
-            saved.previousEvaluations.some(
-              (value) =>
-                value &&
-                typeof value === 'object' &&
-                !Array.isArray(value) &&
-                value.evaluationRunId === runId,
-            )))
-      )
-        return 1;
-    }
-
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      select: { experiment: true },
-    });
-    const experiment = readExperiment(game?.experiment);
-    if (experiment?.invalid) throw new ExperimentInvalidError(experiment.invalid.reason);
-    const [systemPrompt, userPrompt, refineSystemPrompt] = await Promise.all([
-      this.promptService.render(PROMPT_NAMES.judgeSpeechSystem, undefined, experiment?.prompts),
-      this.promptService.render(PROMPT_NAMES.judgeSpeechUser, variables, experiment?.prompts),
-      this.promptService.render(
-        PROMPT_NAMES.judgeSpeechRefineSystem,
-        undefined,
-        experiment?.prompts,
-      ),
-    ]);
-
-    const { output, modelName } = await this.structuredLlm.invokeReflective({
-      schema: SpeechJudgeOutputSchema,
-      modelName: experiment?.judgeModel,
-      runName: 'judge-speeches',
-      scenario: 'judge',
-      system: systemPrompt.text + EVIDENCE_POLICY,
-      user: userPrompt.text,
-      gameId,
-      playerId: player.id,
-      seatNo: player.seatNo,
-      role: player.role,
-      promptName: userPrompt.name,
-      promptVersion: userPrompt.version,
-      refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
-      refinePromptName: refineSystemPrompt.name,
-      refinePromptVersion: refineSystemPrompt.version,
-      refineUser: (first) => buildRefineUser(userPrompt.text, first),
-    });
-
-    // 弱模型频繁漏标 index：条数对齐且全部漏标时按输出顺序回填（全漏标说明模型只是
-    // 没写该字段而非乱序，顺序即时间线顺序，无错位风险）。部分漏标仍交 validateSpeechOutput
-    // 抛错重试，不静默错位。
-    if (
-      output.items.length === targets.length &&
-      output.items.every((item) => item.index == null)
-    ) {
-      output.items = output.items.map((item, i) => ({ ...item, index: i + 1 }));
-    }
-
-    // 校验 index 映射能否安全落到事件：数量对不上或 index 越界/重复/半标时抛错，
-    // 让 job 失败重试，而不是把评分错位写进错误的事件
-    validateSpeechOutput(output.items, targets.length);
-
-    // 模型返回的 index 映射回事件；sequence 唯一，用它反查 eventId
-    const sequences = targets.map((t) => t.sequence);
-    const eventRows = await this.prisma.event.findMany({
-      where: { gameId, sequence: { in: sequences } },
-      select: { id: true, sequence: true },
-    });
-    const eventIdBySequence = new Map(eventRows.map((e) => [e.sequence, e.id]));
-
-    let saved = 0;
-    for (const item of output.items) {
-      // index 已由 schema 保证必填、validateSpeechOutput 保证落在 1..targetCount 且唯一，
-      // 因此只按 index 精确匹配；查不到事件说明数据不一致，丢弃该条而非猜一个目标
-      const target = targets.find((t) => t.index === item.index);
-      const eventId = target ? eventIdBySequence.get(target.sequence) : undefined;
-      if (!target || !eventId) {
-        this.logger.warn({ gameId, playerId, index: item.index }, '发言评分序号无法匹配，已丢弃');
-        continue;
+        output.items.length === targets.length &&
+        output.items.every((item) => item.index == null)
+      ) {
+        output.items = output.items.map((item, i) => ({ ...item, index: i + 1 }));
       }
 
-      await this.saveJudgment(
-        {
-          where: { eventId },
-          update: {
-            verdict: item.verdict,
-            score: item.score,
-            reasoning: item.reasoning,
-            modelName,
-          },
-          create: {
-            gameId,
-            playerId: player.id,
-            eventId,
-            actionType: ACTION_TYPES.SPEECH,
-            day: target.day ?? 0,
-            targetSeatNo: null,
-            verdict: item.verdict,
-            score: item.score,
-            reasoning: item.reasoning,
-            modelName,
-          },
-        },
-        runId,
-      );
-      saved += 1;
-    }
+      // 校验 index 映射能否安全落到事件：数量对不上或 index 越界/重复/半标时抛错，
+      // 让 job 失败重试，而不是把评分错位写进错误的事件
+      validateSpeechOutput(output.items, targets.length);
 
-    // 校验已保证 index 一一对应，落库数仍对不上说明事件数据不一致。
-    // 此时抛错让 job 重试，不能返回成功：否则 completion 会放行，
-    // reward 按不完整的评分回填，而「这局评过了」的假象会一直留在计数里。
-    if (saved !== targets.length) {
-      throw new Error(
-        `发言评分落库数不符：期望 ${targets.length} 条，实际 ${saved} 条（gameId=${gameId} playerId=${playerId}）`,
-      );
-    }
-    this.logger.log({ gameId, playerId, saved }, '发言评估完成');
-    return saved;
-  }
-
-  /** 同阵营队友座位号：仅狼人阵营互通身份 */
-  private archive(
-    old: {
-      evaluationVersion: number;
-      evaluationRunId?: string | null;
-      previousEvaluations: Prisma.JsonValue;
-      score: number;
-      verdict: string;
-      reasoning: string | null;
-      modelName: string;
-    } | null,
-  ): Prisma.InputJsonValue {
-    const history = Array.isArray(old?.previousEvaluations) ? old.previousEvaluations : [];
-    if (!old) return [];
-    return JSON.parse(
-      JSON.stringify([
-        ...history,
-        {
-          evaluationVersion: old.evaluationVersion,
-          evaluationRunId: old.evaluationRunId ?? null,
-          score: old.score,
-          verdict: old.verdict,
-          reasoning: old.reasoning,
-          modelName: old.modelName,
-          archivedAt: new Date().toISOString(),
+      const item = output.items[0];
+      return {
+        score: item.score,
+        verdict: item.verdict,
+        reasoning: item.reasoning,
+        modelName,
+        input: {
+          variables,
+          system: systemPrompt.text + EVIDENCE_POLICY,
+          user: userPrompt.text,
+          refineSystem: refineSystemPrompt.text + EVIDENCE_POLICY,
         },
-      ]),
-    ) as Prisma.InputJsonValue;
-  }
-
-  private async saveJudgment(
-    args: Prisma.DecisionJudgmentUpsertArgs,
-    runId?: string,
-  ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${String(args.where.eventId)}, 0))`;
-      const old = await tx.decisionJudgment.findUnique({ where: args.where });
-      if (runId && old?.evaluationRunId === runId) return;
-      await tx.decisionJudgment.upsert({
-        ...args,
-        update: {
-          ...args.update,
-          evaluationVersion: EVALUATION_VERSION,
-          previousEvaluations: this.archive(old),
-          evaluationRunId: runId ?? null,
-        },
-        create: {
-          ...args.create,
-          evaluationVersion: EVALUATION_VERSION,
-          evaluationRunId: runId ?? null,
-        },
-      });
+      };
     });
+    return 1;
   }
 
   async beginEvaluation(gameId: string, runId: string): Promise<void> {
-    const game = await this.prisma.game.findUniqueOrThrow({
-      where: { id: gameId },
-      select: { status: true, experiment: true },
-    });
-    if (game.status !== 'finished' || readExperiment(game.experiment)?.invalid)
-      throw new Error('仅允许为有效已结束对局创建评分批次');
-    const [decisions, speeches] = await Promise.all([
-      this.findJudgeableEvents(gameId),
-      this.findSpeechesToJudge(gameId),
-    ]);
-    await this.prisma.evaluationRun.upsert({
-      where: { id: runId },
-      update: {},
-      create: { id: runId, gameId, expectedEventIds: [...decisions, ...speeches] },
-    });
+    await this.projection.begin(gameId, runId);
+  }
+
+  async resolveEvaluationRun(gameId: string, proposed: string, resume: boolean): Promise<string> {
+    return (resume ? await this.projection.resumableRun(gameId) : undefined) ?? proposed;
   }
 
   async completeEvaluation(gameId: string, runId: string): Promise<void> {
-    const run = await this.prisma.evaluationRun.findUniqueOrThrow({ where: { id: runId } });
-    if (run.gameId !== gameId) throw new Error('评分批次与对局不匹配');
-    const [individual, team] = await Promise.all([
-      this.prisma.decisionJudgment.findMany({
-        where: { gameId, evaluationRunId: runId, evaluationVersion: EVALUATION_VERSION },
-        select: { eventId: true },
-      }),
-      this.prisma.teamJudgment.findMany({
-        where: { gameId, evaluationRunId: runId, evaluationVersion: EVALUATION_VERSION },
-        select: { eventId: true },
-      }),
-    ]);
-    const scored = new Set([...individual, ...team].map((row) => row.eventId));
-    if (run.expectedEventIds.some((id) => !scored.has(id))) throw new Error('评分批次尚未完整落库');
-    await this.prisma.evaluationRun.update({
-      where: { id: runId },
-      data: { status: 'complete', completedAt: new Date() },
-    });
+    await this.projection.complete(gameId, runId);
+  }
+
+  async adoptScores(gameId: string, input: AdoptScoresInput): Promise<void> {
+    await this.projection.adopt(gameId, input);
+    await this.aggregatePlayerScores(gameId);
   }
 
   /** 状态与恢复共用事件覆盖校验；旧局无批次时只用于判断是否需要补评。 */
@@ -668,118 +523,10 @@ export class JudgeService {
    * 因此 force 重评后会刷新旧 reward；不再可唯一匹配的旧样本会清空，避免保留陈旧分数。
    */
   async backfillRewards(gameId: string): Promise<number> {
-    const [judgments, usages, knowledgeUsages] = await Promise.all([
-      this.prisma.decisionJudgment.findMany({
-        where: { gameId },
-        select: { eventId: true, playerId: true, actionType: true, day: true, score: true },
-      }),
-      this.prisma.memoryUsage.findMany({
-        where: { gameId },
-        select: {
-          id: true,
-          eventId: true,
-          playerId: true,
-          actionType: true,
-          day: true,
-          rewardScore: true,
-        },
-      }),
-      this.prisma.knowledgeUsage.findMany({
-        where: { gameId },
-        select: {
-          id: true,
-          eventId: true,
-          playerId: true,
-          actionType: true,
-          day: true,
-          rewardScore: true,
-        },
-      }),
-    ]);
-
-    const scoreByEventId = new Map(judgments.map((j) => [j.eventId, j.score]));
-    const teamScores = await this.prisma.teamJudgment.findMany({
-      where: { gameId },
-      select: { eventId: true, score: true },
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`evaluation/${gameId}`}, 0))`;
+      return backfillMemoryRewards(tx, gameId);
     });
-    if (teamScores.length) {
-      const kills = await this.prisma.event.findMany({
-        where: {
-          gameId,
-          id: { in: teamScores.map((j) => j.eventId) },
-          actionType: ACTION_TYPES.WOLF_KILL,
-        },
-        select: { id: true, content: true },
-      });
-      for (const kill of kills) {
-        const proposalIds = (kill.content as Record<string, unknown>).proposalEventIds;
-        if (Array.isArray(proposalIds))
-          for (const id of proposalIds)
-            if (typeof id === 'string')
-              scoreByEventId.set(id, teamScores.find((j) => j.eventId === kill.id)!.score);
-      }
-    }
-    // 仅供迁移前的旧 usage 使用。必须检查底层真实 Event 是否也唯一，不能只数评分。
-    const legacyScoreByKey = new Map<string, number>();
-    if (
-      usages.some((usage) => usage.eventId === null) ||
-      knowledgeUsages.some((u) => u.eventId === null)
-    ) {
-      const events = await this.prisma.event.findMany({
-        where: { gameId, actorId: { not: null }, day: { not: null } },
-        select: { id: true, actorId: true, actionType: true, day: true },
-      });
-      const eventIdsByKey = new Map<string, string[]>();
-      for (const event of events) {
-        if (!event.actorId || event.day === null) continue;
-        const key = `${event.actorId}|${event.actionType}|${event.day}`;
-        const list = eventIdsByKey.get(key);
-        if (list) list.push(event.id);
-        else eventIdsByKey.set(key, [event.id]);
-      }
-      for (const [key, eventIds] of eventIdsByKey) {
-        if (eventIds.length !== 1) continue;
-        const score = scoreByEventId.get(eventIds[0]);
-        if (score !== undefined) legacyScoreByKey.set(key, score);
-      }
-    }
-
-    let filled = 0;
-    // 走同一套 eventId/legacy 映射，分别回填 memory_usages 与 knowledge_usages
-    for (const u of knowledgeUsages) {
-      const nextScore = u.eventId
-        ? (scoreByEventId.get(u.eventId) ?? null)
-        : (legacyScoreByKey.get(`${u.playerId}|${u.actionType}|${u.day}`) ?? null);
-
-      if (u.rewardScore === nextScore) {
-        if (nextScore !== null) filled += 1;
-        continue;
-      }
-      await this.prisma.knowledgeUsage.update({
-        where: { id: u.id },
-        data: { rewardScore: nextScore },
-      });
-      if (nextScore !== null) filled += 1;
-    }
-
-    for (const u of usages) {
-      const nextScore = u.eventId
-        ? (scoreByEventId.get(u.eventId) ?? null)
-        : (legacyScoreByKey.get(`${u.playerId}|${u.actionType}|${u.day}`) ?? null);
-
-      if (u.rewardScore === nextScore) {
-        if (nextScore !== null) filled += 1;
-        continue;
-      }
-
-      await this.prisma.memoryUsage.update({
-        where: { id: u.id },
-        data: { rewardScore: nextScore },
-      });
-      if (nextScore !== null) filled += 1;
-    }
-
-    return filled;
   }
 
   /** 聚合个人过程分 + 选 MVP（实现见 player-score.ts 纯函数） */

@@ -54,6 +54,8 @@ export interface GameInterrupt {
  */
 export interface GameGraphState {
   gameId: string;
+  /** 本次进入节点的稳定身份，随既有检查点保存；不使用执行代次。 */
+  phaseInstanceId: string;
   currentDay: number;
   currentPhase: Phase;
   players: PlayerState[];

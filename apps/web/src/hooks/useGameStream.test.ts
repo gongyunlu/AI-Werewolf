@@ -61,7 +61,7 @@ describe('useGameStream', () => {
     unmount();
   });
 
-  it('connection.ready 不会清空断线重试计数', async () => {
+  it('空握手不清空退避计数，达到上限后仍有间隔重连等待服务恢复', async () => {
     vi.useFakeTimers();
     const sources: FakeEventSource[] = [];
     const createConnection = vi.spyOn(apiClient, 'createSSEConnection').mockImplementation(() => {
@@ -77,7 +77,39 @@ describe('useGameStream', () => {
     await disconnectAndAdvance(sources, 4000);
     await disconnectAndAdvance(sources, 8000);
 
-    expect(createConnection).toHaveBeenCalledTimes(4);
+    expect(createConnection).toHaveBeenCalledTimes(5);
+    await disconnectAndAdvance(sources, 7999);
+    expect(createConnection).toHaveBeenCalledTimes(5);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(createConnection).toHaveBeenCalledTimes(6);
     unmount();
+  });
+
+  it('终局后 revision 变化不再重连', () => {
+    const sources: FakeEventSource[] = [];
+    const createConnection = vi.spyOn(apiClient, 'createSSEConnection').mockImplementation(() => {
+      const source = new FakeEventSource();
+      sources.push(source);
+      return source as unknown as EventSource;
+    });
+    const { rerender } = renderHook(
+      ({ revision }: { revision: string }) => useGameStream('game-1', 'god', vi.fn(), { revision }),
+      { initialProps: { revision: 'running' } },
+    );
+
+    act(() => sources.at(-1)?.emit('message', readyMessage));
+    act(() => {
+      sources
+        .at(-1)
+        ?.emit(
+          'message',
+          JSON.stringify({ type: 'game.finished', sequence: 1, winner: 'villager' }),
+        );
+    });
+    expect(sources[0].close).toHaveBeenCalled();
+
+    // 对局结束时页面回读 DB 会把 status 从 running 换成 finished，revision 随之变化
+    rerender({ revision: 'finished' });
+    expect(createConnection).toHaveBeenCalledTimes(1);
   });
 });

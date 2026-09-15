@@ -1,27 +1,8 @@
-import { useCallback, useReducer, useRef } from 'react';
-import type { SceneSnapshot, SceneType, SceneVisibility, SseMessage } from '@/types/sse';
+import { useCallback, useEffect, useReducer, useRef } from 'react';
+import type { SceneSnapshot, SseMessage } from '@/types/sse';
 
-export interface ClosedScene {
-  sceneId: string;
-  sceneType: SceneType;
-  visibility: SceneVisibility;
-  actorId?: string;
-  thinking: string;
-  content: string;
-  thinkingDurationMs: number;
-  contentDurationMs: number;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ActiveScene {
-  sceneId: string;
-  sceneType: SceneType;
-  visibility: SceneVisibility;
-  actorId?: string;
-  thinking: string;
-  content: string;
-  metadata?: Record<string, unknown>;
-}
+export type ClosedScene = Omit<SceneSnapshot, 'status'>;
+export type ActiveScene = Omit<ClosedScene, 'thinkingDurationMs' | 'contentDurationMs'>;
 
 export interface SceneState {
   closedScenes: ClosedScene[];
@@ -33,33 +14,106 @@ export interface SceneState {
 type Action =
   | { type: 'HYDRATE'; state: SceneState }
   | { type: 'SCENE_OPEN'; scene: ActiveScene }
-  | { type: 'APPEND'; sceneId: string; token: string; contentType: 'thinking' | 'content' }
+  | {
+      type: 'APPEND';
+      sceneId: string;
+      attemptId?: string;
+      token: string;
+      contentType: 'thinking' | 'content';
+    }
   | { type: 'SCENE_CLOSE'; closed: ClosedScene }
+  | { type: 'SCENE_TIMING'; eventId: string; thinkingDurationMs: number; contentDurationMs: number }
+  | { type: 'COMMITTED'; scenes: ClosedScene[]; winner?: string }
   | { type: 'GAME_OVER'; winner: string };
 
 export function sceneReducer(state: SceneState, action: Action): SceneState {
   switch (action.type) {
     case 'HYDRATE':
       return action.state;
-    case 'SCENE_OPEN':
-      return { ...state, activeScene: action.scene };
-    case 'APPEND': {
-      const active = state.activeScene;
-      // 防御：append 只作用于当前活跃场景（断线重连等场景可能串号）
-      if (!active || active.sceneId !== action.sceneId) return state;
-      if (action.contentType === 'thinking') {
-        return {
-          ...state,
-          activeScene: { ...active, thinking: active.thinking + action.token },
-        };
-      }
-      return { ...state, activeScene: { ...active, content: active.content + action.token } };
-    }
-    case 'SCENE_CLOSE':
+    case 'SCENE_OPEN': {
+      if (
+        state.gameOver ||
+        state.closedScenes.some((scene) => scene.eventId && scene.sceneId === action.scene.sceneId)
+      )
+        return state;
+      if (action.scene.attemptId && state.activeScene?.attemptId === action.scene.attemptId)
+        return state;
       return {
         ...state,
-        activeScene: null,
+        activeScene: action.scene,
+        closedScenes: state.closedScenes.filter(
+          (scene) => scene.eventId || scene.sceneId !== action.scene.sceneId,
+        ),
+      };
+    }
+    case 'APPEND': {
+      const active = state.activeScene;
+      if (
+        !active ||
+        active.sceneId !== action.sceneId ||
+        (action.attemptId && active.attemptId !== action.attemptId)
+      )
+        return state;
+      return {
+        ...state,
+        activeScene: { ...active, [action.contentType]: active[action.contentType] + action.token },
+      };
+    }
+    case 'SCENE_CLOSE': {
+      if (
+        state.closedScenes.some(
+          (scene) =>
+            scene.sceneId === action.closed.sceneId &&
+            (scene.eventId || scene.attemptId === action.closed.attemptId),
+        )
+      )
+        return state;
+      return {
+        ...state,
+        activeScene:
+          state.activeScene?.sceneId === action.closed.sceneId ? null : state.activeScene,
         closedScenes: [...state.closedScenes, action.closed],
+      };
+    }
+    case 'COMMITTED': {
+      const ids = new Set(action.scenes.map((scene) => scene.eventId));
+      const aliases = new Set(action.scenes.map((scene) => scene.sceneId));
+      const previous = new Map(state.closedScenes.map((scene) => [scene.sceneId, scene]));
+      const scenes = action.scenes.map((scene) => {
+        const preview = previous.get(scene.sceneId);
+        return {
+          ...scene,
+          thinkingDurationMs: preview?.thinkingDurationMs ?? scene.thinkingDurationMs,
+          contentDurationMs: preview?.contentDurationMs ?? scene.contentDurationMs,
+        };
+      });
+      const closedScenes = [
+        ...state.closedScenes.filter((scene) =>
+          scene.eventId ? !ids.has(scene.eventId) : !aliases.has(scene.sceneId),
+        ),
+        ...scenes,
+      ].toSorted((a, b) => (a.eventSequence ?? Infinity) - (b.eventSequence ?? Infinity));
+      return {
+        ...state,
+        closedScenes,
+        activeScene:
+          state.activeScene && aliases.has(state.activeScene.sceneId) ? null : state.activeScene,
+        gameOver: state.gameOver || action.winner !== undefined,
+        winner: action.winner ?? state.winner,
+      };
+    }
+    case 'SCENE_TIMING':
+      return {
+        ...state,
+        closedScenes: state.closedScenes.map((scene) =>
+          scene.eventId === action.eventId
+            ? {
+                ...scene,
+                thinkingDurationMs: action.thinkingDurationMs,
+                contentDurationMs: action.contentDurationMs,
+              }
+            : scene,
+        ),
       };
     case 'GAME_OVER':
       return { ...state, gameOver: true, winner: action.winner };
@@ -68,13 +122,8 @@ export function sceneReducer(state: SceneState, action: Action): SceneState {
   }
 }
 
-const INITIAL_STATE: SceneState = {
-  closedScenes: [],
-  activeScene: null,
-  gameOver: false,
-};
-
-/** 非流式场景关闭后最小停留时间（ms） */
+const INITIAL_STATE: SceneState = { closedScenes: [], activeScene: null, gameOver: false };
+/** 保留既有预览场景的最小停留时长；最终批次按一次消息整体合并。 */
 const HOLD_UNTIL_MS: Record<string, number> = {
   judge: 2000,
   system: 1500,
@@ -90,55 +139,82 @@ export function useSceneEngine(perspective: string) {
   const activeSceneRef = useRef<ActiveScene | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCloseRef = useRef<ClosedScene | null>(null);
+  const committedAliasesRef = useRef(new Set<string>());
+  const streamIdRef = useRef<string | undefined>(undefined);
+
+  const cancelCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+  useEffect(() => cancelCloseTimer, [cancelCloseTimer]);
 
   const flushPendingClose = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = null;
-    }
+    cancelCloseTimer();
     if (pendingCloseRef.current) {
-      activeSceneRef.current = null;
+      if (activeSceneRef.current?.sceneId === pendingCloseRef.current.sceneId)
+        activeSceneRef.current = null;
       dispatch({ type: 'SCENE_CLOSE', closed: pendingCloseRef.current });
       pendingCloseRef.current = null;
     }
-  }, []);
+  }, [cancelCloseTimer]);
 
   const handleMessage = useCallback(
     (msg: SseMessage) => {
       if (msg.type === 'connection.ready') {
-        flushPendingClose();
-
-        const visibleSnapshots = msg.snapshot.filter(
+        cancelCloseTimer();
+        pendingCloseRef.current = null;
+        streamIdRef.current = msg.streamId;
+        committedAliasesRef.current = new Set(
+          msg.snapshot.filter((scene) => scene.eventId).map((scene) => scene.sceneId),
+        );
+        const visible = msg.snapshot.filter(
           (scene) => perspective !== 'villager' || scene.visibility === 'public',
         );
-        const closedScenes = visibleSnapshots
-          .filter((scene) => scene.status === 'closed')
-          .map(snapshotToClosedScene);
-        const activeSnapshot = visibleSnapshots.findLast((scene) => scene.status === 'active');
-        const activeScene = activeSnapshot ? snapshotToActiveScene(activeSnapshot) : null;
-
-        activeSceneRef.current = activeScene;
+        const closedScenes = visible.filter((scene) => scene.status === 'closed').map(toClosed);
+        const active = visible.findLast((scene) => scene.status === 'active');
+        activeSceneRef.current = active ? toClosed(active) : null;
         dispatch({
           type: 'HYDRATE',
           state: {
             closedScenes,
-            activeScene,
+            activeScene: activeSceneRef.current,
             gameOver: !!msg.gameFinished,
             winner: msg.gameFinished?.winner,
           },
         });
-      } else if (msg.type === 'scene.open') {
-        // 如果有上一个 scene 的延迟关闭尚未完成，立即收尾
-        flushPendingClose();
-
-        // 闭眼视角只展示公开场景；过滤后的场景不登记 activeScene，
-        // 其后续 scene.append / scene.close 因 sceneId 不匹配或无 activeScene 而被忽略
-        if (perspective === 'villager' && msg.visibility !== 'public') {
-          return;
+        return;
+      }
+      if (
+        'streamId' in msg &&
+        msg.streamId &&
+        streamIdRef.current &&
+        msg.streamId !== streamIdRef.current
+      )
+        return;
+      if (msg.type === 'events.committed') {
+        for (const scene of msg.scenes) committedAliasesRef.current.add(scene.sceneId);
+        const aliases = new Set(msg.scenes.map((scene) => scene.sceneId));
+        if (pendingCloseRef.current && aliases.has(pendingCloseRef.current.sceneId)) {
+          cancelCloseTimer();
+          pendingCloseRef.current = null;
         }
-
+        if (activeSceneRef.current && aliases.has(activeSceneRef.current.sceneId))
+          activeSceneRef.current = null;
+        dispatch({
+          type: 'COMMITTED',
+          scenes: msg.scenes
+            .filter((scene) => perspective !== 'villager' || scene.visibility === 'public')
+            .map(toClosed),
+          winner: msg.gameFinished?.winner,
+        });
+      } else if (msg.type === 'scene.open') {
+        if (committedAliasesRef.current.has(msg.sceneId)) return;
+        if (msg.attemptId && activeSceneRef.current?.attemptId === msg.attemptId) return;
+        flushPendingClose();
+        if (perspective === 'villager' && msg.visibility !== 'public') return;
         const scene: ActiveScene = {
           sceneId: msg.sceneId,
+          attemptId: msg.attemptId,
           sceneType: msg.sceneType,
           visibility: msg.visibility,
           actorId: msg.actorId,
@@ -149,70 +225,61 @@ export function useSceneEngine(perspective: string) {
         activeSceneRef.current = scene;
         dispatch({ type: 'SCENE_OPEN', scene });
       } else if (msg.type === 'scene.append') {
+        const active = activeSceneRef.current;
+        if (
+          !active ||
+          active.sceneId !== msg.sceneId ||
+          (msg.attemptId && active.attemptId !== msg.attemptId)
+        )
+          return;
+        activeSceneRef.current = {
+          ...active,
+          [msg.contentType]: active[msg.contentType] + msg.token,
+        };
         dispatch({
           type: 'APPEND',
           sceneId: msg.sceneId,
+          attemptId: msg.attemptId,
           token: msg.token,
           contentType: msg.contentType,
         });
-        // 同步 ref，确保后续 scene.close 能拿到完整的思考/正文内容
-        const active = activeSceneRef.current;
-        if (active && active.sceneId === msg.sceneId) {
-          activeSceneRef.current =
-            msg.contentType === 'thinking'
-              ? { ...active, thinking: active.thinking + msg.token }
-              : { ...active, content: active.content + msg.token };
-        }
       } else if (msg.type === 'scene.close') {
+        if (msg.eventId) {
+          dispatch({
+            type: 'SCENE_TIMING',
+            eventId: msg.eventId,
+            thinkingDurationMs: msg.thinkingDurationMs,
+            contentDurationMs: msg.contentDurationMs,
+          });
+          return;
+        }
         const scene = activeSceneRef.current;
-        if (!scene || scene.sceneId !== msg.sceneId) return;
-
-        const holdMs = HOLD_UNTIL_MS[scene.sceneType] ?? 0;
+        if (
+          !scene ||
+          scene.sceneId !== msg.sceneId ||
+          (msg.attemptId && scene.attemptId !== msg.attemptId)
+        )
+          return;
+        if (pendingCloseRef.current?.sceneId === msg.sceneId) return;
         const closed: ClosedScene = {
-          sceneId: msg.sceneId,
-          sceneType: scene.sceneType,
-          visibility: scene.visibility,
-          actorId: scene.actorId,
-          thinking: scene.thinking,
-          content: scene.content,
+          ...scene,
           thinkingDurationMs: msg.thinkingDurationMs,
           contentDurationMs: msg.contentDurationMs,
-          metadata: scene.metadata,
         };
-
-        // 记录待关闭场景，供 flushPendingClose 在新场景打开时立即收尾
         pendingCloseRef.current = closed;
-        closeTimerRef.current = setTimeout(() => {
-          activeSceneRef.current = null;
-          dispatch({ type: 'SCENE_CLOSE', closed });
-          pendingCloseRef.current = null;
-        }, holdMs);
+        closeTimerRef.current = setTimeout(flushPendingClose, HOLD_UNTIL_MS[scene.sceneType] ?? 0);
       } else if (msg.type === 'game.finished') {
+        flushPendingClose();
         dispatch({ type: 'GAME_OVER', winner: msg.winner });
       }
     },
-    [flushPendingClose, perspective],
+    [cancelCloseTimer, flushPendingClose, perspective],
   );
 
   return { state, handleMessage };
 }
 
-function snapshotToActiveScene(snapshot: SceneSnapshot): ActiveScene {
-  return {
-    sceneId: snapshot.sceneId,
-    sceneType: snapshot.sceneType,
-    visibility: snapshot.visibility,
-    actorId: snapshot.actorId,
-    thinking: snapshot.thinking,
-    content: snapshot.content,
-    metadata: snapshot.metadata,
-  };
-}
-
-function snapshotToClosedScene(snapshot: SceneSnapshot): ClosedScene {
-  return {
-    ...snapshotToActiveScene(snapshot),
-    thinkingDurationMs: snapshot.thinkingDurationMs,
-    contentDurationMs: snapshot.contentDurationMs,
-  };
+function toClosed(snapshot: SceneSnapshot): ClosedScene {
+  const { status: _status, ...scene } = snapshot;
+  return scene;
 }

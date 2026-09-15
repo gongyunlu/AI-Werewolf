@@ -33,7 +33,6 @@ const config = { get: jest.fn() };
 
 function createService(prisma: unknown) {
   const agentRuntime = { validateRequiredSkills: jest.fn().mockResolvedValue(undefined) };
-  const eventWriter = { initializeSequenceCounter: jest.fn().mockResolvedValue(undefined) };
   const gameAnalysis = {
     analyzeGame: jest.fn().mockResolvedValue({ judged: 1, reflectPlanned: 1 }),
   };
@@ -42,7 +41,6 @@ function createService(prisma: unknown) {
   const service = new GameExecutorService(
     prisma as never,
     agentRuntime as never,
-    eventWriter as never,
     config as never,
     { getOrCreate: jest.fn() } as never,
     {} as never,
@@ -50,7 +48,7 @@ function createService(prisma: unknown) {
     {} as never,
     engineFactory as never,
   );
-  return { service, gameAnalysis, engine, engineFactory, agentRuntime, eventWriter };
+  return { service, gameAnalysis, engine, engineFactory, agentRuntime };
 }
 
 function createHarness() {

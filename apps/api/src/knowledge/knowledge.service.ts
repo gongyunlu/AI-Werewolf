@@ -189,7 +189,7 @@ export class KnowledgeService {
    * 记录一次注入用到了哪些知识块，供事后按行为评分做质量归因。
    *
    * 属于攻略度量链路的观测数据，写失败只记日志不打断对局（对齐 MemoryService.recordUsages）。
-   * rewardScore 由 judge.service.backfillRewards 回填该行为的 DecisionJudgment.score。
+   * rewardScore 列已停止回填，质量归因改从 Event 侧读取该行为的采用评分。
    */
   async recordUsages(
     rows: Array<{

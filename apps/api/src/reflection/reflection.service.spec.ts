@@ -15,6 +15,11 @@ function createMockTx() {
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     agentPerformance: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    evaluationRun: { findFirst: jest.fn().mockResolvedValue(null) },
+    event: { findMany: jest.fn() },
+    decisionJudgment: { findMany: jest.fn() },
+    teamJudgment: { findMany: jest.fn().mockResolvedValue([]) },
+    $executeRaw: jest.fn().mockResolvedValue(1),
     $queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
   };
 }
@@ -24,8 +29,8 @@ function createMocks() {
   const prisma = {
     player: { findUnique: jest.fn(), findMany: jest.fn() },
     agentPerformance: { findUnique: jest.fn() },
-    decisionJudgment: { findMany: jest.fn() },
-    event: { findMany: jest.fn() },
+    decisionJudgment: tx.decisionJudgment,
+    event: tx.event,
     agentJudgment: { findMany: jest.fn() },
     memory: { findMany: jest.fn() },
     $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
@@ -102,18 +107,18 @@ describe('ReflectionService', () => {
 
   it('实验反思仅保存对局分析，不写入或失效记忆，也不调用 embedding', async () => {
     await mocks.service.reflect('g1', 'p1', true, false);
-    expect(mocks.prisma.$executeRaw).toHaveBeenCalledTimes(1);
-    const [sql, ...values] = mocks.prisma.$executeRaw.mock.calls[0] as unknown as [
-      TemplateStringsArray,
-      ...unknown[],
-    ];
-    expect(sql.join(' ')).toContain('experimentReflection');
+    const writes = mocks.tx.$executeRaw.mock.calls.filter((call) =>
+      String(call[0]).includes('UPDATE agent_performances'),
+    );
+    expect(writes).toHaveLength(1);
+    const [sql, ...values] = writes[0] as unknown as [TemplateStringsArray, ...unknown[]];
+    expect(sql.join(' ')).toContain('COALESCE(metadata');
     expect(sql.join(' ')).toContain('reflection_generated = true');
-    expect(values).toContain(JSON.stringify(LLM_OUTPUT));
+    expect(values).toContain(JSON.stringify({ experimentReflection: LLM_OUTPUT }));
     expect(mocks.memoryService.createMemories).not.toHaveBeenCalled();
     expect(mocks.memoryService.embedMemories).not.toHaveBeenCalled();
     expect(mocks.memoryService.deactivateGameMemories).not.toHaveBeenCalled();
-    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(2);
     expect(mocks.tx.memory.updateMany).not.toHaveBeenCalled();
   });
 
@@ -262,7 +267,7 @@ describe('ReflectionService', () => {
   it('写正文与置 flag 在同一事务内，embedding 在事务外补', async () => {
     await mocks.service.reflect('g1', 'p1');
 
-    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(2);
     expect(mocks.memoryService.createMemories.mock.calls[0][1]).toBe(mocks.tx);
     expect(mocks.tx.agentPerformance.updateMany).toHaveBeenCalledWith({
       where: { gameId: 'g1', playerId: 'p1', reflectionGenerated: false },
@@ -323,7 +328,7 @@ describe('ReflectionService', () => {
     await expect(mocks.service.reflect('g1', 'p1')).resolves.toBe(3);
 
     expect(mocks.structuredLlm.invoke).toHaveBeenCalledTimes(2);
-    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(3);
     // stale 分支在领取 flag 和任何写入之前退出。
     expect(mocks.tx.agentPerformance.updateMany).toHaveBeenCalledTimes(1);
     expect(mocks.memoryService.createMemories).toHaveBeenCalledTimes(1);
@@ -349,7 +354,7 @@ describe('ReflectionService', () => {
     await expect(mocks.service.reflect('g1', 'p1', true)).rejects.toThrow('连续发生并发更新');
 
     expect(mocks.structuredLlm.invoke).toHaveBeenCalledTimes(3);
-    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(3);
+    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(4);
     expect(mocks.tx.agentPerformance.updateMany).not.toHaveBeenCalled();
     expect(mocks.tx.memory.updateMany).not.toHaveBeenCalled();
     expect(mocks.memoryService.createMemories).not.toHaveBeenCalled();
@@ -429,5 +434,112 @@ describe('ReflectionService', () => {
     const variables = mocks.promptService.render.mock.calls.find((call) => call[1])?.[1];
     expect(variables.mySpeeches).toContain('第1天 [阶段=night，可见性=wolf]：今晚刀2号');
     expect(variables.mySpeeches).toContain('私下计划');
+  });
+
+  it.each([undefined, 'old-run'])(
+    '新采用评分使原反思待刷新，保留旧记忆并写采用引用（旧引用=%s）',
+    async (oldRunId) => {
+      mocks.tx.evaluationRun.findFirst.mockResolvedValue({
+        id: 'new-run',
+        status: 'complete',
+        definition: {},
+        expectedEventIds: [],
+      });
+      mocks.prisma.agentPerformance.findUnique.mockResolvedValue({
+        survivalDays: 2,
+        isWinner: false,
+        reflectionGenerated: true,
+        metadata: { retained: '历史字段', reflectionEvaluationRunId: oldRunId },
+      });
+
+      expect(await mocks.service.reflect('g1', 'p1')).toBe(3);
+      const inputs = mocks.memoryService.createMemories.mock.calls[0][0];
+      expect(
+        inputs.every(
+          (input) => (input.metadata as Record<string, unknown>)?.evaluationRunId === 'new-run',
+        ),
+      ).toBe(true);
+      expect(inputs.find((input) => input.type === 'lesson')?.metadata).toMatchObject({
+        evidence: LLM_OUTPUT.lessons[0].evidence,
+      });
+      expect(inputs.find((input) => input.type === 'player_model')?.metadata).toMatchObject({
+        targetAgentId: 'a2',
+      });
+      expect(mocks.prisma.decisionJudgment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            gameId: 'g1',
+            playerId: 'p1',
+            evaluationVersion: EVALUATION_VERSION,
+            evaluationRunId: 'new-run',
+          },
+        }),
+      );
+      expect(mocks.tx.memory.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ gameId: 'g1', source: 'auto', isActive: true }),
+          data: { isActive: false },
+        }),
+      );
+      const metadataWrite = mocks.tx.$executeRaw.mock.calls.find((call) =>
+        String(call[0]).includes('reflectionEvaluationRunId'),
+      );
+      expect(metadataWrite).toBeDefined();
+      expect(String(metadataWrite![0])).toContain('COALESCE(metadata');
+      expect(metadataWrite!.slice(1)).toContain(JSON.stringify('new-run'));
+    },
+  );
+
+  it('反思引用当前完整评分时跳过模型调用', async () => {
+    mocks.tx.evaluationRun.findFirst.mockResolvedValue({
+      id: 'new-run',
+      status: 'complete',
+      definition: {},
+      expectedEventIds: [],
+    });
+    mocks.prisma.agentPerformance.findUnique.mockResolvedValue({
+      reflectionGenerated: true,
+      metadata: { reflectionEvaluationRunId: 'new-run' },
+    });
+    expect(await mocks.service.reflect('g1', 'p1')).toBe(0);
+    expect(mocks.structuredLlm.invoke).not.toHaveBeenCalled();
+  });
+
+  it('平台新运行未完成时，即使已有旧反思也禁止混读', async () => {
+    mocks.tx.evaluationRun.findFirst.mockResolvedValue({
+      id: 'new-run',
+      status: 'pending',
+      definition: {},
+      expectedEventIds: [],
+    });
+    mocks.prisma.agentPerformance.findUnique.mockResolvedValue({
+      reflectionGenerated: true,
+      metadata: {},
+    });
+    await expect(mocks.service.reflect('g1', 'p1')).rejects.toThrow('尚未完整采用');
+    expect(mocks.structuredLlm.invoke).not.toHaveBeenCalled();
+    expect(mocks.tx.memory.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('模型生成期间换版时不领取写入权，也不软删除历史记忆', async () => {
+    mocks.tx.evaluationRun.findFirst.mockResolvedValue({
+      id: 'new-run',
+      status: 'complete',
+      definition: {},
+      expectedEventIds: [],
+    });
+    mocks.structuredLlm.invoke.mockImplementation(async () => {
+      mocks.tx.evaluationRun.findFirst.mockResolvedValue({
+        id: 'next-run',
+        status: 'complete',
+        definition: {},
+        expectedEventIds: [],
+      });
+      return { output: LLM_OUTPUT };
+    });
+    await expect(mocks.service.reflect('g1', 'p1', true)).rejects.toThrow('评分采用版本已更改');
+    expect(mocks.tx.agentPerformance.updateMany).not.toHaveBeenCalled();
+    expect(mocks.tx.memory.updateMany).not.toHaveBeenCalled();
+    expect(mocks.memoryService.createMemories).not.toHaveBeenCalled();
   });
 });

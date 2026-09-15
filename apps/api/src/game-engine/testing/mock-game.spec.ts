@@ -2,7 +2,6 @@ import { Logger } from '@nestjs/common';
 import { UnrecoverableError } from 'bullmq';
 import { ACTION_TYPES as A } from '@ai-werewolf/shared';
 import type { Event } from '@/generated/prisma/client';
-import { GameFailurePolicy } from '../core/game-failure-policy';
 import { createMockGame, type MockGame } from './mock-game-harness';
 import type { ModelRequest } from './scripted-game-model';
 
@@ -21,7 +20,6 @@ function deferred<T>() {
 
 describe('标准六人 mock 完整对局', () => {
   let game: MockGame | undefined;
-  let fallback: jest.SpyInstance;
 
   beforeEach(() => {
     jest.useFakeTimers({
@@ -37,7 +35,6 @@ describe('标准六人 mock 完整对局', () => {
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('mock 对局禁止网络访问'));
-    fallback = jest.spyOn(GameFailurePolicy.prototype, 'consume');
   });
 
   afterEach(async () => {
@@ -149,7 +146,6 @@ describe('标准六人 mock 完整对局', () => {
   it('01 好人获胜：首夜救人、白天放逐、次夜毒杀，正常终局', async () => {
     game = await createMockGame();
     await assertFinished('villager');
-    expect(fallback).not.toHaveBeenCalled();
     expect(
       game.store.events.filter((e) => e.actionType === A.WITCH_SAVE && content(e).saved),
     ).toHaveLength(1);
@@ -161,7 +157,6 @@ describe('标准六人 mock 完整对局', () => {
   it('02 狼人获胜：绑票后继续第二夜，平民全灭才结束', async () => {
     game = await createMockGame('werewolf');
     await assertFinished('werewolf');
-    expect(fallback).not.toHaveBeenCalled();
     expect(game.store.events.filter((e) => e.actionType === A.WOLF_KILL).map((e) => e.day)).toEqual(
       [1, 2],
     );
@@ -187,33 +182,18 @@ describe('标准六人 mock 完整对局', () => {
     late.resolve();
     await finished;
     expect(request.signal.aborted).toBe(true);
-    expect(fallback).not.toHaveBeenCalled();
     expect(
       game.model.requests.filter((r) => r.day === 1 && r.action === 'check_identity'),
     ).toHaveLength(2);
   });
 
-  it('04 熔断后同一路由不再调用供应商，额度耗尽停止游戏', async () => {
-    game = await createMockGame('villager', {
-      LLM_CIRCUIT_MIN_SAMPLES: 1,
-      GAME_MAX_MODEL_FALLBACKS: 1,
-    });
-    game.model.beforeRequest = (r) => {
-      if (r.seat === 3) throw unavailable();
-    };
-    await assertAborted();
-    expect(game.model.requests.filter((r) => r.seat === 3)).toHaveLength(1);
-    expect(fallback.mock.calls.some(([error]) => error.code === 'circuit_open')).toBe(true);
-  });
-
-  it('05 连续模型故障达到每局降级预算，不由替代行动打完整局', async () => {
+  it('04 模型故障直接中止对局，不写替代查验也不让该玩家继续行动', async () => {
     game = await createMockGame();
     game.model.beforeRequest = (r) => {
       if (r.seat === 3) throw unavailable();
     };
     await assertAborted();
-    expect(fallback.mock.results.map((r) => r.type)).toEqual(['return', 'return', 'throw']);
-    expect(game.store.events.filter((e) => e.actionType === A.SEER_CHECK)).toHaveLength(1);
+    expect(game.store.events.filter((e) => e.actionType === A.SEER_CHECK)).toHaveLength(0);
     expect(game.store.events.some((e) => e.actionType === A.VOTE && e.actorId === 'player-3')).toBe(
       false,
     );
@@ -238,7 +218,6 @@ describe('标准六人 mock 完整对局', () => {
     late.resolve();
     await jest.advanceTimersByTimeAsync(1);
     expect(game.store.events.some((e) => e.actionType === A.SEER_CHECK)).toBe(false);
-    expect(fallback).not.toHaveBeenCalled();
   });
 
   it('07 对局达到运行预算停止，不伪造胜者', async () => {
@@ -256,8 +235,8 @@ describe('标准六人 mock 完整对局', () => {
       game = await createMockGame();
       const error = new Error(`injected ${fault} failure`);
       if (fault === 'commit')
-        game.store.afterEventCreated = (event) => {
-          if (event.actionType === A.SEER_CHECK) throw error;
+        game.store.afterTransactionCommitted = (events) => {
+          if (events.some((event) => event.actionType === A.SEER_CHECK)) throw error;
         };
       if (fault === 'usage')
         game.memory.recordUsages.mockImplementation(async (usages) => {
@@ -280,7 +259,6 @@ describe('标准六人 mock 完整对局', () => {
       expect(content(checks[0])).toMatchObject({ targetSeatNo: 1, result: 'werewolf' });
       expect(game.model.requests.filter((r) => r.action === 'check_identity')).toHaveLength(1);
       expect(game.store.players.every((p) => p.deathDay === null)).toBe(true);
-      expect(fallback).not.toHaveBeenCalled();
       expect(game.published.some((e) => e.id === checks[0].id)).toBe(false);
     },
   );

@@ -38,7 +38,9 @@
     "test:bootstrap-integration": "pnpm run test:game-recovery-integration --runTestsByPath ./test/bootstrap.integration-spec.ts",
     "test:cov": "jest --coverage",
     "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json",
-    "test:mock-game": "jest --runInBand --runTestsByPath src/game-engine/testing/mock-game.spec.ts"
+    "test:mock-game": "jest --runInBand --runTestsByPath src/game-engine/testing/mock-game.spec.ts",
+    "test:langfuse-projection-integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-langfuse-projection-integration.json --runInBand",
+    "test:langfuse-prompt-origin-integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-langfuse-prompt-origin-integration.json --runInBand"
   },
   "dependencies": {
     "@ai-werewolf/shared": "workspace:*",

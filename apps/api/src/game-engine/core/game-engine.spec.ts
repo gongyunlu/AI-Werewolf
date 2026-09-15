@@ -9,6 +9,7 @@ type TestableGameEngine = {
   run: GameEngine['run'];
   prisma: { game: { findUnique: jest.Mock }; $executeRaw?: jest.Mock };
   configService: { get: jest.Mock };
+  broadcaster: { forExecution: jest.Mock };
   nodeContext: object;
   nodeRegistry: NodeRegistry;
   initialize: jest.Mock;
@@ -23,6 +24,8 @@ type TestableGameEngine = {
 };
 
 describe('GameEngine lifecycle', () => {
+  const broadcaster = () => ({ forExecution: jest.fn(() => ({ emit: jest.fn() })) });
+
   it('节点边界检查取消，非模型节点也不能在取消后开始', async () => {
     const controller = new AbortController();
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
@@ -51,6 +54,7 @@ describe('GameEngine lifecycle', () => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
     engine.configService = { get: jest.fn() };
     engine.nodeContext = {};
+    engine.broadcaster = broadcaster();
     engine.initialize = jest.fn();
     engine.prisma = {
       game: {
@@ -131,6 +135,7 @@ describe('GameEngine lifecycle', () => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
     engine.configService = { get: jest.fn() };
     engine.nodeContext = {};
+    engine.broadcaster = broadcaster();
     engine.prisma = { game: { findUnique: jest.fn().mockResolvedValue(null) } };
     const initialState = createGameState({
       gameId: 'game-1',
@@ -181,6 +186,7 @@ describe('GameEngine lifecycle', () => {
     const engine = Object.create(GameEngine.prototype) as TestableGameEngine;
     engine.configService = { get: jest.fn((key) => (key === 'GAME_MAX_DAYS' ? 1 : undefined)) };
     engine.nodeContext = {};
+    engine.broadcaster = broadcaster();
     engine.prisma = { game: { findUnique: jest.fn().mockResolvedValue(null) } };
     engine.initialize = jest.fn();
     engine.checkPause = jest.fn();

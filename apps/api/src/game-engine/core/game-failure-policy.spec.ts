@@ -1,21 +1,40 @@
+import { Logger } from '@nestjs/common';
 import { ModelCallError } from '@/llm/model-call-guard';
 import { ExperimentInvalidError } from '@/evaluation/experiment-integrity';
-import {
-  GameFailurePolicy,
-  allowModelFallback,
-  settleGameActions,
-  failAfterEffect,
-} from './game-failure-policy';
+import { failModelCall, settleGameActions, failAfterEffect } from './game-failure-policy';
 
-it('普通局限定降级次数，实验局不允许替代行动', () => {
-  const error = new ModelCallError('transient');
-  const policy = new GameFailurePolicy(1, false);
-  policy.consume(error);
-  expect(() => policy.consume(error)).toThrow('降级次数已耗尽');
-  expect(() => new GameFailurePolicy(2, true).consume(error)).toThrow(ExperimentInvalidError);
-  expect(() => allowModelFallback(new Error('database failed'), {} as never)).toThrow(
-    'database failed',
+const context = (overrides: Record<string, unknown> = {}) => overrides as never;
+
+afterEach(() => jest.restoreAllMocks());
+
+it('模型失败记下出错位置后原样上抛，不再产生替代行动', () => {
+  const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  const failure = new ModelCallError('transient');
+
+  expect(() => failModelCall(failure, context(), '[发言阶段] 3号位发言出错')).toThrow(failure);
+  expect(error).toHaveBeenCalledWith(
+    expect.stringContaining('[发言阶段] 3号位发言出错: 模型调用失败: transient'),
   );
+});
+
+it('实验局的模型失败判为实验无效', () => {
+  jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+  expect(() =>
+    failModelCall(new ModelCallError('transient'), context({ strictExperiment: true }), '出错'),
+  ).toThrow(ExperimentInvalidError);
+});
+
+it('主动中止与非模型故障不受实验开关影响', () => {
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = new ModelCallError('transient');
+  const bug = new TypeError('context bug');
+
+  expect(() =>
+    failModelCall(aborted, context({ signal: controller.signal, strictExperiment: true }), '出错'),
+  ).toThrow(aborted);
+  expect(() => failModelCall(bug, context({ strictExperiment: true }), '出错')).toThrow(bug);
 });
 
 it('提交后的实验完整性异常仍能被引擎识别', () => {

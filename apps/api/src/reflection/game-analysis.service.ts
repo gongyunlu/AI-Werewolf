@@ -1,3 +1,4 @@
+import type { AdoptScoresInput } from '../evaluation/evaluation-projection.service';
 import { InjectFlowProducer } from '@nestjs/bullmq';
 import {
   BadRequestException,
@@ -13,10 +14,10 @@ import {
   JUDGE_JOB_OPTIONS,
   JUDGE_QUEUE_NAME,
   JudgeQueueService,
-  buildEvaluationRunId,
 } from '../evaluation/judge-queue.service';
 import { SettlementService } from '../evaluation/settlement.service';
 import { JudgeService } from '../evaluation/judge.service';
+import { loadPlatformEvaluationRun, reviewMatchesEvaluation } from './evaluation-reference';
 import {
   buildReviewJobId,
   REFLECT_FLOW_PRODUCER,
@@ -55,11 +56,15 @@ export interface AnalysisStatus {
 }
 
 interface AnalysisProgress {
+  judgedCount: number;
+  judgeableCount: number;
   judgeComplete: boolean;
   reflectComplete: boolean;
   narrativeReady: boolean;
   reflectedCount: number;
   hasArtifacts: boolean;
+  staleArtifacts: boolean;
+  platformEvaluationIncomplete: boolean;
 }
 
 const IN_FLIGHT_FANOUT_STATES = new Set([
@@ -182,10 +187,11 @@ export class GameAnalysisService {
       // 只有 force/恢复运行需要新后缀；普通首次分析的稳定 id 提供队列级幂等。
       const suffix = force ? `_run_${Date.now()}` : isResume ? `_resume_${Date.now()}` : '';
 
-      // 如果 judge 已完整，只补复盘/玩家反思，不重新评分。已有复盘可以被安全复用；
-      // 仅当评分不完整却已有派生产物，或出现「有反思但无复盘」时，才强制刷新派生产物。
+      // 如果 judge 已完整，只补复盘/玩家反思，不重新评分。采用版本过时的产物，
+      // 以及评分不完整却已有产物或「有反思但无复盘」的情况，都沿原 force 流程刷新。
       const refreshDerivedArtifacts =
         force ||
+        progress.staleArtifacts ||
         (!progress.judgeComplete && (progress.narrativeReady || progress.reflectedCount > 0)) ||
         (!progress.narrativeReady && progress.reflectedCount > 0);
 
@@ -209,7 +215,8 @@ export class GameAnalysisService {
         name: REFLECT_JOB_NAMES.fanout,
         queueName: REFLECT_QUEUE_NAME,
         data: {
-          evaluationRunId: buildEvaluationRunId(gameId, suffix),
+          evaluationRunId:
+            children[0]?.data.runId ?? (await this.judgeQueueService.resolveRunId(gameId, suffix)),
           gameId,
           force: refreshDerivedArtifacts,
           playerId,
@@ -267,6 +274,9 @@ export class GameAnalysisService {
       playerId,
       playerId ? 1 : game._count.players,
     );
+    if (progress.platformEvaluationIncomplete) {
+      throw new ConflictException('平台评分尚未完整采用，暂不能只生成复盘与反思');
+    }
     if (!force && progress.reflectComplete) {
       this.logger.log({ gameId, playerId }, '复盘与反思已完成，跳过重复投递');
       return { judged: 0, reflectPlanned: 0, skipped: true };
@@ -286,7 +296,7 @@ export class GameAnalysisService {
     await lease.assertOwned();
     await this.reflectionQueueService.enqueueFanout({
       gameId,
-      force,
+      force: force || progress.staleArtifacts,
       playerId,
       suffix,
     });
@@ -300,7 +310,7 @@ export class GameAnalysisService {
     playerId: string | undefined,
     expectedReflections: number,
   ): Promise<AnalysisProgress> {
-    const [evaluation, reflectedCount, summary] = await Promise.all([
+    const [evaluation, storedReflectedCount, summary, platformRun] = await Promise.all([
       this.judgeService.getEvaluationProgress(gameId),
       this.prisma.agentPerformance.count({
         where: {
@@ -310,41 +320,119 @@ export class GameAnalysisService {
         },
       }),
       this.prisma.gameSummary.findUnique({ where: { gameId }, select: { narrative: true } }),
+      loadPlatformEvaluationRun(this.prisma, gameId),
     ]);
 
-    const narrativeReady = !!summary?.narrative;
+    const platformEvaluationIncomplete =
+      !!platformRun &&
+      (platformRun.status !== 'complete' ||
+        !evaluation.complete ||
+        evaluation.runId !== platformRun.id);
+    const reflectedCount = platformEvaluationIncomplete
+      ? 0
+      : platformRun
+        ? await this.prisma.agentPerformance.count({
+            where: {
+              gameId,
+              reflectionGenerated: true,
+              ...(playerId ? { playerId } : {}),
+              metadata: { path: ['reflectionEvaluationRunId'], equals: platformRun.id },
+            },
+          })
+        : storedReflectedCount;
+    const narrativeReady =
+      !platformEvaluationIncomplete && reviewMatchesEvaluation(summary?.narrative, platformRun?.id);
     const reflectComplete = narrativeReady && reflectedCount >= expectedReflections;
 
     return {
+      judgedCount: evaluation.judgedCount,
+      judgeableCount: evaluation.judgeableCount,
       judgeComplete: evaluation.complete,
       reflectComplete,
       narrativeReady,
       reflectedCount,
+      platformEvaluationIncomplete,
+      staleArtifacts:
+        (!!summary?.narrative && !narrativeReady) || storedReflectedCount > reflectedCount,
       hasArtifacts:
         Boolean(evaluation.runId) ||
         evaluation.judgedCount > 0 ||
-        reflectedCount > 0 ||
-        narrativeReady,
+        storedReflectedCount > 0 ||
+        !!summary?.narrative,
     };
+  }
+
+  /**
+   * 重评全部已结束对局的决策。
+   *
+   * 逐局隔离：某局投递失败（结算报错、调度锁竞争等）只记入 failed，不中断其余对局，
+   * 否则排在后面的对局会因为一局的临时故障整批不投递。skipped 表示该局已有流程在途。
+   */
+  async rejudgeAll(): Promise<{
+    games: number;
+    decisions: number;
+    skipped: number;
+    failed: Array<{ gameId: string; reason: string }>;
+  }> {
+    const games = await this.prisma.game.findMany({
+      where: { status: GAME_STATUSES.FINISHED },
+      select: { id: true },
+    });
+    let decisions = 0;
+    let skipped = 0;
+    const failed: Array<{ gameId: string; reason: string }> = [];
+    for (const game of games) {
+      try {
+        const result = await this.analyzeGame(game.id, {
+          judge: true,
+          reflect: false,
+          force: true,
+        });
+        decisions += result.judged;
+        if (result.skipped) skipped += 1;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        failed.push({ gameId: game.id, reason });
+        this.logger.warn({ gameId: game.id, reason }, '该局重评投递失败，继续处理剩余对局');
+      }
+    }
+    return { games: games.length, decisions, skipped, failed };
+  }
+
+  async adoptScores(
+    gameId: string,
+    input: AdoptScoresInput,
+  ): Promise<{ gameId: string; runId: string }> {
+    const locked = await this.reflectionQueueService.withGameScheduleLock(gameId, async (lease) => {
+      const busy = await Promise.all([
+        this.reflectionQueueService.hasInFlightFanout(gameId),
+        this.judgeQueueService.hasInFlightGame(gameId),
+      ]);
+      if (busy.some(Boolean))
+        throw new ConflictException('已有评分或反思运行中，暂不能替换采用版本');
+      await lease.assertOwned();
+      await this.judgeService.adoptScores(gameId, input);
+      return { gameId, runId: input.runId };
+    });
+    if (!locked.acquired) throw new ConflictException('该对局正在调度，请稍后重试');
+    return locked.value;
   }
 
   async getStatus(gameId: string): Promise<AnalysisStatus> {
     const game = await this.prisma.game.findUnique({ where: { id: gameId }, select: { id: true } });
     if (!game) throw new NotFoundException(`对局 ${gameId} 不存在`);
 
-    const [evaluation, playerCount, reflectedCount, summary] = await Promise.all([
-      this.judgeService.getEvaluationProgress(gameId),
+    const [progress, playerCount] = await Promise.all([
+      this.loadAnalysisProgress(gameId, undefined, 0),
       this.prisma.player.count({ where: { gameId } }),
-      this.prisma.agentPerformance.count({ where: { gameId, reflectionGenerated: true } }),
-      this.prisma.gameSummary.findUnique({ where: { gameId }, select: { narrative: true } }),
     ]);
 
     return {
-      judgedCount: evaluation.judgedCount,
-      judgeableCount: evaluation.judgeableCount,
-      reflectedCount,
+      judgedCount: progress.judgedCount,
+      judgeableCount: progress.judgeableCount,
+      reflectedCount: progress.reflectedCount,
       playerCount,
-      narrativeReady: !!summary?.narrative,
+      narrativeReady: progress.narrativeReady,
     };
   }
 }

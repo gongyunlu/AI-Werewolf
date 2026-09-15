@@ -3,7 +3,7 @@ import type { NodeContext } from '../node.types';
 import { createGameEndNode } from './game-end.node';
 
 describe('createGameEndNode', () => {
-  it('先持久化结束事件与终局状态，再发布通知并关闭 SSE', async () => {
+  it('先持久化结束事件与终局状态，再唤醒补送，节点不提前关闭 SSE', async () => {
     const calls: string[] = [];
     const gameEndEvent = { id: 'game-end-event' };
     const context = {
@@ -35,18 +35,19 @@ describe('createGameEndNode', () => {
 
     expect(context.eventWriter.writeGameEndEvent).toHaveBeenCalledWith({
       gameId: 'game-1',
+      phaseInstanceId: 'node/0/test',
+      signal: undefined,
       winner: 'werewolf',
       winnerFaction: 'werewolf',
       totalDays: 3,
-      endedAt: expect.any(Date),
     });
-    expect(calls).toEqual(['persist-terminal-facts', 'publish', 'emit', 'complete']);
+    expect(calls).toEqual(['persist-terminal-facts', 'publish']);
   });
 
-  it('事件发布失败仍继续广播 finished 并尝试关闭 SSE', async () => {
+  it('节点不直接广播终局，终局内容交给持久消费者补送', async () => {
     const context = {
       eventWriter: { writeGameEndEvent: jest.fn().mockResolvedValue({ id: 'event-1' }) },
-      eventBus: { publish: jest.fn().mockRejectedValue(new Error('sse unavailable')) },
+      eventBus: { publish: jest.fn().mockResolvedValue(undefined) },
       broadcaster: { emit: jest.fn(), complete: jest.fn() },
     } as unknown as NodeContext;
     const state = createGameState(
@@ -55,28 +56,8 @@ describe('createGameEndNode', () => {
     );
 
     await expect(createGameEndNode(context)(state)).resolves.toEqual({});
-    expect(context.broadcaster!.emit).toHaveBeenCalledTimes(1);
-    expect(context.broadcaster!.complete).toHaveBeenCalledWith('game-1');
-  });
-
-  it('finished 广播失败时仍必须尝试关闭 SSE', async () => {
-    const context = {
-      eventWriter: { writeGameEndEvent: jest.fn().mockResolvedValue({ id: 'event-1' }) },
-      eventBus: { publish: jest.fn().mockResolvedValue(undefined) },
-      broadcaster: {
-        emit: jest.fn().mockImplementation(() => {
-          throw new Error('emit unavailable');
-        }),
-        complete: jest.fn(),
-      },
-    } as unknown as NodeContext;
-    const state = createGameState(
-      { gameId: 'game-1', players: [] },
-      { currentDay: 3, winner: 'werewolf', isGameOver: true },
-    );
-
-    await expect(createGameEndNode(context)(state)).resolves.toEqual({});
-    expect(context.broadcaster!.complete).toHaveBeenCalledWith('game-1');
+    expect(context.eventWriter.writeGameEndEvent).toHaveBeenCalledTimes(1);
+    expect(context.broadcaster!.emit).not.toHaveBeenCalled();
   });
 
   it('终局事务失败时不发布任何派生通知', async () => {
@@ -93,6 +74,5 @@ describe('createGameEndNode', () => {
     await expect(createGameEndNode(context)(state)).rejects.toThrow('db unavailable');
     expect(context.eventBus!.publish).not.toHaveBeenCalled();
     expect(context.broadcaster!.emit).not.toHaveBeenCalled();
-    expect(context.broadcaster!.complete).not.toHaveBeenCalled();
   });
 });

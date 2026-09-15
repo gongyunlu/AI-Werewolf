@@ -18,7 +18,6 @@ import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.s
 import { LangfuseService } from '@/observability/langfuse.service';
 import { PromptService } from '@/observability/prompt.service';
 import type { Env } from '@/config/env.validation';
-import { GameFailurePolicy } from './game-failure-policy';
 import { readExperiment } from '@/evaluation/experiment-snapshot';
 import {
   abortExperiment,
@@ -86,6 +85,7 @@ export class GameEngine {
     const deadline = AbortSignal.timeout(duration);
     const runSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     this.initialize(preset, runSignal);
+    this.nodeContext.broadcaster = this.broadcaster.forExecution(initialState.gameId, runSignal);
 
     gameLogger.log(`[游戏开始] gameId: ${initialState.gameId}`);
 
@@ -96,10 +96,7 @@ export class GameEngine {
         where: { id: state.gameId },
         select: { experiment: true },
       });
-      this.nodeContext.failurePolicy = new GameFailurePolicy(
-        this.configService.get('GAME_MAX_MODEL_FALLBACKS') ?? 2,
-        !!game?.experiment,
-      );
+      this.nodeContext.strictExperiment = !!game?.experiment;
       if (game?.experiment) {
         assertExperimentConfiguration(
           readExperiment(game.experiment)!,
@@ -329,18 +326,18 @@ export class GameEngine {
    */
   private async executeNode(nodeName: string, state: GameGraphState): Promise<GameGraphState> {
     this.nodeContext.signal?.throwIfAborted();
+    const ordinal = this.nodeOrdinal++;
+    const phaseInstanceId = `node/${ordinal}/${nodeName}`;
     const execute = async (input: GameGraphState) => {
+      // 恢复传回的是原持久输入，节点身份始终取本次原路径位置。
+      input = { ...input, phaseInstanceId };
       const node = this.nodeRegistry.getNode(nodeName, this.nodeContext);
       const updates = await node(input);
-      return {
-        state: { ...input, ...updates },
-        fallbacks: this.nodeContext.failurePolicy?.count ?? 0,
-      };
+      return { state: { ...input, ...updates } };
     };
     const result = this.recovery
-      ? await this.recovery.node(this.nodeOrdinal++, nodeName, state, execute)
+      ? await this.recovery.node(ordinal, nodeName, { ...state, phaseInstanceId }, execute)
       : await execute(state);
-    this.nodeContext.failurePolicy?.restore(result.fallbacks);
     this.nodeContext.signal?.throwIfAborted();
     return result.state;
   }

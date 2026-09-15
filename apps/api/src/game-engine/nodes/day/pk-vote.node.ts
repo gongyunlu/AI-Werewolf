@@ -37,6 +37,14 @@ export class PkVoteNode {
       const voters = alivePlayers.filter((p) => !state.pkCandidates!.includes(p.seatNo!));
 
       if (voters.length === 0) {
+        await context.eventWriter.writeVoteBatch({
+          gameId: state.gameId,
+          phaseInstanceId: state.phaseInstanceId,
+          signal: context.signal,
+          day: state.currentDay,
+          expectedActorIds: [],
+          votes: [],
+        });
         gameLogger.warn('[PK投票] 没有可投票的玩家（所有存活玩家都在PK台上），跳过放逐');
         return {
           exileTarget: null,
@@ -50,6 +58,7 @@ export class PkVoteNode {
         const extraInfo = `这是PK投票，你只能投给以下候选人之一: ${state.pkCandidates!.join(', ')}号位。不能弃票。`;
 
         const contextData = await this.agentRuntime.prepareContextPublic({
+          phaseInstanceId: state.phaseInstanceId,
           gameId: state.gameId,
           playerId: player.id,
           scenario: 'vote',
@@ -73,19 +82,9 @@ export class PkVoteNode {
         if (!state.pkCandidates!.includes(decision.targetSeatNo)) {
           throw new Error('PK 投票目标非法，停止本批结算');
         }
-        const event = await context.eventWriter.writePlayerVoteEvent({
-          gameId: state.gameId,
-          day: state.currentDay,
-          actorId: player.id,
-          voteRound: Math.max(1, state.pkRound),
-          voterSeatNo: player.seatNo!,
-          targetSeatNo: decision.targetSeatNo,
-          thinking: reasoning,
-        });
-        await this.agentRuntime.recordExperienceUsages(contextData, event);
-        await context.eventBus?.publish(event);
-
         return {
+          contextData,
+          thinking: reasoning,
           voterId: player.id,
           voterSeatNo: player.seatNo!,
           targetSeatNo: decision.targetSeatNo,
@@ -93,6 +92,28 @@ export class PkVoteNode {
       });
 
       const votes = await settleGameActions(votePromises);
+      const events = await context.eventWriter.writeVoteBatch({
+        gameId: state.gameId,
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
+        day: state.currentDay,
+        expectedActorIds: voters.map((player) => player.id),
+        sources: Object.fromEntries(votes.map((vote) => [vote.voterId, vote.contextData.source])),
+        votes: votes.map((vote) => ({
+          actorId: vote.voterId,
+          voterSeatNo: vote.voterSeatNo,
+          targetSeatNo: vote.targetSeatNo,
+          voteRound: Math.max(1, state.pkRound),
+          thinking: vote.thinking,
+        })),
+      });
+      const eventByActor = new Map(events.map((event) => [event.actorId, event]));
+      for (const vote of votes)
+        await this.agentRuntime.recordExperienceUsages(
+          vote.contextData,
+          eventByActor.get(vote.voterId)!,
+        );
+      for (const event of events) await context.eventBus?.publish(event);
 
       // 构建投票数据结构：targetId → voterIds[]
       const votesMap = new Map<string, string[]>();

@@ -1,8 +1,7 @@
-import { failAfterEffect, allowModelFallback } from '../../core/game-failure-policy';
+import { failAfterEffect, failModelCall } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import type { GameGraphState } from '../../core/types';
-import { appendSceneNotice, type NodeFactory } from '../node.types';
-import { gameLogger } from '../../utils/game-logger';
+import { createSceneIdentity, type NodeFactory } from '../node.types';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
 
@@ -26,10 +25,9 @@ export class PkSpeechNode {
       pkPlayers.sort((a, b) => a.seatNo! - b.seatNo!);
 
       const completedSeats: number[] = [];
-      const skippedSeats: number[] = [];
       for (const player of pkPlayers) {
         throwIfAborted(context.signal);
-        const sceneId = `pk-speech-${state.gameId}-${state.currentDay}-${player.id}`;
+        const { sceneId, attemptId } = createSceneIdentity(state, player.id, 0);
         let sceneOpened = false;
         let thinkingDurationMs = 0;
         let contentDurationMs = 0;
@@ -45,9 +43,9 @@ export class PkSpeechNode {
             round: Math.max(1, state.pkRound),
             order: pkPlayers.map((p) => p.seatNo),
             completedSeats: [...completedSeats],
-            skippedSeats: [...skippedSeats],
           };
           const contextData = await this.agentRuntime.prepareContextPublic({
+            phaseInstanceId: state.phaseInstanceId,
             gameId: state.gameId,
             playerId: player.id,
             scenario: 'day_speech',
@@ -59,6 +57,7 @@ export class PkSpeechNode {
           context.broadcaster?.emit(state.gameId, {
             type: 'scene.open',
             sceneId,
+            attemptId,
             sceneType: 'speech',
             visibility: 'public',
             actorId: player.id,
@@ -72,6 +71,7 @@ export class PkSpeechNode {
               context.broadcaster?.emit(state.gameId, {
                 type: 'scene.append',
                 sceneId,
+                attemptId,
                 token,
                 contentType: 'thinking',
               });
@@ -80,6 +80,7 @@ export class PkSpeechNode {
               context.broadcaster?.emit(state.gameId, {
                 type: 'scene.append',
                 sceneId,
+                attemptId,
                 token,
                 contentType: 'content',
               });
@@ -90,12 +91,11 @@ export class PkSpeechNode {
           thinkingDurationMs = result.thinkingDurationMs;
           contentDurationMs = result.contentDurationMs;
 
-          if (!content) {
-            skippedSeats.push(player.seatNo);
-            continue;
-          }
           effectStarted = true;
           const event = await context.eventWriter.writePlayerSpeechEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             turn: { phase: position.phase, round: position.round },
             sceneId,
             sceneType: 'speech',
@@ -110,18 +110,13 @@ export class PkSpeechNode {
           completedSeats.push(player.seatNo);
         } catch (error) {
           if (effectStarted) failAfterEffect(error);
-
-          await allowModelFallback(error, context, player.id);
-          appendSceneNotice(context, state.gameId, sceneId);
-          skippedSeats.push(player.seatNo);
-          gameLogger.error(
-            `[PK发言] ${player.seatNo}号位发言出错: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          failModelCall(error, context, `[PK发言] ${player.seatNo}号位发言出错`);
         } finally {
           if (sceneOpened) {
             context.broadcaster?.emit(state.gameId, {
               type: 'scene.close',
               sceneId,
+              attemptId,
               thinkingDurationMs,
               contentDurationMs,
             });

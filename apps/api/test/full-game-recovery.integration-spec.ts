@@ -6,7 +6,7 @@ import type { Event, Player } from '../src/generated/prisma/client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { createMockGame, type MockGame } from '../src/game-engine/testing/mock-game-harness';
 import { MockGameStore } from '../src/game-engine/testing/mock-game-store';
-import { GameFailurePolicy } from '../src/game-engine/core/game-failure-policy';
+import { ModelCallError } from '../src/llm/model-call-guard';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
 
 jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
@@ -283,19 +283,61 @@ describe('standard six player recovery through executor, engine and agent runtim
     ).toHaveLength(2);
   });
 
-  it('keeps the wolf proposal batch private while reusing the preceding discussion', async () => {
-    const proposalCommitted = deferred();
+  it.each(['归因', '发布'] as const)(
+    '狼队提交后的%s失败，重启不重调已完成提案或改写事件',
+    async (failure) => {
+      if (failure === '归因') {
+        const record = game!.runtime.recordExperienceUsages.bind(game!.runtime);
+        jest.spyOn(game!.runtime, 'recordExperienceUsages').mockImplementation(async (...args) => {
+          if (args[1].actionType === 'wolf_proposal') throw new ModelCallError('transient');
+          return record(...args);
+        });
+      } else {
+        const publish = game!.bus.publish.getMockImplementation()!;
+        game!.bus.publish.mockImplementation(async (event) => {
+          if (event.actionType === A.WOLF_KILL) throw new ModelCallError('transient');
+          return publish(event);
+        });
+      }
+      await expect(game!.executor.executeGame(gameId)).rejects.toThrow();
+      const committed = (await events()).filter((event) =>
+        ['wolf_proposal', A.WOLF_KILL].includes(event.actionType),
+      );
+      expect(committed.filter((event) => event.actionType === 'wolf_proposal')).toHaveLength(2);
+      expect(committed.filter((event) => event.actionType === A.WOLF_KILL)).toHaveLength(
+        failure === '发布' ? 1 : 0,
+      );
+      const generation = await restart();
+      await finish(generation);
+      expect(
+        game!.model.requests.filter(
+          (request) => request.day === 1 && request.action === 'propose_kill',
+        ),
+      ).toHaveLength(0);
+      const final = await events();
+      for (const original of committed)
+        expect(final.find((event) => event.id === original.id)).toEqual(original);
+      expect(
+        final.filter((event) => event.day === 1 && event.actionType === A.WOLF_KILL),
+      ).toHaveLength(1);
+      expect(
+        final.filter((event) => event.day === 1 && event.actionType === 'wolf_proposal'),
+      ).toHaveLength(2);
+    },
+  );
+
+  it('狼队提案收集未齐不写半批，恢复复用已有讨论与首位模型结果', async () => {
+    const proposalGenerated = deferred();
     const prepare = game!.runtime.prepareContextPublic.bind(game!.runtime);
-    const record = game!.runtime.recordExperienceUsages.bind(game!.runtime);
-    jest
-      .spyOn(game!.runtime, 'recordExperienceUsages')
-      .mockImplementation(async (context, event) => {
-        await record(context, event);
-        if (event.actionType === 'wolf_proposal') proposalCommitted.resolve();
-      });
+    const decide = game!.runtime.decide.bind(game!.runtime);
+    jest.spyOn(game!.runtime, 'decide').mockImplementation(async (...args) => {
+      const result = await decide(...args);
+      if (result.decision.action === 'propose_kill') proposalGenerated.resolve();
+      return result;
+    });
     jest.spyOn(game!.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
       if (args[0].playerId === player(2).id && args[0].actionType === 'wolf_proposal') {
-        await proposalCommitted.promise;
+        await proposalGenerated.promise;
         throw new Error('disconnect before the second wolf proposal');
       }
       return prepare(...args);
@@ -304,7 +346,7 @@ describe('standard six player recovery through executor, engine and agent runtim
       'disconnect before the second',
     );
     const committed = await events();
-    expect(committed.filter((event) => event.actionType === 'wolf_proposal')).toHaveLength(1);
+    expect(committed.filter((event) => event.actionType === 'wolf_proposal')).toHaveLength(0);
     const generation = await restart();
     const resumedPrepare = game!.runtime.prepareContextPublic.bind(game!.runtime);
     const proposalContexts: Awaited<ReturnType<typeof prepare>>[] = [];
@@ -398,13 +440,9 @@ describe('standard six player recovery through executor, engine and agent runtim
     }
   });
 
-  it('retains the fallback budget consumed by a completed node across restart', async () => {
+  it('replays a mid-game checkpoint and surfaces the model failure without a replacement action', async () => {
     await game!.close();
-    config.GAME_MAX_MODEL_FALLBACKS = 1;
     game = await start();
-    game.model.beforeRequest = (request) => {
-      if (request.action === 'check_identity') throw unavailable();
-    };
     const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
     jest.spyOn(game.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
       if (args[0].scenario === 'day_speech') throw new Error('disconnect before public speech');
@@ -413,114 +451,14 @@ describe('standard six player recovery through executor, engine and agent runtim
     await expect(game.executor.executeGame(gameId)).rejects.toThrow('disconnect before public');
     const generation = await restart();
     game!.model.beforeRequest = (request) => {
-      if (request.action === 'check_identity') throw unavailable();
-    };
-    await expect(game!.executor.executeGame(gameId, generation)).rejects.toThrow(
-      '降级次数已耗尽 (1/1)',
-    );
-    expect(
-      await prisma.gameExecutionStep.count({
-        where: {
-          gameId,
-          completed: true,
-          key: { contains: '/fallback/' },
-        },
-      }),
-    ).toBe(1);
-    expect((await events()).filter((event) => event.actionType === A.SEER_CHECK)).toHaveLength(1);
-    expect((await events()).some((event) => event.actionType === A.GAME_ENDED)).toBe(false);
-  });
-
-  it('reserves an already spent fallback before another voter fails on replay', async () => {
-    await game!.close();
-    config.GAME_MAX_MODEL_FALLBACKS = 1;
-    game = await start();
-    const fallbackConsumed = deferred();
-    const consume = GameFailurePolicy.prototype.consumePersisted;
-    let consumed = 0;
-    jest.spyOn(GameFailurePolicy.prototype, 'consumePersisted').mockImplementation(async function (
-      this: GameFailurePolicy,
-      ...args
-    ) {
-      const result = await consume.apply(this, args);
-      if (++consumed === 1) fallbackConsumed.resolve();
-      return result;
-    });
-    const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
-    jest.spyOn(game.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
-      if (args[0].scenario === 'vote' && args[0].playerId === player(3).id) {
-        await fallbackConsumed.promise;
-        throw new Error('disconnect after another voter spent fallback budget');
-      }
-      return prepare(...args);
-    });
-    game.model.beforeRequest = (request) => {
       if (request.action === 'cast_vote' && request.seat === 5) throw unavailable();
     };
-    await expect(game.executor.executeGame(gameId)).rejects.toThrow(
-      'disconnect after another voter',
-    );
-    expect(
-      game.model.requests.filter((request) => request.action === 'cast_vote' && request.seat === 5),
-    ).toHaveLength(2);
-    const fallbackSteps = () =>
-      prisma.gameExecutionStep.count({
-        where: { gameId, completed: true, key: { contains: '/fallback/' } },
-      });
-    expect(await fallbackSteps()).toBe(1);
-    expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
-
-    const generation = await restart();
-    game!.model.beforeRequest = (request) => {
-      if (request.action === 'cast_vote' && request.seat === 3) throw unavailable();
-    };
-    await expect(game!.executor.executeGame(gameId, generation)).rejects.toThrow('降级次数已耗尽');
-    // 上一代已花掉的额度被保留：第五人不再请求模型，也没有第二份额度可花。
-    expect(
-      game!.model.requests.filter(
-        (request) => request.action === 'cast_vote' && request.seat === 5,
-      ),
-    ).toHaveLength(0);
-    expect(await fallbackSteps()).toBe(1);
-  });
-
-  it('同一轮里同时失败的投票者不会各自扣掉一份降级额度', async () => {
-    await game!.close();
-    config.GAME_MAX_MODEL_FALLBACKS = 1;
-    game = await start();
-    const voters = [player(3).id, player(5).id];
-    const prepare = game.runtime.prepareContextPublic.bind(game.runtime);
-    const bothReady = deferred();
-    let arrived = 0;
-    jest.spyOn(game.runtime, 'prepareContextPublic').mockImplementation(async (...args) => {
-      if (args[0].scenario === 'vote' && voters.includes(args[0].playerId)) {
-        if (++arrived === voters.length) bothReady.resolve();
-        await bothReady.promise;
-      }
-      return prepare(...args);
+    // 重放后仍有座位调用失败：原样上抛给上层，整轮不提交，也没有替代行动顶上。
+    await expect(game!.executor.executeGame(gameId, generation)).rejects.toMatchObject({
+      name: 'ModelCallError',
+      code: 'transient',
     });
-    game.model.beforeRequest = (request) => {
-      if (request.action === 'cast_vote' && [3, 5].includes(request.seat)) throw unavailable();
-    };
-    // 两个失败同时进入额度占用，避免退化成先后串行。
-    const consume = GameFailurePolicy.prototype.consumePersisted;
-    const bothConsuming = deferred();
-    let consuming = 0;
-    jest.spyOn(GameFailurePolicy.prototype, 'consumePersisted').mockImplementation(async function (
-      this: GameFailurePolicy,
-      ...args
-    ) {
-      if (++consuming === voters.length) bothConsuming.resolve();
-      await bothConsuming.promise;
-      return consume.apply(this, args);
-    });
-    await expect(game!.executor.executeGame(gameId)).rejects.toThrow('降级次数已耗尽');
-    expect(
-      await prisma.gameExecutionStep.count({
-        where: { gameId, completed: true, key: { contains: '/fallback/' } },
-      }),
-    ).toBe(1);
-    // 额度耗尽时整轮不提交：既没有部分投票，也没有多出来的弃票。
     expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
+    expect((await events()).some((event) => event.actionType === A.GAME_ENDED)).toBe(false);
   });
 });

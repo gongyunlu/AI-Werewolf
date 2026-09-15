@@ -4,6 +4,9 @@ export type SceneType =
 export type SceneVisibility = 'public' | 'wolf' | 'seer' | 'witch' | 'god';
 
 export interface SceneSnapshot {
+  eventId?: string;
+  eventSequence?: number;
+  attemptId?: string;
   sceneId: string;
   sceneType: SceneType;
   visibility: SceneVisibility;
@@ -30,12 +33,17 @@ export interface ConnectionReadyEvent {
   type: 'connection.ready';
   gameId: string;
   lastSequence: number;
+  streamId?: string;
+  eventWatermark?: number;
+  gameStatus?: string;
   snapshot: SceneSnapshot[];
   playerDeaths: PlayerDeathSnapshot[];
   gameFinished?: GameFinishedSnapshot;
 }
 
 export interface SceneOpenEvent {
+  streamId?: string;
+  attemptId?: string;
   type: 'scene.open';
   sequence: number;
   sceneId: string;
@@ -48,6 +56,8 @@ export interface SceneOpenEvent {
 }
 
 export interface SceneAppendEvent {
+  streamId?: string;
+  attemptId?: string;
   type: 'scene.append';
   sequence: number;
   sceneId: string;
@@ -56,6 +66,10 @@ export interface SceneAppendEvent {
 }
 
 export interface SceneCloseEvent {
+  /** 已提交场景的迟到关闭只更新显示耗时，不再追加正文。 */
+  eventId?: string;
+  streamId?: string;
+  attemptId?: string;
   type: 'scene.close';
   sequence: number;
   sceneId: string;
@@ -71,18 +85,23 @@ export interface GameFinishedEvent {
   winner: string;
 }
 
-export interface PlayerDiedEvent {
-  type: 'player.died';
+/** 同一事务的最终结果一次合并；正文是完整投影，不能作为 delta 追加。 */
+export interface EventsCommittedEvent {
+  type: 'events.committed';
   sequence: number;
-  playerId: string;
-  deathDay: number;
-  deathCause: string;
+  streamId?: string;
+  deliveryKey: string;
+  firstSequence: number;
+  lastSequence: number;
+  scenes: SceneSnapshot[];
+  playerDeaths: PlayerDeathSnapshot[];
+  gameFinished?: GameFinishedSnapshot;
 }
 
 export type SseMessage =
+  | EventsCommittedEvent
   | ConnectionReadyEvent
   | SceneOpenEvent
   | SceneAppendEvent
   | SceneCloseEvent
-  | GameFinishedEvent
-  | PlayerDiedEvent;
+  | GameFinishedEvent;

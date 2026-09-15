@@ -8,9 +8,10 @@ import { SseModule } from '../sse/sse.module';
 import { GameLaunchService } from './game-launch.service';
 import { GameResumeService } from './game-resume.service';
 import { GameRecoveryModule } from '../game-recovery/game-recovery.module';
+import { EventBusModule } from '../event-bus/event-bus.module';
 
 @Module({
-  imports: [GameExecutorModule, GameQueueModule, SseModule, GameRecoveryModule],
+  imports: [GameExecutorModule, GameQueueModule, SseModule, GameRecoveryModule, EventBusModule],
   controllers: [GamesController, GameStreamController],
   providers: [GamesService, GameLaunchService, GameResumeService],
   exports: [GamesService, GameLaunchService],

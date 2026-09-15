@@ -1,5 +1,11 @@
 import { JudgeService } from './judge.service';
 import { EVALUATION_VERSION } from './evaluation-version';
+import type {
+  EvaluationProjectionService,
+  EvaluationDefinition,
+  EvaluatedResult,
+} from './evaluation-projection.service';
+import { createActionSource } from '../observability/action-source';
 
 function harness(actionType = 'speech') {
   const events = [1, 2].map((sequence) => ({
@@ -17,15 +23,9 @@ function harness(actionType = 'speech') {
     },
   }));
   const rows = new Map<string, any>();
-  let tail = Promise.resolve();
   const table = {
     findUnique: jest.fn(async ({ where }) => structuredClone(rows.get(where.eventId) ?? null)),
-    upsert: jest.fn(async ({ where, create, update }) => {
-      rows.set(where.eventId, {
-        ...(rows.get(where.eventId) ?? { previousEvaluations: [] }),
-        ...(rows.has(where.eventId) ? update : create),
-      });
-    }),
+    upsert: jest.fn(),
   };
   const prisma = {
     player: {
@@ -72,25 +72,7 @@ function harness(actionType = 'speech') {
     },
     decisionJudgment: table,
     teamJudgment: table,
-    $transaction: jest.fn(async (task) => {
-      let release: (() => void) | undefined;
-      const tx = {
-        decisionJudgment: table,
-        teamJudgment: table,
-        $executeRaw: jest.fn(async () => {
-          const before = tail;
-          tail = new Promise<void>((resolve) => {
-            release = resolve;
-          });
-          await before;
-        }),
-      };
-      try {
-        return await task(tx);
-      } finally {
-        release?.();
-      }
-    }),
+    $transaction: jest.fn(),
   };
   const prompts = {
     render: jest.fn(async (_name, variables) => ({
@@ -110,11 +92,40 @@ function harness(actionType = 'speech') {
       modelName: 'judge',
     }),
   };
+  // 这里只模拟投影接口对成功判分的复用；平台交付、锁和整批采用由隔离集成测试验证。
+  const results = new Map<string, EvaluatedResult>();
+  const definition = {
+    modelName: 'judge-frozen',
+    baseUrl: 'https://judge.test/v3',
+    prompts: {},
+  } as EvaluationDefinition;
+  const projection = {
+    evaluate: jest.fn(
+      async (
+        ...[gameId, eventId, runId, compute]: Parameters<EvaluationProjectionService['evaluate']>
+      ) => {
+        const key = `${runId}/${eventId}`;
+        if (!results.has(key))
+          results.set(key, await compute(definition, createActionSource(`${gameId}/${key}`)));
+      },
+    ),
+  };
   const service = new JudgeService(
-    ...([prisma, prompts, llm] as unknown as ConstructorParameters<typeof JudgeService>),
+    ...([prisma, prompts, llm, projection] as unknown as ConstructorParameters<
+      typeof JudgeService
+    >),
   );
-  return { service, prisma, llm, rows, table };
+  return { service, prisma, llm, rows, table, projection, results };
 }
+
+it('同一决策评估任务重试不再次判分', async () => {
+  const { service, llm, projection } = harness('vote');
+  await service.judgeEvent('g', 'e1', 'run');
+  await service.judgeEvent('g', 'e1', 'run');
+  expect(llm.invokeReflective).toHaveBeenCalledTimes(1);
+  expect(projection.evaluate).toHaveBeenNthCalledWith(1, 'g', 'e1', 'run', expect.any(Function));
+  expect(projection.evaluate).toHaveBeenNthCalledWith(2, 'g', 'e1', 'run', expect.any(Function));
+});
 
 it('投票评分读取私有快照中的当次理由，不向评分器注入攻略', async () => {
   const { service, prisma, llm } = harness('vote');
@@ -133,7 +144,7 @@ it('投票评分读取私有快照中的当次理由，不向评分器注入攻�
 });
 
 it('发言 1 成功、2 失败后，重试只调用 2；新批次才重评两条', async () => {
-  const { service, llm, rows, table } = harness();
+  const { service, llm, results, table } = harness();
   const output = {
     output: { items: [{ index: 1, score: 80, verdict: 'good', reasoning: 'evidence' }] },
     modelName: 'judge',
@@ -145,44 +156,46 @@ it('发言 1 成功、2 失败后，重试只调用 2；新批次才重评两条
   await expect(service.judgeSpeeches('g', 'p', undefined, 'run')).rejects.toThrow(
     'temporary failure',
   );
-  expect(rows.get('e1').score).toBe(80);
+  expect(results.get('run/e1')?.score).toBe(80);
+  expect(results.has('run/e2')).toBe(false);
   await expect(service.judgeSpeeches('g', 'p', undefined, 'run')).resolves.toBe(2);
   expect(llm.invokeReflective).toHaveBeenCalledTimes(3);
-  expect(table.upsert.mock.calls.map(([args]) => args.where.eventId)).toEqual(['e1', 'e2']);
-  expect(rows.get('e1').previousEvaluations).toEqual([]);
+  expect([...results.keys()]).toEqual(['run/e1', 'run/e2']);
+  expect(table.upsert).not.toHaveBeenCalled();
   await service.judgeSpeeches('g', 'p', undefined, 'new-run');
   expect(llm.invokeReflective).toHaveBeenCalledTimes(5);
-  expect(rows.get('e1').previousEvaluations).toEqual([
-    expect.objectContaining({ evaluationRunId: 'run', score: 80 }),
-  ]);
+  expect([...results.keys()]).toEqual(['run/e1', 'run/e2', 'new-run/e1', 'new-run/e2']);
+  expect(table.upsert).not.toHaveBeenCalled();
 });
 
-it.each(['seer_check', 'wolf_kill'])('并发重评 %s 保留原分及两次新分', async (actionType) => {
-  const { service, llm, rows } = harness(actionType);
-  rows.set('e1', {
-    score: 12,
-    verdict: 'bad',
-    reasoning: 'old',
-    modelName: 'old',
-    evaluationVersion: EVALUATION_VERSION - 1,
-    previousEvaluations: [],
-  });
-  for (const score of [80, 90])
-    llm.invokeReflective.mockResolvedValueOnce({
-      output: { score, verdict: 'good', reasoning: 'new' },
-      modelName: 'judge',
-    });
-  await Promise.all([
-    service.judgeEvent('g', 'e1', 'run-80'),
-    service.judgeEvent('g', 'e1', 'run-90'),
-  ]);
-  const result = rows.get('e1');
-  expect(
-    [...result.previousEvaluations.map((v: any) => v.score), result.score].toSorted(
-      (a, b) => a - b,
-    ),
-  ).toEqual([12, 80, 90]);
-});
+it.each(['seer_check', 'wolf_kill'])(
+  '不同运行重评 %s 只交付本次结果，旧投影和历史保持原值',
+  async (actionType) => {
+    const { service, llm, rows, results, table } = harness(actionType);
+    const old = {
+      score: 12,
+      verdict: 'bad',
+      reasoning: 'old',
+      modelName: 'old',
+      evaluationVersion: EVALUATION_VERSION - 1,
+      previousEvaluations: [{ evaluationVersion: 1, score: 7 }],
+    };
+    rows.set('e1', structuredClone(old));
+    for (const score of [80, 90])
+      llm.invokeReflective.mockResolvedValueOnce({
+        output: { score, verdict: 'good', reasoning: 'new' },
+        modelName: 'judge',
+      });
+    await Promise.all([
+      service.judgeEvent('g', 'e1', 'run-80'),
+      service.judgeEvent('g', 'e1', 'run-90'),
+    ]);
+    expect(results.get('run-80/e1')?.score).toBe(80);
+    expect(results.get('run-90/e1')?.score).toBe(90);
+    expect(rows.get('e1')).toEqual(old);
+    expect(table.upsert).not.toHaveBeenCalled();
+  },
+);
 
 it('团队狼刀评分包含提刀推理、记忆和动作约束，移除攻略文本', async () => {
   const { service, llm } = harness('wolf_kill');

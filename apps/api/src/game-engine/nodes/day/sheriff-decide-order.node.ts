@@ -1,4 +1,4 @@
-import { allowModelFallback, failAfterEffect } from '../../core/game-failure-policy';
+import { failModelCall, failAfterEffect } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { GameGraphState } from '@/game-engine/core/types';
@@ -9,7 +9,6 @@ import {
   type SpeechOrderConfig,
 } from '@/game-engine/utils/speech-order.utils';
 import type { TypedRuleset } from '@/prisma/typed-models';
-import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 
 const SheriffDecideOrderSchema = z.object({
@@ -59,6 +58,7 @@ export class SheriffDecideOrderNode {
 
       try {
         const contextData = await this.agentRuntime.prepareContextPublic({
+          phaseInstanceId: state.phaseInstanceId,
           gameId: state.gameId,
           playerId: sheriff.id,
           scenario: 'sheriff_decide_order',
@@ -83,6 +83,9 @@ export class SheriffDecideOrderNode {
 
         effectStarted = true;
         const event = await context.eventWriter.writeSheriffDecideOrderEvent({
+          source: contextData.source,
+          phaseInstanceId: state.phaseInstanceId,
+          signal: context.signal,
           gameId: state.gameId,
           day: state.currentDay,
           sheriffId: sheriff.id,
@@ -93,10 +96,7 @@ export class SheriffDecideOrderNode {
         await context.eventBus?.publish(event);
       } catch (error) {
         if (effectStarted) failAfterEffect(error);
-        await allowModelFallback(error, context, 'sheriff-order');
-        gameLogger.error(
-          `[警长决定发言顺序] 出错: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        failModelCall(error, context, '[警长决定发言顺序] 出错');
       }
 
       const orderResult = await saveNodeValue(context, 'sheriff-order', () =>

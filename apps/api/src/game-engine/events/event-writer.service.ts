@@ -1,7 +1,9 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
 import { PrismaService } from '@/prisma/prisma.service';
-import { type Prisma, type Event } from '@/generated/prisma/client';
+import type { Prisma } from '@/generated/prisma/client';
+import { recordEventDelivery } from '@/event-bus/record-event-delivery';
+import type { PlayerDeathSnapshot } from '@/sse/sse-event.types';
 import {
   ACTION_TYPES,
   GAME_STATUSES,
@@ -11,39 +13,42 @@ import {
   type DeathCause,
   type SeerCheckResult,
 } from '@ai-werewolf/shared';
-import { RedisService } from '@/redis/redis.service';
+import {
+  type SubmissionScope,
+  type CommittedEvent,
+  SubmissionConflictError,
+  normalizeSubmission,
+  submissionHash,
+  submissionKey,
+  sortedUnique,
+} from './submission-protocol';
 
-/** 判断是否为 Prisma 唯一约束冲突（P2002） */
-function isUniqueConstraintViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: string }).code === 'P2002'
-  );
-}
+type EventDraft = Pick<
+  Prisma.EventUncheckedCreateInput,
+  'day' | 'phase' | 'actionType' | 'visibility' | 'actorId' | 'targetIds' | 'content'
+>;
 
 /**
  * Event 写入服务
  *
- * 负责事件落库，广播由节点层调用 EventBusService 处理
+ * 负责事件、状态与交付意图原子落库，独立消费者负责补送。
  */
 @Injectable()
 export class EventWriterService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
     @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
   /** 夜间结算与全部死亡状态同事务；即使当夜终局也保留内部结算事实。 */
-  async commitNightResolution(options: {
-    gameId: string;
-    day: number;
-    deaths: Array<{ playerId: string; seatNo: number; cause: DeathCause }>;
-  }): Promise<Event> {
+  async commitNightResolution(
+    options: SubmissionScope & {
+      day: number;
+      deaths: Array<{ playerId: string; seatNo: number; cause: DeathCause }>;
+    },
+  ): Promise<CommittedEvent> {
     return this.createEventWithSequence(
-      options.gameId,
+      options,
       {
         day: options.day,
         phase: PHASES.NIGHT,
@@ -51,7 +56,9 @@ export class EventWriterService {
         visibility: VISIBILITY_TYPES.SYSTEM,
         actorId: null,
         targetIds: options.deaths.map((death) => death.playerId),
-        content: { deaths: options.deaths },
+        content: {
+          deaths: options.deaths.toSorted((a, b) => a.playerId.localeCompare(b.playerId)),
+        },
       },
       async (tx) => {
         for (const death of options.deaths) {
@@ -64,17 +71,16 @@ export class EventWriterService {
     );
   }
 
-  /**
-   * 写入预言家查验事件
-   */
-  async writeWolfDecisionEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    actionType: 'wolf_explode' | 'wolf_proposal';
-    content: Prisma.InputJsonObject;
-  }): Promise<Event> {
-    return this.createEventWithSequence(options.gameId, {
+  /** 写入狼人自爆或提案事件 */
+  async writeWolfDecisionEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      actionType: 'wolf_explode' | 'wolf_proposal';
+      content: Prisma.InputJsonObject;
+    },
+  ): Promise<CommittedEvent> {
+    return this.createEventWithSequence(options, {
       day: options.day,
       phase: options.actionType === 'wolf_explode' ? PHASES.DAY_ANNOUNCE : PHASES.NIGHT,
       actionType: options.actionType,
@@ -85,17 +91,19 @@ export class EventWriterService {
     });
   }
 
-  async writeSeerCheckEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    targetSeatNo: number;
-    result: SeerCheckResult;
-    thinking?: string;
-  }): Promise<Event> {
-    const { gameId, day, actorId, targetSeatNo, result, thinking } = options;
+  /** 写入预言家查验事件 */
+  async writeSeerCheckEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      targetSeatNo: number;
+      result: SeerCheckResult;
+      thinking?: string;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, actorId, targetSeatNo, result, thinking } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.NIGHT,
       actionType: ACTION_TYPES.SEER_CHECK,
@@ -115,16 +123,17 @@ export class EventWriterService {
   /**
    * 写入狼人刀人事件
    */
-  async writeWolfKillEvent(options: {
-    gameId: string;
-    day: number;
-    targetId?: string | null;
-    targetSeatNo?: number;
-    proposalEventIds?: string[];
-  }): Promise<Event> {
-    const { gameId, day, targetId, targetSeatNo } = options;
+  async writeWolfKillEvent(
+    options: SubmissionScope & {
+      day: number;
+      targetId?: string | null;
+      targetSeatNo?: number;
+      proposalEventIds?: string[];
+    },
+  ): Promise<CommittedEvent> {
+    const { day, targetId, targetSeatNo } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.NIGHT,
       actionType: ACTION_TYPES.WOLF_KILL,
@@ -134,7 +143,7 @@ export class EventWriterService {
       content: {
         targetSeatNo,
         cause: 'night_kill',
-        proposalEventIds: options.proposalEventIds ?? [],
+        proposalEventIds: sortedUnique(options.proposalEventIds ?? [], '提案事件集合'),
       },
     });
 
@@ -144,17 +153,18 @@ export class EventWriterService {
   /**
    * 写入女巫解药事件
    */
-  async writeWitchAntidoteEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    targetId: string;
-    targetSeatNo: number;
-    thinking?: string;
-  }): Promise<Event> {
-    const { gameId, day, actorId, targetId, targetSeatNo, thinking } = options;
+  async writeWitchAntidoteEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      targetId: string;
+      targetSeatNo: number;
+      thinking?: string;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, actorId, targetId, targetSeatNo, thinking } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.NIGHT,
       actionType: ACTION_TYPES.WITCH_SAVE,
@@ -174,17 +184,18 @@ export class EventWriterService {
   /**
    * 写入女巫毒药事件
    */
-  async writeWitchPoisonEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    targetId: string;
-    targetSeatNo: number;
-    thinking?: string;
-  }): Promise<Event> {
-    const { gameId, day, actorId, targetId, targetSeatNo, thinking } = options;
+  async writeWitchPoisonEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      targetId: string;
+      targetSeatNo: number;
+      thinking?: string;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, actorId, targetId, targetSeatNo, thinking } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.NIGHT,
       actionType: ACTION_TYPES.WITCH_POISON,
@@ -205,14 +216,15 @@ export class EventWriterService {
   /**
    * 写入死亡公告事件
    */
-  async writeDeathAnnouncementEvent(options: {
-    gameId: string;
-    day: number;
-    deaths: Array<{ playerId: string; seatNo: number; cause: string }>;
-  }): Promise<Event> {
-    const { gameId, day, deaths } = options;
+  async writeDeathAnnouncementEvent(
+    options: SubmissionScope & {
+      day: number;
+      deaths: Array<{ playerId: string; seatNo: number; cause: string }>;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, deaths } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.DAY_ANNOUNCE,
       actionType: ACTION_TYPES.PLAYER_DIED,
@@ -220,10 +232,12 @@ export class EventWriterService {
       actorId: null,
       targetIds: deaths.map((d) => d.playerId),
       content: {
-        deaths: deaths.map((d) => ({
-          seatNo: d.seatNo,
-          cause: d.cause,
-        })),
+        deaths: deaths
+          .toSorted((a, b) => a.playerId.localeCompare(b.playerId))
+          .map((d) => ({
+            seatNo: d.seatNo,
+            cause: d.cause,
+          })),
       },
     });
 
@@ -233,10 +247,14 @@ export class EventWriterService {
   /**
    * 写入平安夜事件
    */
-  async writePeacefulNightEvent(options: { gameId: string; day: number }): Promise<Event> {
-    const { gameId, day } = options;
+  async writePeacefulNightEvent(
+    options: SubmissionScope & {
+      day: number;
+    },
+  ): Promise<CommittedEvent> {
+    const { day } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.DAY_ANNOUNCE,
       actionType: ACTION_TYPES.PEACEFUL_NIGHT,
@@ -254,21 +272,22 @@ export class EventWriterService {
   /**
    * 写入玩家发言事件（白天公开发言）
    */
-  async writePlayerSpeechEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    seatNo: number;
-    content: string;
-    thinking?: string; // AI 的推理过程
-    sceneId?: string;
-    sceneType?: 'speech' | 'last_words';
-    /** 保留实际发言窗口与轮次，避免历史 PK、遗言被当成普通发言。 */
-    turn?: { phase: string; round: number };
-  }): Promise<Event> {
-    const { gameId, day, actorId, seatNo, content, thinking } = options;
+  async writePlayerSpeechEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      seatNo: number;
+      content: string;
+      thinking?: string; // AI 的推理过程
+      sceneId?: string;
+      sceneType?: 'speech' | 'last_words';
+      /** 保留实际发言窗口与轮次，避免历史 PK、遗言被当成普通发言。 */
+      turn?: { phase: string; round: number };
+    },
+  ): Promise<CommittedEvent> {
+    const { day, actorId, seatNo, content, thinking } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.SPEECH,
       actionType: ACTION_TYPES.SPEECH,
@@ -291,66 +310,41 @@ export class EventWriterService {
   /**
    * 写入狼人夜间讨论事件（仅狼队可见）
    */
-  async writeWolfDiscussionEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    seatNo: number;
-    content: string;
-    round: number; // 讨论轮次
-    thinking?: string;
-    sceneId?: string;
-  }): Promise<Event> {
-    const { gameId, day, actorId, seatNo, content, round, thinking } = options;
+  async writeWolfDiscussionEvent(
+    options: SubmissionScope & {
+      day: number;
+      actorId: string;
+      seatNo: number;
+      content: string;
+      round: number; // 讨论轮次
+      thinking?: string;
+      sceneId?: string;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, actorId, seatNo, content, round, thinking } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
-      day,
-      phase: PHASES.NIGHT,
-      actionType: ACTION_TYPES.SPEECH,
-      visibility: VISIBILITY_TYPES.WOLF,
-      actorId,
-      targetIds: [],
-      content: {
-        seatNo,
-        speech: content,
-        round,
-        thinking,
-        sceneId: options.sceneId,
-        sceneType: 'night_action',
+    const event = await this.createEventWithSequence(
+      options,
+      {
+        day,
+        phase: PHASES.NIGHT,
+        actionType: ACTION_TYPES.SPEECH,
+        visibility: VISIBILITY_TYPES.WOLF,
+        actorId,
+        targetIds: [],
+        content: {
+          seatNo,
+          speech: content,
+          round,
+          thinking,
+          sceneId: options.sceneId,
+          sceneType: 'night_action',
+        },
       },
-    });
-
-    return event;
-  }
-
-  /**
-   * 写入玩家投票事件
-   */
-  async writePlayerVoteEvent(options: {
-    gameId: string;
-    day: number;
-    actorId: string;
-    voterSeatNo: number;
-    targetSeatNo: number;
-    voteRound?: number;
-    thinking?: string;
-  }): Promise<Event> {
-    const { gameId, day, actorId, voterSeatNo, targetSeatNo } = options;
-
-    const event = await this.createEventWithSequence(gameId, {
-      day,
-      phase: PHASES.VOTE,
-      actionType: ACTION_TYPES.VOTE,
-      visibility: VISIBILITY_TYPES.PUBLIC,
-      actorId,
-      targetIds: [],
-      content: {
-        voteRound: options.voteRound ?? 0,
-        voterSeatNo,
-        targetSeatNo,
-        thinking: options.thinking,
-      },
-    });
+      undefined,
+      undefined,
+      round,
+    );
 
     return event;
   }
@@ -358,17 +352,18 @@ export class EventWriterService {
   /**
    * 原子提交放逐事件与玩家死亡状态
    */
-  async commitExile(options: {
-    gameId: string;
-    day: number;
-    targetId: string;
-    targetSeatNo: number;
-    voteCount: number;
-  }): Promise<Event> {
+  async commitExile(
+    options: SubmissionScope & {
+      day: number;
+      targetId: string;
+      targetSeatNo: number;
+      voteCount: number;
+    },
+  ): Promise<CommittedEvent> {
     const { gameId, day, targetId, targetSeatNo, voteCount } = options;
 
     const event = await this.createEventWithSequence(
-      gameId,
+      options,
       {
         day,
         phase: PHASES.EXECUTE,
@@ -396,15 +391,16 @@ export class EventWriterService {
   /**
    * 写入白痴翻牌事件
    */
-  async writeIdiotRevealEvent(options: {
-    gameId: string;
-    day: number;
-    playerId: string;
-    seatNo: number;
-  }): Promise<Event> {
-    const { gameId, day, playerId, seatNo } = options;
+  async writeIdiotRevealEvent(
+    options: SubmissionScope & {
+      day: number;
+      playerId: string;
+      seatNo: number;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, playerId, seatNo } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.EXECUTE,
       actionType: ACTION_TYPES.IDIOT_FLIP,
@@ -423,16 +419,17 @@ export class EventWriterService {
   /**
    * 写入警长决定发言顺序事件
    */
-  async writeSheriffDecideOrderEvent(options: {
-    gameId: string;
-    day: number;
-    sheriffId: string;
-    sheriffSeatNo: number;
-    direction: 'left' | 'right';
-  }): Promise<Event> {
-    const { gameId, day, sheriffId, sheriffSeatNo, direction } = options;
+  async writeSheriffDecideOrderEvent(
+    options: SubmissionScope & {
+      day: number;
+      sheriffId: string;
+      sheriffSeatNo: number;
+      direction: 'left' | 'right';
+    },
+  ): Promise<CommittedEvent> {
+    const { day, sheriffId, sheriffSeatNo, direction } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.SPEECH,
       actionType: ACTION_TYPES.SHERIFF_DECIDE_ORDER,
@@ -452,17 +449,18 @@ export class EventWriterService {
   /**
    * 写入发言顺序确定事件（无警长或自动计算）
    */
-  async writeSpeechOrderDeterminedEvent(options: {
-    gameId: string;
-    day: number;
-    speechOrder: number[];
-    startSeatNo: number;
-    direction: 'clockwise' | 'counterclockwise';
-    reason: string;
-  }): Promise<Event> {
-    const { gameId, day, speechOrder, startSeatNo, direction, reason } = options;
+  async writeSpeechOrderDeterminedEvent(
+    options: SubmissionScope & {
+      day: number;
+      speechOrder: number[];
+      startSeatNo: number;
+      direction: 'clockwise' | 'counterclockwise';
+      reason: string;
+    },
+  ): Promise<CommittedEvent> {
+    const { day, speechOrder, startSeatNo, direction, reason } = options;
 
-    const event = await this.createEventWithSequence(gameId, {
+    const event = await this.createEventWithSequence(options, {
       day,
       phase: PHASES.SPEECH,
       actionType: ACTION_TYPES.SPEECH_ORDER_DETERMINED,
@@ -482,8 +480,12 @@ export class EventWriterService {
   }
 
   /** 游戏开始系统事件 */
-  async writeGameStartEvent(params: { gameId: string; playerCount: number }): Promise<Event> {
-    return this.createEventWithSequence(params.gameId, {
+  async writeGameStartEvent(
+    params: SubmissionScope & {
+      playerCount: number;
+    },
+  ): Promise<CommittedEvent> {
+    return this.createEventWithSequence(params, {
       day: 0,
       phase: PHASES.SYSTEM,
       actionType: ACTION_TYPES.GAME_STARTED,
@@ -494,25 +496,24 @@ export class EventWriterService {
     });
   }
 
-  /**
-   * 原子写入一轮普通投票的全部事件。
-   *
-   * 同一批投票要么全部落库，要么全部不落库；批次内不产生可观察的中间状态。
-   * 目前只有普通投票使用；PK 与狼队投票仍是逐票提交，尚未接入。
-   */
-  async writeVoteBatch(options: {
-    gameId: string;
-    day: number;
-    votes: Array<{
-      actorId: string;
-      voterSeatNo: number;
-      targetSeatNo: number;
-      voteRound?: number;
-      thinking?: string;
-    }>;
-  }): Promise<Event[]> {
+  /** 同时行动先收齐，再按参与者稳定排序提交；合法弃票仍产生 Event。 */
+  async writeVoteBatch(
+    options: SubmissionScope & {
+      day: number;
+      expectedActorIds: string[];
+      votes: Array<{
+        actorId: string;
+        voterSeatNo: number;
+        targetSeatNo: number;
+        voteRound?: number;
+        thinking?: string;
+      }>;
+    },
+  ): Promise<CommittedEvent[]> {
     return this.createEventBatch(
-      options.gameId,
+      options,
+      'vote',
+      options.expectedActorIds,
       options.votes.map((vote) => ({
         day: options.day,
         phase: PHASES.VOTE,
@@ -530,38 +531,65 @@ export class EventWriterService {
     );
   }
 
-  /**
-   * 原子持久化游戏结束事件与 FINISHED 状态。
-   *
-   * 两项终局事实必须在同一事务提交：既不能出现 FINISHED 却缺结束事件，也不能留下
-   * GAME_ENDED 事件但对局随后被当成引擎失败标记为 ABORTED。Redis sequence 只负责分配
-   * 序号；事务回滚产生的序号空洞是允许的。
-   */
-  async writeGameEndEvent(params: {
-    gameId: string;
-    winner: string;
-    winnerFaction: string | null;
-    totalDays: number;
-    endedAt?: Date;
-  }): Promise<Event> {
-    if (this.recovery?.current) {
-      return this.recovery.effect('game-end', async (tx) => {
-        const previous = await tx.event.findFirst({
-          where: { gameId: params.gameId },
-          orderBy: { sequence: 'desc' },
-          select: { sequence: true },
-        });
-        const event = await tx.event.create({
-          data: {
-            gameId: params.gameId,
-            sequence: (previous?.sequence ?? 0) + 1,
-            day: 0,
-            phase: PHASES.SYSTEM,
-            actionType: ACTION_TYPES.GAME_ENDED,
-            visibility: VISIBILITY_TYPES.PUBLIC,
-            content: { winner: params.winner },
-          },
-        });
+  /** 单狼提案和多狼投票采用同一批次协议。 */
+  async writeWolfProposalBatch(
+    options: SubmissionScope & {
+      day: number;
+      expectedActorIds: string[];
+      proposals: Array<{
+        actorId: string;
+        seatNo: number;
+        targetSeatNo: number;
+        thinking?: string;
+      }>;
+    },
+  ): Promise<CommittedEvent[]> {
+    return this.createEventBatch(
+      options,
+      'wolf_proposal',
+      options.expectedActorIds,
+      options.proposals.map((proposal) => ({
+        day: options.day,
+        phase: PHASES.NIGHT,
+        actionType: ACTION_TYPES.WOLF_PROPOSAL,
+        visibility: VISIBILITY_TYPES.WOLF,
+        actorId: proposal.actorId,
+        targetIds: [],
+        content: {
+          seatNo: proposal.seatNo,
+          targetSeatNo: proposal.targetSeatNo,
+          thinking: proposal.thinking,
+        },
+      })),
+    );
+  }
+
+  /** 终局状态与事件同事务；未指定结束时间时只在首次提交取时钟。 */
+  async writeGameEndEvent(
+    params: SubmissionScope & {
+      winner: string;
+      winnerFaction: string | null;
+      totalDays: number;
+      endedAt?: Date;
+    },
+  ): Promise<CommittedEvent> {
+    const stateEffect = {
+      winnerFaction: params.winnerFaction,
+      totalDays: params.totalDays,
+      endedAt: params.endedAt?.toISOString(),
+    };
+    return this.createEventWithSequence(
+      params,
+      {
+        day: 0,
+        phase: PHASES.SYSTEM,
+        actionType: ACTION_TYPES.GAME_ENDED,
+        visibility: VISIBILITY_TYPES.PUBLIC,
+        actorId: null,
+        targetIds: [],
+        content: { winner: params.winner },
+      },
+      async (tx) => {
         await tx.game.update({
           where: { id: params.gameId },
           data: {
@@ -571,66 +599,22 @@ export class EventWriterService {
             endedAt: params.endedAt ?? new Date(),
           },
         });
-        return event;
-      });
-    }
-    const key = `game:${params.gameId}:event_seq`;
-    const persist = (sequence: number) =>
-      this.prisma.$transaction(async (tx) => {
-        const event = await tx.event.create({
-          data: {
-            gameId: params.gameId,
-            sequence,
-            day: 0,
-            phase: PHASES.SYSTEM,
-            actionType: ACTION_TYPES.GAME_ENDED,
-            visibility: VISIBILITY_TYPES.PUBLIC,
-            actorId: null,
-            targetIds: [],
-            content: { winner: params.winner },
-          },
-        });
-
-        await tx.game.update({
-          where: { id: params.gameId },
-          data: {
-            status: GAME_STATUSES.FINISHED,
-            winnerFaction: params.winnerFaction ?? undefined,
-            totalDays: params.totalDays,
-            endedAt: params.endedAt ?? new Date(),
-          },
-        });
-
-        return event;
-      });
-
-    const sequence = await this.redis.incr(key);
-    try {
-      return await persist(sequence);
-    } catch (error) {
-      // 事务已整体回滚，因而可以在事务外重建 Redis 计数器并安全地重试整笔终局写入。
-      if (!isUniqueConstraintViolation(error)) throw error;
-
-      const lastEvent = await this.prisma.event.findFirst({
-        where: { gameId: params.gameId },
-        orderBy: { sequence: 'desc' },
-        select: { sequence: true },
-      });
-      await this.redis.set(key, lastEvent?.sequence || 0);
-      return persist(await this.redis.incr(key));
-    }
+      },
+      stateEffect,
+    );
   }
 
   /** 法官播报事件（公开）；可与该播报宣告的状态变更同事务提交。 */
-  async writeJudgeEvent(params: {
-    gameId: string;
-    day: number;
-    content: string;
-    metadata?: Record<string, unknown>;
-    updateState?: (tx: Prisma.TransactionClient) => Promise<void>;
-  }): Promise<Event> {
+  async writeJudgeEvent(
+    params: SubmissionScope & {
+      day: number;
+      content: string;
+      metadata?: Record<string, unknown>;
+      death?: { playerId: string; cause: DeathCause };
+    },
+  ): Promise<CommittedEvent> {
     return this.createEventWithSequence(
-      params.gameId,
+      params,
       {
         day: params.day,
         phase: PHASES.JUDGE,
@@ -640,18 +624,37 @@ export class EventWriterService {
         targetIds: [],
         content: { content: params.content, ...params.metadata } as Prisma.InputJsonValue,
       },
-      params.updateState,
+      params.death
+        ? async (tx) => {
+            await tx.player.update({
+              where: { id: params.death!.playerId, gameId: params.gameId },
+              data: { deathDay: params.day, deathCause: params.death!.cause },
+            });
+          }
+        : undefined,
+      params.death,
+      0,
+      params.death
+        ? [
+            {
+              playerId: params.death.playerId,
+              deathDay: params.day,
+              deathCause: params.death.cause,
+            },
+          ]
+        : [],
     );
   }
 
   /** 夜间法官引导事件 */
-  async writeNightPromptEvent(params: {
-    gameId: string;
-    day: number;
-    content: string;
-    targetRole: string;
-  }): Promise<Event> {
-    return this.createEventWithSequence(params.gameId, {
+  async writeNightPromptEvent(
+    params: SubmissionScope & {
+      day: number;
+      content: string;
+      targetRole: string;
+    },
+  ): Promise<CommittedEvent> {
+    return this.createEventWithSequence(params, {
       day: params.day,
       phase: PHASES.NIGHT,
       actionType: ACTION_TYPES.NIGHT_PROMPT,
@@ -662,137 +665,236 @@ export class EventWriterService {
     });
   }
 
-  /**
-   * 初始化游戏的 Redis sequence 计数器
-   *
-   * 从数据库读取该游戏的最大 sequence，初始化 Redis 计数器。
-   * 使用 SET NX 确保只在计数器不存在时初始化，避免覆盖正在运行的游戏的计数器。
-   *
-   * @param gameId - 游戏对局ID
-   */
-  async initializeSequenceCounter(gameId: string): Promise<void> {
-    const key = `game:${gameId}:event_seq`;
-    const exists = await this.redis.exists(key);
-
-    // 如果计数器已存在，说明游戏正在运行或刚运行过，不需要初始化
-    if (exists) {
-      return;
+  /** 业务去重在事务内完成，数据库行锁同时保护序号分配和批次仲裁。 */
+  private async transaction<T>(
+    scope: SubmissionScope,
+    label: string,
+    callback: (tx: Prisma.TransactionClient, status: string, saved?: T) => Promise<T>,
+  ): Promise<T> {
+    const run = async (tx: Prisma.TransactionClient, saved?: T) => {
+      scope.signal?.throwIfAborted();
+      const [game] = await tx.$queryRaw<
+        Array<{ status: string }>
+      >`SELECT status FROM games WHERE id = ${scope.gameId}::uuid FOR UPDATE`;
+      if (!game) throw new Error('领域提交对应的对局不存在');
+      const result = await callback(tx, game.status, saved);
+      scope.signal?.throwIfAborted();
+      return result;
+    };
+    if (this.recovery?.current) {
+      if (this.recovery.current.execution.gameId !== scope.gameId)
+        throw new Error('领域提交与当前执行对局不符');
+      return this.recovery.effect(label, (tx) => run(tx), {
+        replay: (tx, saved) => run(tx, saved),
+        allowFinished: true,
+      });
     }
+    return this.prisma.$transaction((tx) => run(tx));
+  }
 
-    // 从数据库读取最大 sequence
-    const lastEvent = await this.prisma.event.findFirst({
+  private draft(data: EventDraft): EventDraft {
+    return normalizeSubmission({
+      ...data,
+      day: data.day ?? null,
+      actorId: data.actorId ?? null,
+      targetIds: sortedUnique((data.targetIds ?? []) as string[], '事件目标集合'),
+    }) as EventDraft;
+  }
+
+  private assertWritable(status: string) {
+    if (status !== GAME_STATUSES.RUNNING) throw new Error('当前对局状态不允许新增领域效果');
+  }
+
+  private async nextSequence(tx: Prisma.TransactionClient, gameId: string) {
+    const previous = await tx.event.findFirst({
       where: { gameId },
       orderBy: { sequence: 'desc' },
       select: { sequence: true },
     });
-
-    const maxSequence = lastEvent?.sequence || 0;
-
-    // 使用 SET NX 原子地初始化计数器（仅当 key 不存在时设置）
-    // 避免并发初始化覆盖问题
-    await this.redis.set(key, maxSequence, 'NX');
+    return (previous?.sequence ?? 0) + 1;
   }
 
-  /**
-   * 原子分配整段 sequence 并写入一批事件。
-   *
-   * 与单项写入共享同一套序号来源与冲突兜底，区别只在于整批共用一个事务。
-   */
   private async createEventBatch(
-    gameId: string,
-    drafts: Array<Omit<Prisma.EventUncheckedCreateInput, 'gameId' | 'sequence'>>,
-  ): Promise<Event[]> {
-    if (drafts.length === 0) return [];
-    // 事务内顺序写：同一连接本来不并行，串行还能让失败原因指向具体那一条。
-    const write = async (tx: Prisma.TransactionClient, first: number) => {
-      const events: Event[] = [];
-      for (const [index, data] of drafts.entries())
-        events.push(await tx.event.create({ data: { ...data, gameId, sequence: first + index } }));
-      return events;
-    };
-    if (this.recovery?.current) {
-      return this.recovery.effect(
-        `event-batch/${drafts[0].actionType}/${drafts[0].actorId ?? 'system'}`,
-        async (tx) => {
-          const previous = await tx.event.findFirst({
-            where: { gameId },
-            orderBy: { sequence: 'desc' },
-            select: { sequence: true },
-          });
-          return write(tx, (previous?.sequence ?? 0) + 1);
-        },
-      );
-    }
-    const key = `game:${gameId}:event_seq`;
-    const last = await this.redis.incrby(key, drafts.length);
-    try {
-      return await this.prisma.$transaction((tx) => write(tx, last - drafts.length + 1));
-    } catch (error) {
-      if (!isUniqueConstraintViolation(error)) throw error;
-      const previous = await this.prisma.event.findFirst({
-        where: { gameId },
-        orderBy: { sequence: 'desc' },
-        select: { sequence: true },
+    scope: SubmissionScope & { day: number },
+    slot: string,
+    expectedActorIds: string[],
+    inputDrafts: EventDraft[],
+  ): Promise<CommittedEvent[]> {
+    const batchKey = submissionKey(scope, 'batch/' + slot);
+    const expected = sortedUnique(expectedActorIds, '批次参与者');
+    const drafts = inputDrafts
+      .map((draft) => this.draft(draft))
+      .toSorted((a, b) => a.actorId!.localeCompare(b.actorId!));
+    const actual = sortedUnique(
+      drafts.map((draft) => draft.actorId!),
+      '批次结果',
+    );
+    if (JSON.stringify(expected) !== JSON.stringify(actual))
+      throw new Error('批次结果未完整覆盖预期参与者');
+    const effects = drafts.map((draft) => ({
+      draft,
+      effectKey: submissionKey(scope, slot, draft.actorId!),
+      payloadHash: submissionHash({ gameId: scope.gameId, event: draft }),
+    }));
+    const outcomes = normalizeSubmission(
+      effects.map((effect) => ({
+        actorId: effect.draft.actorId!,
+        effectKey: effect.effectKey,
+        source: this.source(scope, effect.effectKey, effect.draft.actorId!),
+      })),
+    )!;
+    const payloadHash = submissionHash({
+      gameId: scope.gameId,
+      phaseInstanceId: scope.phaseInstanceId,
+      day: scope.day,
+      slot,
+      expected,
+      effects,
+    });
+    // 普通投票沿用原 label；内容和业务身份由独立记录仲裁，不依赖这个执行位置键。
+    const label = `event-batch/${slot}/${inputDrafts[0]?.actorId ?? 'system'}`;
+    return this.transaction(scope, label, async (tx, status, saved?: CommittedEvent[]) => {
+      const previous = await tx.effectBatchCommit.findUnique({ where: { batchKey } });
+      if (previous) {
+        if (previous.payloadHash !== payloadHash) throw new SubmissionConflictError(batchKey);
+        const events = await tx.event.findMany({
+          where: { gameId: scope.gameId, id: { in: previous.eventIds } },
+          orderBy: { sequence: 'asc' },
+        });
+        if (
+          events.length !== previous.eventIds.length ||
+          (saved &&
+            JSON.stringify(saved.map((event) => event.id)) !== JSON.stringify(previous.eventIds))
+        )
+          throw new Error('批次记录与事件或恢复检查点不一致');
+        return events.map((event) => ({ ...event, replayed: true }));
+      }
+      if (saved) throw new Error('旧批次检查点缺少可验证的业务提交记录，拒绝重复写入');
+      this.assertWritable(status);
+      // 旧版本逐票检查点不命中新批次键，必须单独阻止不安全的部分续跑。
+      if (this.recovery?.current) {
+        const legacy = await tx.gameExecutionStep.findFirst({
+          where: {
+            gameId: scope.gameId,
+            completed: true,
+            OR: [
+              { key: { startsWith: this.recovery.current.prefix + 'event/' + slot + '/' } },
+              { key: { startsWith: this.recovery.current.prefix + 'event-batch/' + slot + '/' } },
+            ],
+          },
+        });
+        if (legacy) throw new Error('旧逐条提交检查点不能安全转换为批次，拒绝重复写入');
+      }
+      const players = await tx.player.findMany({
+        where: { gameId: scope.gameId, id: { in: expected } },
+        select: { id: true, seatNo: true },
       });
-      await this.redis.set(key, previous?.sequence || 0);
-      const retryLast = await this.redis.incrby(key, drafts.length);
-      return this.prisma.$transaction((tx) => write(tx, retryLast - drafts.length + 1));
-    }
+      if (players.length !== expected.length) throw new Error('批次参与者不属于当前对局');
+      for (const effect of effects) {
+        const content = effect.draft.content as Record<string, unknown>;
+        if (
+          players.find((player) => player.id === effect.draft.actorId)?.seatNo !==
+          (content.voterSeatNo ?? content.seatNo)
+        )
+          throw new Error('批次玩家与座位不符');
+      }
+      // 不接纳已由其他提交路径写出的子效果，否则无法证明本批原子完成。
+      const participantKeys = expected.map((actorId) => submissionKey(scope, slot, actorId));
+      if (
+        participantKeys.length &&
+        (await tx.event.count({ where: { effectKey: { in: participantKeys } } }))
+      )
+        throw new SubmissionConflictError(batchKey);
+      const first = await this.nextSequence(tx, scope.gameId);
+      const events: CommittedEvent[] = [];
+      for (const [index, effect] of effects.entries()) {
+        const event = await tx.event.create({
+          data: {
+            ...effect.draft,
+            gameId: scope.gameId,
+            sequence: first + index,
+            effectKey: effect.effectKey,
+            payloadHash: effect.payloadHash,
+            source: this.source(scope, effect.effectKey, effect.draft.actorId!),
+          },
+        });
+        events.push({ ...event, replayed: false });
+      }
+      await tx.effectBatchCommit.create({
+        data: {
+          batchKey,
+          gameId: scope.gameId,
+          payloadHash,
+          outcomes,
+          eventIds: events.map((event) => event.id),
+        },
+      });
+      await recordEventDelivery(tx, events, batchKey);
+      return events;
+    });
   }
 
-  /**
-   * 原子分配 sequence 并写入事件
-   *
-   * 使用 Redis INCR 原子递增生成 sequence，避免并发冲突和重试开销。
-   * 前提：Redis 需开持久化（AOF/RDB），sequence 计数器依赖 key 不因重启丢失；
-   * 若对局中途 Redis 重启导致计数器与 DB 失同步，下方 P2002 兜底会重建计数器后重试一次。
-   */
   private async createEventWithSequence(
-    gameId: string,
-    data: Omit<Prisma.EventUncheckedCreateInput, 'gameId' | 'sequence'>,
+    scope: SubmissionScope,
+    input: EventDraft,
     updateState?: (tx: Prisma.TransactionClient) => Promise<void>,
-  ): Promise<Event> {
-    const write = async (tx: Prisma.TransactionClient, sequence: number) => {
-      const event = await tx.event.create({ data: { ...data, gameId, sequence } });
-      await updateState?.(tx);
-      return event;
-    };
-    if (this.recovery?.current) {
-      return this.recovery.effect(
-        `event/${data.actionType}/${data.actorId ?? 'system'}`,
-        async (tx) => {
-          const previous = await tx.event.findFirst({
-            where: { gameId },
-            orderBy: { sequence: 'desc' },
-            select: { sequence: true },
-          });
-          return write(tx, (previous?.sequence ?? 0) + 1);
-        },
-      );
-    }
-    const persist = (sequence: number) =>
-      updateState
-        ? this.prisma.$transaction((tx) => write(tx, sequence))
-        : write(this.prisma, sequence);
-    const key = `game:${gameId}:event_seq`;
-    const sequence = await this.redis.incr(key);
-
-    try {
-      return await persist(sequence);
-    } catch (error) {
-      // Redis 计数器与 DB 失同步（典型：对局中途 Redis 重启导致计数器归零）→ 撞 @@unique([gameId, sequence])。
-      // 从 DB 读最大 sequence 重建计数器后重试一次。事件溯源允许序列空洞，仅兜底唯一约束冲突。
-      if (!isUniqueConstraintViolation(error)) {
-        throw error;
+    stateEffect?: unknown,
+    ordinal = 0,
+    playerDeaths: PlayerDeathSnapshot[] = [],
+  ): Promise<CommittedEvent> {
+    const data = this.draft(input);
+    const effectKey = submissionKey(scope, data.actionType, data.actorId ?? 'system', ordinal);
+    const payloadHash = submissionHash({ gameId: scope.gameId, event: data, stateEffect });
+    const label =
+      data.actionType === ACTION_TYPES.GAME_ENDED
+        ? 'game-end'
+        : `event/${data.actionType}/${data.actorId ?? 'system'}`;
+    return this.transaction(scope, label, async (tx, status, saved?: CommittedEvent) => {
+      const previous = await tx.event.findUnique({ where: { effectKey } });
+      if (previous) {
+        if (previous.payloadHash !== payloadHash) throw new SubmissionConflictError(effectKey);
+        if (saved && saved.id !== previous.id) throw new Error('业务效果与恢复检查点不一致');
+        return { ...previous, replayed: true };
       }
-      const lastEvent = await this.prisma.event.findFirst({
-        where: { gameId },
-        orderBy: { sequence: 'desc' },
-        select: { sequence: true },
+      if (saved) throw new Error('旧效果检查点缺少可验证的业务键，拒绝重复写入');
+      if (
+        await tx.effectBatchCommit.findUnique({
+          where: { batchKey: submissionKey(scope, 'batch/' + data.actionType) },
+        })
+      )
+        throw new SubmissionConflictError(effectKey);
+      this.assertWritable(status);
+      const event = await tx.event.create({
+        data: {
+          ...data,
+          gameId: scope.gameId,
+          sequence: await this.nextSequence(tx, scope.gameId),
+          effectKey,
+          payloadHash,
+          source: this.source(scope, effectKey),
+        },
       });
-      await this.redis.set(key, lastEvent?.sequence || 0);
-      const nextSequence = await this.redis.incr(key);
-      return persist(nextSequence);
-    }
+      await updateState?.(tx);
+      await recordEventDelivery(tx, [event], undefined, playerDeaths);
+      return { ...event, replayed: false };
+    });
+  }
+
+  private source(
+    scope: SubmissionScope,
+    effectKey: string,
+    actorId?: string,
+  ): Prisma.InputJsonObject | undefined {
+    const source = actorId ? scope.sources?.[actorId] : scope.source;
+    if (!source) return undefined;
+    if (
+      source.actionKey !== effectKey ||
+      !source.attemptId ||
+      !source.traceId ||
+      !source.outputObservationId ||
+      !Number.isFinite(Date.parse(source.startedAt))
+    )
+      throw new Error('模型产物来源与领域行动不匹配');
+    return { ...source };
   }
 }

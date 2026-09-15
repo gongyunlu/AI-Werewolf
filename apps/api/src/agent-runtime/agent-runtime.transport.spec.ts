@@ -858,12 +858,15 @@ it.each(['stop', 'length'])(
   async (finishReason) => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
     const { runtime, context, responses, requests } = setup();
-    responses.push(streamResponse([{ reasoning_content: '只有供应商内部片段' }], finishReason));
+    // 正文为空会重放一次，截断不会；两种结束原因最终都判为无效输出。
+    const attempts = finishReason === 'length' ? 1 : 2;
+    for (let attempt = 0; attempt < attempts; attempt++)
+      responses.push(streamResponse([{ reasoning_content: '只有供应商内部片段' }], finishReason));
     await expect(runtime.streamSpeech(context)).rejects.toMatchObject({
       code: 'invalid_output',
       details: { reason: finishReason === 'length' ? 'truncated_output' : 'empty_output' },
     });
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(attempts);
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ contentChars: 0, reasoningChars: '只有供应商内部片段'.length }),
     );

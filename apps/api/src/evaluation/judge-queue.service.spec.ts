@@ -14,6 +14,7 @@ function createHarness() {
   const queue = { add: jest.fn(), getJobs: jest.fn(), getJob: jest.fn() };
   const judge = {
     beginEvaluation: jest.fn(),
+    resolveEvaluationRun: jest.fn(async (_gameId, proposedRunId) => proposedRunId),
     findJudgeableEvents: jest.fn().mockResolvedValue(['event-1']),
     findSpeakingPlayers: jest.fn().mockResolvedValue(['player-1']),
   };
@@ -67,6 +68,25 @@ describe('JudgeQueueService', () => {
       { gameId: GAME_ID, runId: `${GAME_ID}_initial` },
       expect.objectContaining({ jobId: buildJudgeCompleteJobId(GAME_ID) }),
     );
+  });
+
+  it('恢复交付只替换队列 jobId，全部子任务和 completion 继续使用原评分运行', async () => {
+    const { service, judge, flowProducer } = createHarness();
+    judge.resolveEvaluationRun.mockResolvedValue('original-run');
+
+    await service.enqueueGame(GAME_ID, '_resume_123');
+
+    expect(judge.resolveEvaluationRun).toHaveBeenCalledWith(GAME_ID, `${GAME_ID}_resume_123`, true);
+    expect(judge.beginEvaluation).toHaveBeenCalledWith(GAME_ID, 'original-run');
+    const flow = flowProducer.add.mock.calls[0][0];
+    expect(flow.data.runId).toBe('original-run');
+    expect(flow.opts.jobId).toBe(buildJudgeCompleteJobId(GAME_ID, '_resume_123'));
+    expect(
+      flow.children.every(
+        (job: { data: { runId: string }; opts: { jobId: string } }) =>
+          job.data.runId === 'original-run' && job.opts.jobId.endsWith('_resume_123'),
+      ),
+    ).toBe(true);
   });
 
   it('扫描整个 judge queue 识别同局任一在途任务', async () => {

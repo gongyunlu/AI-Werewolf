@@ -1,8 +1,10 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { AdoptScoresDto } from './dto/adopt-scores.dto';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { GameAnalysisService } from './game-analysis.service';
 import { AnalyzeGameDto } from './dto/analyze-game.dto';
+import { ADMIN_TOKEN_HEADER, AdminTokenGuard } from '../common/guards/admin-token.guard';
 
 /**
  * 赛后分析端点。
@@ -21,6 +23,38 @@ export class AnalysisController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   analyze(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: AnalyzeGameDto) {
     return this.analysis.analyzeGame(id, dto);
+  }
+
+  @Post('games/:id/adopt-scores')
+  @UseGuards(AdminTokenGuard)
+  @ApiHeader({ name: ADMIN_TOKEN_HEADER, required: true, description: '管理写接口令牌' })
+  @ApiOperation({ summary: '明确采用一组完整的 Langfuse 人工或外部评分' })
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  adoptScores(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: AdoptScoresDto) {
+    return this.analysis.adoptScores(id, dto);
+  }
+
+  @Post('games/:id/judge')
+  @UseGuards(AdminTokenGuard)
+  @ApiHeader({ name: ADMIN_TOKEN_HEADER, required: true, description: '管理写接口令牌' })
+  @ApiOperation({ summary: '重评单局所有可评估决策' })
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async rejudgeGame(@Param('id', new ParseUUIDPipe()) id: string) {
+    const result = await this.analysis.analyzeGame(id, {
+      judge: true,
+      reflect: false,
+      force: true,
+    });
+    return { gameId: id, judged: result.judged };
+  }
+
+  @Post('rejudge')
+  @UseGuards(AdminTokenGuard)
+  @ApiHeader({ name: ADMIN_TOKEN_HEADER, required: true, description: '管理写接口令牌' })
+  @ApiOperation({ summary: '重评所有已结束对局的决策' })
+  @Throttle({ default: { limit: 1, ttl: 60_000 } })
+  rejudgeAll() {
+    return this.analysis.rejudgeAll();
   }
 
   @Get('games/:id/analysis-status')

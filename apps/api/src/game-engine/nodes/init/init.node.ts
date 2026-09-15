@@ -15,6 +15,8 @@ export const createInitNode: NodeFactory = (context) => {
     }
 
     const event = await context.eventWriter.writeGameStartEvent({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       playerCount: state.players.length,
     });

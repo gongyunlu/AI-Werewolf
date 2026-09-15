@@ -42,6 +42,8 @@ export const createExecuteNode: NodeFactory = (context) => {
 
     context.signal?.throwIfAborted();
     const event = await context.eventWriter.commitExile({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       day: state.currentDay,
       targetId: target.id,
@@ -49,14 +51,6 @@ export const createExecuteNode: NodeFactory = (context) => {
       voteCount: state.exileVoteCount || 0,
     });
     await context.eventBus?.publish(event);
-
-    // 广播放逐死亡状态，供前端实时更新头像状态
-    context.broadcaster?.emit(state.gameId, {
-      type: 'player.died',
-      playerId: target.id,
-      deathDay: state.currentDay,
-      deathCause: DEATH_CAUSES.EXECUTION,
-    });
 
     return {
       players: updatedPlayers,

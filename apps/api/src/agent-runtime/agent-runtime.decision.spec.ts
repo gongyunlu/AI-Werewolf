@@ -130,3 +130,28 @@ it('结构合法的候选在事件提交之前不写入决策快照，错误事�
     decision: { action: 'skip' },
   });
 });
+
+it('重复提交命中原 Event 时不能把新尝试的输入确认为原行动证据', async () => {
+  const { runtime, context, prisma } = setup({ reasoning: '不救', decision: { action: 'skip' } });
+  const original = {
+    actionKey: 'a',
+    traceId: 't',
+    attemptId: 'first',
+    outputObservationId: 'first-output',
+    startedAt: new Date().toISOString(),
+  };
+  const candidate = {
+    ...context,
+    source: { ...original, attemptId: 'second', outputObservationId: 'second-output' },
+  };
+  const event = {
+    id: 'e',
+    gameId: 'g',
+    actorId: 'witch',
+    day: 1,
+    actionType: 'witch_save',
+    source: original,
+  };
+  await runtime.recordExperienceUsages(candidate as never, event);
+  expect(prisma.decisionContext.upsert).not.toHaveBeenCalled();
+});

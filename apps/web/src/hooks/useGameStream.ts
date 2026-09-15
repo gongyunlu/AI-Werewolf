@@ -3,10 +3,10 @@ import { apiClient } from '@/lib/api-client';
 import type { SseMessage } from '@/types/sse';
 
 const RETRY_DELAYS = [1000, 2000, 4000, 8000];
-const MAX_RETRIES = RETRY_DELAYS.length;
 
 interface UseGameStreamOptions {
   enabled?: boolean;
+  revision?: string;
 }
 
 export function useGameStream(
@@ -15,7 +15,7 @@ export function useGameStream(
   onMessage: (msg: SseMessage) => void,
   options: UseGameStreamOptions = {},
 ) {
-  const { enabled = true } = options;
+  const { enabled = true, revision } = options;
   const retryCount = useRef(0);
   const esRef = useRef<EventSource | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -28,11 +28,7 @@ export function useGameStream(
     if (!enabledRef.current) return;
     // 已收到 game.finished：对局结束，不再重连
     if (endedRef.current) return;
-    if (retryCount.current >= MAX_RETRIES) {
-      console.error(`SSE 连接失败，已达最大重试次数 ${MAX_RETRIES}`);
-      return;
-    }
-
+    esRef.current?.close();
     const es = apiClient.createSSEConnection(gameId, { perspective });
     esRef.current = es;
 
@@ -40,6 +36,7 @@ export function useGameStream(
     let expectedSequence = lastSequenceRef.current;
 
     es.addEventListener('message', (e: MessageEvent) => {
+      if (esRef.current !== es || !enabledRef.current) return;
       let msg: SseMessage;
       try {
         msg = JSON.parse(e.data as string) as SseMessage;
@@ -69,6 +66,7 @@ export function useGameStream(
           console.warn(
             `[SSE 漏帧检测] 期望 sequence=${expectedSequence + 1}, 实际收到 ${sequence}，缺失 ${sequence - expectedSequence - 1} 条消息，立即重连`,
           );
+          esRef.current = null;
           es.close();
           // 立即重连，从最后正确的序列号开始（存入 retryTimerRef 以便 unmount 时清理）
           retryTimerRef.current = setTimeout(() => connect(), 100);
@@ -79,7 +77,7 @@ export function useGameStream(
         retryCount.current = 0;
       }
 
-      if (msg.type === 'game.finished') {
+      if (msg.type === 'game.finished' || (msg.type === 'events.committed' && msg.gameFinished)) {
         endedRef.current = true;
         es.close();
       }
@@ -88,6 +86,8 @@ export function useGameStream(
     });
 
     es.addEventListener('error', () => {
+      if (esRef.current !== es) return;
+      esRef.current = null;
       es.close();
       // 对局已正常结束导致的服务端关闭，无需重连
       if (endedRef.current || !enabledRef.current) return;
@@ -99,6 +99,9 @@ export function useGameStream(
 
   useEffect(() => {
     lastSequenceRef.current = 0;
+    // 终局标记只在换局时清掉。对局结束时 status 变化同样会触发下面的重连 effect，
+    // 若在那里复位，connect 就会绕过「已结束不再重连」的守卫再开一条连接。
+    endedRef.current = false;
   }, [gameId]);
 
   useEffect(() => {
@@ -110,8 +113,8 @@ export function useGameStream(
         retryTimerRef.current = null;
       }
       esRef.current?.close();
+      esRef.current = null;
       retryCount.current = 0;
-      endedRef.current = false;
     };
-  }, [connect, enabled]);
+  }, [connect, enabled, revision]);
 }

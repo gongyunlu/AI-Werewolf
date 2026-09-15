@@ -1,7 +1,6 @@
 import { InjectFlowProducer, InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { FlowProducer, Queue, type JobsOptions, type JobState } from 'bullmq';
-import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JudgeService } from './judge.service';
 import { randomUUID } from 'node:crypto';
@@ -21,7 +20,7 @@ export const JUDGE_JOB_NAMES = {
 
 /** judge 任务数据（按 job.name 区分形状） */
 export interface JudgeJobData {
-  runId?: string;
+  runId: string;
   gameId: string;
   eventId?: string;
   playerId?: string;
@@ -88,7 +87,7 @@ export class JudgeQueueService {
    * @param suffix - 追加到 jobId 的后缀，用于强制重跑（缺省时 jobId 天然幂等）
    */
   async listGameJobs(gameId: string, suffix = ''): Promise<JudgeJobSpec[]> {
-    const runId = buildEvaluationRunId(gameId, suffix);
+    const runId = await this.resolveRunId(gameId, suffix);
     await this.judgeService.beginEvaluation(gameId, runId);
     const [eventIds, playerIds] = await Promise.all([
       this.judgeService.findJudgeableEvents(gameId),
@@ -107,6 +106,14 @@ export class JudgeQueueService {
         jobId: `speeches_${gameId}_${playerId}${suffix}`,
       })),
     ];
+  }
+
+  async resolveRunId(gameId: string, suffix = ''): Promise<string> {
+    return this.judgeService.resolveEvaluationRun(
+      gameId,
+      buildEvaluationRunId(gameId, suffix),
+      suffix.startsWith('_resume_'),
+    );
   }
 
   /** 投递对局内全部待评估目标，返回投递数量 */
@@ -128,7 +135,7 @@ export class JudgeQueueService {
     const completion = {
       name: JUDGE_JOB_NAMES.complete,
       queueName: JUDGE_QUEUE_NAME,
-      data: { gameId, runId: buildEvaluationRunId(gameId, suffix) },
+      data: { gameId, runId: jobs[0]?.data.runId ?? (await this.resolveRunId(gameId, suffix)) },
       opts: {
         ...JUDGE_JOB_OPTIONS,
         jobId: buildJudgeCompleteJobId(gameId, suffix),
@@ -154,20 +161,5 @@ export class JudgeQueueService {
       })),
     });
     return jobs.length;
-  }
-
-  /** 重评所有已结束对局，返回 { games, decisions } */
-  async rejudgeAll(): Promise<{ games: number; decisions: number }> {
-    const finished = await this.prisma.game.findMany({
-      where: { status: GAME_STATUSES.FINISHED },
-      select: { id: true },
-    });
-
-    let decisions = 0;
-    for (const game of finished) {
-      decisions += await this.rejudgeGame(game.id);
-    }
-
-    return { games: finished.length, decisions };
   }
 }

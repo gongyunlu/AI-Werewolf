@@ -109,36 +109,53 @@ export class ModelCallService {
     access?: ModelAccess,
   ): Promise<string> {
     const model = this.createModel(modelName, access, { disableReasoning: true });
-    const progress = {
-      ...trace?.metadata,
-      runName: trace?.runName,
-      ...createStreamProgress(),
-    };
-    return this.run(
-      model.model,
-      async (callSignal, reportProgress) => {
-        let fullContent = '';
-        const stream = await model.stream(messages, { signal: callSignal, ...trace });
-        for await (const chunk of stream) {
-          throwIfAborted(callSignal);
-          recordStreamProgress(progress, chunk, reportProgress);
-          if (typeof chunk.content === 'string' && chunk.content) {
-            fullContent += chunk.content;
-            onToken?.(chunk.content);
+    // 每次尝试单独统计，重放不能把上一次的分片算进这一次。
+    const attempt = () => {
+      const progress = {
+        ...trace?.metadata,
+        runName: trace?.runName,
+        ...createStreamProgress(),
+      };
+      return this.run(
+        model.model,
+        async (callSignal, reportProgress) => {
+          let fullContent = '';
+          const stream = await model.stream(messages, { signal: callSignal, ...trace });
+          for await (const chunk of stream) {
+            throwIfAborted(callSignal);
+            recordStreamProgress(progress, chunk, reportProgress);
+            if (typeof chunk.content === 'string' && chunk.content) {
+              fullContent += chunk.content;
+              onToken?.(chunk.content);
+            }
           }
-        }
-        if (progress.finishReason === 'length' || !fullContent.trim()) {
-          throw new ModelCallError('invalid_output', undefined, undefined, {
-            reason: progress.finishReason === 'length' ? 'truncated_output' : 'empty_output',
-          });
-        }
-        return fullContent;
-      },
-      signal,
-      progress,
-      'stream',
-      access,
-    );
+          if (progress.finishReason === 'length' || !fullContent.trim()) {
+            throw new ModelCallError('invalid_output', undefined, undefined, {
+              reason: progress.finishReason === 'length' ? 'truncated_output' : 'empty_output',
+            });
+          }
+          return fullContent;
+        },
+        signal,
+        progress,
+        'stream',
+        access,
+      );
+    };
+    try {
+      return await attempt();
+    } catch (error) {
+      // 供应商偶发把整轮输出留在推理通道，正文为空且流正常结束；重放同一请求通常即恢复。
+      // 截断是上限不够，重放同样会截断；中止是调用方要求，都不重放。
+      if (
+        signal?.aborted ||
+        !(error instanceof ModelCallError) ||
+        error.details.reason !== 'empty_output'
+      )
+        throw error;
+      this.logger.warn(`[发言] ${modelName} 正文为空，重放一次: ${error.message}`);
+      return await attempt();
+    }
   }
 
   async structured<S extends z.ZodType>(

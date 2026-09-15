@@ -69,7 +69,6 @@ describe('游戏执行器生产模块装配', () => {
       recordExperienceUsages: jest.fn(async () => {}),
     };
     const eventWriter = {
-      initializeSequenceCounter: jest.fn(async () => {}),
       writeGameStartEvent: jest.fn(async ({ gameId }: { gameId: string }) => ({
         id: `${gameId}-start`,
       })),
@@ -120,10 +119,7 @@ describe('游戏执行器生产模块装配', () => {
       [AgentRuntimeModule, [[AgentRuntimeService, runtime]]],
       [EventsModule, [[EventWriterService, eventWriter]]],
       [EventBusModule, [[EventBusService, { publish: jest.fn(async () => {}) }]]],
-      [
-        SseModule,
-        [[SseBroadcasterService, { emit: jest.fn(), complete: jest.fn(), getOrCreate: jest.fn() }]],
-      ],
+      [SseModule, [[SseBroadcasterService, new SseBroadcasterService()]]],
       [
         SpeechSummarizerModule,
         [[SpeechSummarizerService, { generateDaySummaries: jest.fn(async () => {}) }]],

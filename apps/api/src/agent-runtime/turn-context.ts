@@ -12,6 +12,8 @@ export interface TurnPosition {
 
 /** 引擎提供时点与当前合法任务；历史事实由同一授权事件投影读取。 */
 export interface TurnContextRequest {
+  phaseInstanceId?: string;
+  actionOrdinal?: number;
   gameId: string;
   playerId: string;
   scenario: AgentScenario;

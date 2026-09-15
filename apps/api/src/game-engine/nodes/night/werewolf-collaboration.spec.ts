@@ -79,7 +79,7 @@ it('整夜只抽一次发言顺序，第二轮沿用同一顺序', async () => {
   }
 });
 
-it.each([false, true])('两轮狼聊传入真实顺序与完成状态（首位失败=%s）', async (fails) => {
+it('两轮狼聊传入真实顺序与完成状态，某位发言失败则整轮中止', async () => {
   const wolves = [
     createPlayer('a', 1, 'werewolf', 'werewolf'),
     createPlayer('b', 2, 'werewolf', 'werewolf'),
@@ -96,7 +96,6 @@ it.each([false, true])('两轮狼聊传入真实顺序与完成状态（首位�
     recordExperienceUsages: jest.fn(),
     runModelCall: jest.fn().mockResolvedValue({ content: 'YES' }),
   };
-  if (fails) runtime.streamSpeech.mockRejectedValueOnce(new ModelCallError('transient'));
   const context = {
     agentRuntime: runtime,
     prisma: { game: { findUnique: jest.fn().mockResolvedValue(null) } },
@@ -121,13 +120,21 @@ it.each([false, true])('两轮狼聊传入真实顺序与完成状态（首位�
         actionType: 'speech',
         position: { day: 2, phase: '狼队夜间讨论', aliveSeats: [1, 2], order: [1, 2] },
       });
-    expect(requests[1].position).toMatchObject({
-      completedSeats: fails ? [] : [1],
-      skippedSeats: fails ? [1] : [],
-    });
+    expect(requests[1].position).toMatchObject({ completedSeats: [1], skippedSeats: [] });
     expect(requests[2].position).toMatchObject({ completedSeats: [], skippedSeats: [] });
     expect(requests[3].position).toMatchObject({ completedSeats: [1], skippedSeats: [] });
     expect(requests.every((r) => !r.additionalContext.includes('本轮讨论'))).toBe(true);
+
+    // 某位发言失败即整轮中止，不跳过该玩家继续找他之后的狼。
+    runtime.prepareContextPublic.mockClear();
+    context.eventWriter.writeWolfDiscussionEvent.mockClear();
+    runtime.streamSpeech.mockRejectedValueOnce(new ModelCallError('transient'));
+    await expect(wolfDiscussion(wolves, state, context as never)).rejects.toMatchObject({
+      name: 'ModelCallError',
+      code: 'transient',
+    });
+    expect(runtime.prepareContextPublic).toHaveBeenCalledTimes(1);
+    expect(context.eventWriter.writeWolfDiscussionEvent).not.toHaveBeenCalled();
   } finally {
     random.mockRestore();
   }

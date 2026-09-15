@@ -32,10 +32,38 @@ export default function GameWatchPage() {
       return 'god';
     }
   }, [gameId]);
+  // 切局时整体销毁旧场景、定时器及请求引用，未开始的新局也不能保留上一局历史。
+  return <GameWatchContent key={gameId} gameId={gameId} perspective={perspective} />;
+}
+
+function GameWatchContent({ gameId, perspective }: { gameId?: string; perspective: string }) {
   const [game, setGame] = useState<GameListItem | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const playerDeathsRef = useRef(new Map<string, PlayerDeathSnapshot>());
+  const mountedRef = useRef(false);
+  const requestRef = useRef(0);
+  const readingRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const refreshGame = useCallback(async () => {
+    if (!gameId || readingRef.current) return;
+    readingRef.current = true;
+    const request = ++requestRef.current;
+    try {
+      const loaded = await apiClient.getGame(gameId);
+      if (mountedRef.current && request === requestRef.current)
+        setGame(applyPlayerDeaths(loaded, playerDeathsRef.current));
+    } catch {
+      /* 连接恢复及状态轮询会重新读取。 */
+    } finally {
+      readingRef.current = false;
+    }
+  }, [gameId]);
 
   const { state, handleMessage } = useSceneEngine(perspective);
   const nightActionState = useNightActionState(state.closedScenes);
@@ -43,71 +71,62 @@ export default function GameWatchPage() {
   const onMessage = useCallback(
     (msg: SseMessage) => {
       handleMessage(msg);
-      if (msg.type === 'connection.ready') {
-        playerDeathsRef.current = new Map(msg.playerDeaths.map((death) => [death.playerId, death]));
-        setGame((prev) => (prev ? applyPlayerDeaths(prev, playerDeathsRef.current) : prev));
-      }
-      // 玩家出局：同步更新头像死亡状态（对局中 game 只拉取一次，需靠 SSE 事件驱动）
-      if (msg.type === 'player.died') {
-        playerDeathsRef.current.set(msg.playerId, msg);
+      if (msg.type === 'connection.ready' || msg.type === 'events.committed') {
+        if (msg.type === 'connection.ready') playerDeathsRef.current = new Map();
+        for (const death of msg.playerDeaths) playerDeathsRef.current.set(death.playerId, death);
+        if (msg.type === 'connection.ready') requestRef.current++;
         setGame((prev) =>
           prev
-            ? {
-                ...prev,
-                players: prev.players.map((p) =>
-                  p.id === msg.playerId
-                    ? { ...p, deathDay: msg.deathDay, deathCause: msg.deathCause }
-                    : p,
-                ),
-              }
+            ? applyPlayerDeaths(
+                {
+                  ...prev,
+                  status:
+                    msg.type === 'connection.ready' ? (msg.gameStatus ?? prev.status) : prev.status,
+                },
+                playerDeathsRef.current,
+              )
             : prev,
         );
       }
       // 终局（正常结束或引擎中止）：回读一次 DB 状态，同步 status 以便切断 SSE、头部按终态渲染
-      if (msg.type === 'game.finished' && gameId) {
-        apiClient
-          .getGame(gameId)
-          .then((g) => setGame(applyPlayerDeaths(g, playerDeathsRef.current)))
-          .catch(() => null);
+      if (
+        gameId &&
+        (msg.type === 'game.finished' ||
+          ((msg.type === 'events.committed' || msg.type === 'connection.ready') &&
+            msg.gameFinished))
+      ) {
+        void refreshGame();
       }
     },
-    [handleMessage, gameId],
+    [handleMessage, gameId, refreshGame],
   );
 
-  useEffect(() => {
-    playerDeathsRef.current = new Map();
-    setGame(null);
-  }, [gameId]);
-
-  const isRunning = game?.id === gameId && game?.status === GAME_STATUSES.RUNNING;
   // 对局中止（引擎/规则异常导致整局报废）：live 时 SSE 以 game.finished/winner=unknown 到达，
   // 中止后刷新则读 DB status=aborted——两种都归为「对局已中止」，与正常结束分开呈现。
   const isAborted =
     game?.status === GAME_STATUSES.ABORTED || (state.gameOver && state.winner === 'unknown');
 
-  useGameStream(gameId ?? '', perspective, onMessage, { enabled: isRunning });
+  useGameStream(gameId ?? '', perspective, onMessage, {
+    enabled: !!game && game.id === gameId && game.status !== GAME_STATUSES.CREATED,
+    revision: game?.status,
+  });
 
   useEffect(() => {
-    if (!gameId) return;
-    apiClient
-      .getGame(gameId)
-      .then((loadedGame) => setGame(applyPlayerDeaths(loadedGame, playerDeathsRef.current)))
-      .catch(() => null);
-  }, [gameId]);
+    void refreshGame();
+  }, [refreshGame]);
 
-  // 兜底轮询：SSE 是纯内存广播，`game.finished` 只在流仍连接时送达，断流/重连窗口可能错过终局事件。
-  // 只要页面认为对局在跑，就周期回读 DB 状态；一旦变成 aborted/finished 即反映到头部并停掉 SSE。
-  const runningGameId = game?.status === GAME_STATUSES.RUNNING ? gameId : null;
+  // 无 Event 的取消／待恢复通知可能丢失；状态变化后重新连接并读取完整持久快照。
+  const runningGameId =
+    game?.status === GAME_STATUSES.RUNNING || game?.status === GAME_STATUSES.PENDING_RECOVERY
+      ? gameId
+      : null;
   useEffect(() => {
     if (!runningGameId) return;
     const timer = setInterval(() => {
-      apiClient
-        .getGame(runningGameId)
-        .then((fresh) => setGame(applyPlayerDeaths(fresh, playerDeathsRef.current)))
-        .catch(() => null);
+      void refreshGame();
     }, 8000);
     return () => clearInterval(timer);
-  }, [runningGameId]);
+  }, [runningGameId, refreshGame]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -116,14 +135,18 @@ export default function GameWatchPage() {
   const handleStartGame = async () => {
     if (!gameId) return;
     setIsStarting(true);
+    requestRef.current++;
     try {
       // startGame 已返回更新后的对局（含 running 状态），无需再 getGame
       const updated = await apiClient.startGame(gameId);
-      setGame(updated);
+      if (mountedRef.current) {
+        requestRef.current++;
+        setGame(updated);
+      }
     } catch (error) {
       console.error('启动对局失败:', error);
     } finally {
-      setIsStarting(false);
+      if (mountedRef.current) setIsStarting(false);
     }
   };
 
@@ -157,6 +180,8 @@ export default function GameWatchPage() {
           <Badge variant="secondary">已结束 · {state.winner}</Badge>
         ) : game?.status === GAME_STATUSES.FINISHED ? (
           <Badge variant="secondary">已结束</Badge>
+        ) : game?.status === GAME_STATUSES.PENDING_RECOVERY ? (
+          <Badge variant="secondary">等待恢复</Badge>
         ) : (
           <Badge variant="outline">观战中</Badge>
         )}
@@ -225,7 +250,7 @@ export default function GameWatchPage() {
               const actor = scene.actorId ? players.find((p) => p.id === scene.actorId) : null;
               return (
                 <SceneCard
-                  key={scene.sceneId}
+                  key={scene.eventId ?? scene.sceneId}
                   sceneId={scene.sceneId}
                   sceneType={scene.sceneType}
                   actorId={scene.actorId}

@@ -12,6 +12,36 @@ function createContext(signal?: AbortSignal) {
 }
 
 describe('SpeechNode', () => {
+  it('收到正文 chunk 立即广播，此时生成尚未完成且 Event 尚未提交', async () => {
+    const context = createContext();
+    const runtime = {
+      prepareContextPublic: jest.fn().mockResolvedValue({}),
+      streamSpeech: jest.fn(async (_input, options: { onContent: (token: string) => void }) => {
+        options.onContent('即时首段');
+        expect(context.eventWriter.writePlayerSpeechEvent).not.toHaveBeenCalled();
+        expect(context.broadcaster?.emit).toHaveBeenCalledWith(
+          'game-1',
+          expect.objectContaining({
+            type: 'scene.append',
+            contentType: 'content',
+            token: '即时首段',
+          }),
+        );
+        return { thinking: '', content: '即时首段', thinkingDurationMs: 0, contentDurationMs: 1 };
+      }),
+      recordExperienceUsages: jest.fn().mockResolvedValue(undefined),
+    };
+    const node = new SpeechNode(runtime as never).create()(context);
+    await node(
+      createGameState({
+        gameId: 'game-1',
+        players: [createPlayer('p1', 1, 'villager', 'villager', true)],
+      }),
+    );
+    expect(runtime.streamSpeech).toHaveBeenCalledTimes(1);
+    expect(context.eventWriter.writePlayerSpeechEvent).toHaveBeenCalledTimes(1);
+  });
+
   it('把游戏取消信号传给发言调用', async () => {
     const controller = new AbortController();
     const agentRuntime = {
@@ -37,7 +67,7 @@ describe('SpeechNode', () => {
     expect(agentRuntime.recordExperienceUsages).toHaveBeenCalledTimes(1);
   });
 
-  it('发言失败时补收尾声明，再关闭已打开的场景', async () => {
+  it('发言失败时上抛，已打开的场景仍然关闭', async () => {
     const agentRuntime = {
       prepareContextPublic: jest.fn().mockResolvedValue({}),
       streamSpeech: jest.fn().mockRejectedValue(new ModelCallError('transient')),
@@ -49,20 +79,18 @@ describe('SpeechNode', () => {
       players: [createPlayer('player-1', 1, 'villager', 'villager', true)],
     });
 
-    await node(state);
+    await expect(node(state)).rejects.toMatchObject({ name: 'ModelCallError', code: 'transient' });
 
-    expect(context.broadcaster?.emit).toHaveBeenCalledWith(
+    expect(context.broadcaster?.emit).not.toHaveBeenCalledWith(
       'game-1',
-      expect.objectContaining({
-        type: 'scene.append',
-        sceneId: 'speech-game-1-1-player-1',
-        contentType: 'content',
-        token: '（本轮发言未完成，没有产出正文）',
-      }),
+      expect.objectContaining({ type: 'scene.append' }),
     );
     expect(context.broadcaster?.emit).toHaveBeenLastCalledWith(
       'game-1',
-      expect.objectContaining({ type: 'scene.close', sceneId: 'speech-game-1-1-player-1' }),
+      expect.objectContaining({
+        type: 'scene.close',
+        sceneId: JSON.stringify(['game-1', 'node/0/test', 'scene/speech', 'player-1', 0]),
+      }),
     );
   });
 });

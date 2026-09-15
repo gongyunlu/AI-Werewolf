@@ -7,7 +7,7 @@ import { gameLogger } from '../../utils/game-logger';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { throwIfAborted } from '@/llm/abort.utils';
 import { ExperimentInvalidError } from '@/evaluation/experiment-integrity';
-import { allowModelFallback, failAfterEffect } from '../../core/game-failure-policy';
+import { failModelCall, failAfterEffect } from '../../core/game-failure-policy';
 
 /**
  * 狼人自爆决策 Schema
@@ -61,6 +61,7 @@ export class WolfExplodeNode {
         let effectStarted = false;
         try {
           const contextData = await this.agentRuntime.prepareContextPublic({
+            phaseInstanceId: state.phaseInstanceId,
             gameId: state.gameId,
             playerId: wolf.id,
             scenario: 'night_action',
@@ -89,6 +90,9 @@ export class WolfExplodeNode {
           }
           effectStarted = true;
           const decisionEvent = await context.eventWriter.writeWolfDecisionEvent({
+            source: contextData.source,
+            phaseInstanceId: state.phaseInstanceId,
+            signal: context.signal,
             gameId: state.gameId,
             day: state.currentDay,
             actorId: wolf.id,
@@ -109,10 +113,7 @@ export class WolfExplodeNode {
           }
           // 被其余狼抢先自爆或游戏中止导致的 abort 属正常竞争结果，忽略
           if (raceController.signal.aborted) return;
-          await allowModelFallback(error, context, wolf.id);
-          gameLogger.error(
-            `[狼人自爆] ${wolf.seatNo}号位决策失败，跳过: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          failModelCall(error, context, `[狼人自爆] ${wolf.seatNo}号位决策失败`);
         }
       };
 
@@ -136,15 +137,12 @@ export class WolfExplodeNode {
 
       // 法官播报自爆（公开）：播报与自爆狼出局必须同一事务，避免只落其一。
       const event = await context.eventWriter.writeJudgeEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         content: `${wolf.seatNo}号位狼人自爆，进入黑夜。`,
-        updateState: async (tx) => {
-          await tx.player.update({
-            where: { id: wolf.id, gameId: state.gameId },
-            data: { deathDay: state.currentDay, deathCause: DEATH_CAUSES.SELF_DESTRUCT },
-          });
-        },
+        death: { playerId: wolf.id, cause: DEATH_CAUSES.SELF_DESTRUCT },
       });
       await context.eventBus?.publish(event);
 

@@ -7,6 +7,8 @@ import type { NodeFactory } from '../node.types';
 export const createAnnounceDayNode: NodeFactory = (context) => {
   return async (state: GameGraphState) => {
     const judgeEvent = await context.eventWriter.writeJudgeEvent({
+      phaseInstanceId: state.phaseInstanceId,
+      signal: context.signal,
       gameId: state.gameId,
       day: state.currentDay,
       content: `天亮了，第 ${state.currentDay} 天开始。`,
@@ -28,6 +30,8 @@ export const createAnnounceDayNode: NodeFactory = (context) => {
       });
 
       const deathEvent = await context.eventWriter.writeDeathAnnouncementEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
         deaths,
@@ -36,6 +40,8 @@ export const createAnnounceDayNode: NodeFactory = (context) => {
     } else {
       // 写入平安夜 Event
       const peacefulEvent = await context.eventWriter.writePeacefulNightEvent({
+        phaseInstanceId: state.phaseInstanceId,
+        signal: context.signal,
         gameId: state.gameId,
         day: state.currentDay,
       });

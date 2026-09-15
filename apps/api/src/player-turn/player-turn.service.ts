@@ -9,9 +9,12 @@ import { PromptService, type RenderedPrompt } from '../observability/prompt.serv
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
 import { throwIfAborted } from '../llm/abort.utils';
+import { createActionSource, type ActionSource } from '../observability/action-source';
 
 /** 只包含已授权输入与追踪标识，生成器不持有数据库玩家对象或历史存储。 */
 export interface TurnGenerationContext {
+  actionKey?: string;
+  source?: ActionSource;
   systemPrompt: string;
   player: {
     id: string;
@@ -56,6 +59,7 @@ export class PlayerTurnService {
   ) {
     const { signal, onThinking, onContent } = options;
     throwIfAborted(signal);
+    this.beginAttempt(context);
     const startTime = Date.now();
     const modelName = context.player.modelName;
 
@@ -66,6 +70,7 @@ export class PlayerTurnService {
       scenario: context.scenario,
       seatNo: context.player.seatNo,
       role: context.player.role,
+      source: context.source,
     };
 
     const thinkingPrompt = await this.promptService.render(
@@ -99,6 +104,8 @@ export class PlayerTurnService {
       ...traceParams,
       promptName: contentPrompt.name,
       promptVersion: contentPrompt.version,
+      promptSource: contentPrompt.source,
+      promptOrigin: contentPrompt.origin,
     });
 
     // 终稿只有这一次调用，产出的正文即最终发言，因此可以一路逐 token 外发
@@ -112,6 +119,7 @@ export class PlayerTurnService {
     );
 
     const contentEndTime = Date.now();
+    if (context.source) context.source.outputObservationId = contentTrace.observationId;
     return {
       thinking,
       content,
@@ -132,6 +140,7 @@ export class PlayerTurnService {
     } = {},
   ): Promise<{ reasoning: string; decision: T }> {
     throwIfAborted(signal);
+    this.beginAttempt(context);
     const outputSchema = z.object({
       reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
       decision: zodSchema,
@@ -150,6 +159,7 @@ export class PlayerTurnService {
       scenario: context.scenario,
       seatNo: context.player.seatNo,
       role: context.player.role,
+      source: context.source,
     };
     const systemPrompt = await this.promptService.render(
       PROMPT_NAMES.agentActionSystem,
@@ -246,6 +256,8 @@ export class PlayerTurnService {
             ...options.traceParams,
             promptName: prompt.name,
             promptVersion: prompt.version,
+            promptSource: prompt.source,
+            promptOrigin: prompt.origin,
           }),
           context.access,
         ),
@@ -284,8 +296,8 @@ export class PlayerTurnService {
       context.player.modelName,
       schema,
       messages,
-      (retry) =>
-        this.langfuse.trace({
+      (retry) => {
+        const trace = this.langfuse.trace({
           runName: runName + (retry ? '-retry' : ''),
           gameId: context.player.gameId,
           playerId: context.player.id,
@@ -295,10 +307,22 @@ export class PlayerTurnService {
           role: context.player.role,
           promptName: prompt.name,
           promptVersion: prompt.version,
-        }),
+          promptSource: prompt.source,
+          promptOrigin: prompt.origin,
+          source: context.source,
+        });
+        if (context.source) context.source.outputObservationId = trace.observationId;
+        return trace;
+      },
       signal,
       wireSchema,
       context.access,
     );
+  }
+
+  private beginAttempt(context: TurnGenerationContext): void {
+    if (!context.actionKey) return;
+    context.source = createActionSource(context.actionKey);
+    this.langfuse.startAttempt(context.source, context.player.gameId, context.player.id);
   }
 }

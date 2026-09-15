@@ -1,69 +1,22 @@
 import { ModelCallError } from '@/llm/model-call-guard';
 import { ExperimentInvalidError } from '@/evaluation/experiment-integrity';
 import type { NodeContext } from '../nodes/node.types';
-import type { GameRecoveryService } from '@/game-recovery/game-recovery.service';
+import { gameLogger } from '../utils/game-logger';
 
-export class GameFailurePolicy {
-  private fallbacks = 0;
-
-  get count(): number {
-    return this.fallbacks;
-  }
-
-  restore(count: number): void {
-    this.fallbacks = count;
-  }
-
-  constructor(
-    private readonly maxFallbacks: number,
-    private readonly strict: boolean,
-  ) {}
-
-  consume(error: ModelCallError): void {
-    if (this.strict)
-      throw new ExperimentInvalidError('固定配置实验不允许模型失败降级', { cause: error });
-    if (this.fallbacks >= this.maxFallbacks)
-      throw new Error(
-        `对局模型降级次数已耗尽 (${this.fallbacks}/${this.maxFallbacks}): ${error.message}`,
-        { cause: error },
-      );
-    this.fallbacks++;
-  }
-
-  async consumePersisted(
-    error: ModelCallError,
-    recovery: GameRecoveryService,
-    action: string,
-  ): Promise<void> {
-    if (this.strict)
-      throw new ExperimentInvalidError('固定配置实验不允许模型失败降级', { cause: error });
-    const count = await recovery.effect(`fallback/${action}`, async (tx) => {
-      const used = await tx.gameExecutionStep.count({
-        where: {
-          gameId: recovery.current!.execution.gameId,
-          completed: true,
-          key: { contains: '/fallback/' },
-        },
-      });
-      if (used >= this.maxFallbacks)
-        throw new Error(`对局模型降级次数已耗尽 (${used}/${this.maxFallbacks}): ${error.message}`, {
-          cause: error,
-        });
-      return used + 1;
-    });
-    this.fallbacks = Math.max(this.fallbacks, count);
-  }
-}
-
-export function allowModelFallback(
-  error: unknown,
-  context: NodeContext,
-  action = 'action',
-): void | Promise<void> {
+/**
+ * 模型调用失败一律上抛，不再产生替代行动。
+ *
+ * 替代行动会把失败伪装成一个合法回合，观战和评分都无法区分；调用层的重放已经覆盖了
+ * 供应商偶发抖动，这里再把错误吞掉只会掩盖真问题。固定配置的实验局要额外判为无效，
+ * 否则同一份实验数据里混进了降级回合。
+ */
+export function failModelCall(error: unknown, context: NodeContext, message: string): never {
+  // 主动中止（暂停/取消/超时）与非模型故障原样上抛：它们不代表模型不可用。
   if (context.signal?.aborted || !(error instanceof ModelCallError)) throw error;
-  if (context.recovery?.current && context.failurePolicy)
-    return context.failurePolicy.consumePersisted(error, context.recovery, action);
-  context.failurePolicy?.consume(error);
+  gameLogger.error(`${message}: ${error.message}`);
+  if (context.strictExperiment)
+    throw new ExperimentInvalidError('固定配置实验不允许模型失败降级', { cause: error });
+  throw error;
 }
 
 /** 等待同批工作退出后再上抛，防止 Worker 已结束而其他玩家仍在写事件。 */
