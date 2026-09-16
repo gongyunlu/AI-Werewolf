@@ -18,7 +18,10 @@ jest.mock('../observability/prompt.service', () => ({ PromptService: jest.fn() }
 jest.mock('../speech-summarizer/speech-summarizer.service', () => ({
   SpeechSummarizerService: jest.fn(),
 }));
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 const SECRET_KEY = 'b'.repeat(64);
 const BASE_URL = 'https://deepseek.example/v1';

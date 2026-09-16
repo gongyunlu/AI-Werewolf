@@ -21,10 +21,8 @@ export class JudgeWorkerService extends WorkerHost {
     const { gameId, eventId, playerId, runId } = job.data;
     try {
       if (job.name === JUDGE_JOB_NAMES.complete) {
-        // completion 只有在全部评分 child 成功后才会运行；落投影与刷新 reward 在同一事务里，
-        // 任一环节失败都会让整次 completion 重试，不在 worker 里再补一遍回填。
+        // 全部最终结果齐备后一次提交评分、奖励、玩家分和 MVP；上报不属于父子依赖。
         await this.judgeService.completeEvaluation(gameId, runId);
-        await this.judgeService.aggregatePlayerScores(gameId);
         return;
       }
 

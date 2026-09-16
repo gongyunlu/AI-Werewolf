@@ -1,3 +1,4 @@
+import { createTestExecution, nextTestExecution } from './helpers/execution-fixture';
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { firstValueFrom } from 'rxjs';
@@ -99,15 +100,22 @@ describe('持久交付与恢复：真实隔离 PostgreSQL', () => {
     '并发与检查点复用只创建一份意图，内容冲突保持原记录（恢复=%s）',
     async (recoverable) => {
       const execution = recoverable
-        ? await recovery.create(
+        ? await createTestExecution(
+            prisma,
             gameId,
             {},
             { version: 1, prompts: {} },
             new Date(Date.now() + 60_000),
           )
         : undefined;
-      const run = <T>(action: () => Promise<T>) =>
-        execution ? recovery.run(execution, new AbortController().signal, action) : action();
+      const run = async <T>(action: () => Promise<T>) =>
+        execution
+          ? recovery.run(
+              await nextTestExecution(prisma, execution.gameId),
+              new AbortController().signal,
+              action,
+            )
+          : action();
       const [first, same] = await run(() =>
         Promise.all([
           writer.writePlayerSpeechEvent(speech()),
@@ -186,21 +194,29 @@ describe('持久交付与恢复：真实隔离 PostgreSQL', () => {
     '提交响应丢失后重试保留同一 Event 和意图（恢复=%s）',
     async (recoverable) => {
       const execution = recoverable
-        ? await recovery.create(
+        ? await createTestExecution(
+            prisma,
             gameId,
             {},
             { version: 1, prompts: {} },
             new Date(Date.now() + 60_000),
           )
         : undefined;
-      const run = <T>(action: () => Promise<T>) =>
-        execution ? recovery.run(execution, new AbortController().signal, action) : action();
+      const run = async <T>(action: () => Promise<T>) =>
+        execution
+          ? recovery.run(
+              await nextTestExecution(prisma, execution.gameId),
+              new AbortController().signal,
+              action,
+            )
+          : action();
       const transact = prisma.$transaction.bind(prisma);
-      const lost = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async (
+      const lost = jest.spyOn(prisma, '$transaction').mockImplementation((async (
         action: (tx: Prisma.TransactionClient) => Promise<unknown>,
       ) => {
-        await transact(action);
-        throw new Error('提交响应丢失');
+        const result = await transact(action);
+        if (await prisma.event.count({ where: { gameId } })) throw new Error('提交响应丢失');
+        return result;
       }) as never);
       await expect(run(() => writer.writeVoteBatch(vote()))).rejects.toThrow('提交响应丢失');
       lost.mockRestore();

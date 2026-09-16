@@ -74,8 +74,16 @@ export class GamesController {
   @Post(':id/cancel')
   @ApiOperation({ summary: '取消对局（从队列移除或中断执行）' })
   async cancel(@Param('id', new ParseUUIDPipe()) id: string) {
-    const removedFromQueue = await this.gameQueue.cancelJob(id);
     const success = await this.gamesService.cancelGame(id);
+    let removedFromQueue = false;
+    try {
+      removedFromQueue = await this.gameQueue.cancelJob(id);
+    } catch (error) {
+      this.logger.warn(
+        { gameId: id, err: error },
+        '对局已取消，队列清理失败；残留任务不能领取执行权',
+      );
+    }
     this.logger.info({ gameId: id, removedFromQueue }, '对局已取消');
     return { success, message: '对局已取消', removedFromQueue };
   }

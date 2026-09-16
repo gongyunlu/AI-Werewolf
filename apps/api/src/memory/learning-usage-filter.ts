@@ -1,7 +1,7 @@
 import { Prisma } from '../generated/prisma/client';
 import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 
-// 对齐 backfillRewards：旧 usage 只有在同键真实事件唯一时才能关联，不能只数已评分事件。
+// 对齐奖励回填：旧 usage 只有在同键真实事件唯一时才能关联，不能只数已评分事件。
 const usageEventId = Prisma.sql`COALESCE(u.event_id, (
   SELECT (array_agg(legacy_event.id))[1]
   FROM events legacy_event

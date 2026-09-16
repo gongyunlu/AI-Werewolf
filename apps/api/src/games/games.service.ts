@@ -18,6 +18,7 @@ import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 import { AGENT_GAME_OMIT } from '../agents/agents.service';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.validation';
+import { encodeRecoveryValue } from '../game-recovery/recovery-value';
 
 const SKILL_VERSION = 'v1';
 
@@ -209,6 +210,8 @@ export class GamesService {
       throw new NotFoundException(`Game ${gameId} 不存在`);
     }
 
+    if (game.status === GAME_STATUSES.INITIALIZED || game.status === GAME_STATUSES.RUNNING)
+      return this.getGameById(gameId);
     if (game.status !== GAME_STATUSES.CREATED) {
       throw new BadRequestException(
         `Game ${gameId} 状态为 ${game.status}，只有 '${GAME_STATUSES.CREATED}' 状态的对局可以初始化`,
@@ -230,24 +233,27 @@ export class GamesService {
 
     // 4. 批量更新 Player 记录 + 更新 Game 状态（事务内保证原子性）
     return this.prisma.$transaction(async (tx) => {
-      await Promise.all(
-        assignments.map((assignment) => {
-          const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
-          return tx.player.update({
-            where: { id: player.id },
-            data: {
-              seatNo: assignment.seatNo,
-              role: assignment.role,
-              faction: assignment.faction,
-            },
-          });
-        }),
-      );
-
-      // 5. 更新 Game 状态
-      return tx.game.update({
-        where: { id: gameId },
+      const claimed = await tx.game.updateMany({
+        where: { id: gameId, status: GAME_STATUSES.CREATED },
         data: { status: GAME_STATUSES.INITIALIZED },
+      });
+      if (claimed.count)
+        await Promise.all(
+          assignments.map((assignment) => {
+            const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
+            return tx.player.update({
+              where: { id: player.id },
+              data: {
+                seatNo: assignment.seatNo,
+                role: assignment.role,
+                faction: assignment.faction,
+              },
+            });
+          }),
+        );
+
+      return tx.game.findUniqueOrThrow({
+        where: { id: gameId },
         omit: { experiment: true },
         include: {
           players: {
@@ -294,94 +300,54 @@ export class GamesService {
     return game;
   }
 
-  /**
-   * 开始游戏对局（更新状态为 running）
-   *
-   * @param gameId - 游戏对局ID
-   * @returns 更新后的游戏记录
-   * @throws {NotFoundException} 当游戏对局不存在时抛出
-   * @throws {BadRequestException} 当游戏对局状态不是 'initialized' 时抛出
-   */
+  /** 接受启动与投递意图同事务；已接受的请求可重试，不重新冻结输入。 */
   async startGame(gameId: string) {
     // 1. 查询对局
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
-      include: {
-        players: { include: { agent: { omit: AGENT_GAME_OMIT } } },
-        ruleset: true,
-      },
+      select: { status: true },
     });
 
     if (!game) {
       throw new NotFoundException(`Game ${gameId} 不存在`);
     }
 
-    // 2. 如果是 created 状态，先自动初始化（分配座次和角色）
-    if (game.status === GAME_STATUSES.CREATED) {
-      const parsed = RulesetDefinitionSchema.safeParse(game.ruleset.definition);
-      if (!parsed.success) {
-        throw new BadRequestException(`Ruleset ${game.ruleset.id} 的 definition 结构非法`);
-      }
-      const agentIds = game.players.map((p) => p.agent.id);
-      const assignments =
-        readExperiment(game.experiment)?.assignments ??
-        assignRolesAndSeats(parsed.data.roles, agentIds);
-      await this.prisma.$transaction(async (tx) => {
-        const claimed = await tx.game.updateMany({
-          where: { id: gameId, status: GAME_STATUSES.CREATED },
-          data: { status: GAME_STATUSES.INITIALIZED },
-        });
-        if (claimed.count === 0) return;
+    if (game.status === GAME_STATUSES.CREATED) await this.initializeGame(gameId);
 
-        await Promise.all(
-          assignments.map((assignment) => {
-            const player = game.players.find((p) => p.agent.id === assignment.agentId)!;
-            return tx.player.update({
-              where: { id: player.id },
-              data: {
-                seatNo: assignment.seatNo,
-                role: assignment.role,
-                faction: assignment.faction,
-              },
-            });
-          }),
-        );
-      });
-    }
-
-    // 3. 原子抢占 initialized -> running，避免并发 start 相互覆盖或重复入队
-    const started = await this.prisma.game.updateMany({
-      where: { id: gameId, status: GAME_STATUSES.INITIALIZED },
-      data: { status: GAME_STATUSES.RUNNING },
-    });
-    if (started.count !== 1) {
-      const current = await this.prisma.game.findUnique({
-        where: { id: gameId },
-        select: { status: true },
-      });
-      throw new BadRequestException(`Game ${gameId} 状态为 ${current?.status}，无法开始对局`);
-    }
-
-    // 4. 初始化 SSE 广播流
-    this.broadcaster.getOrCreate(gameId);
-
-    // 5. 返回启动后的完整对局
-    return this.prisma.game.findUniqueOrThrow({
+    const preparedGame = await this.prisma.game.findUniqueOrThrow({
       where: { id: gameId },
-      omit: { experiment: true },
-      include: {
-        players: { orderBy: { seatNo: 'asc' }, include: { agent: { omit: AGENT_GAME_OMIT } } },
-      },
+      include: { players: { orderBy: { seatNo: 'asc' } }, execution: true },
     });
-  }
+    if (preparedGame.execution) return this.getGameById(gameId);
+    if (preparedGame.status !== GAME_STATUSES.INITIALIZED)
+      throw new BadRequestException(`Game ${gameId} 状态为 ${preparedGame.status}，无法开始对局`);
+    const prepared = await this.gameExecutor.prepareExecution(preparedGame);
+    await this.prisma.$transaction(async (tx) => {
+      // 初始化后没有修改参赛输入的业务入口；状态锁同时排斥初始化与取消。
+      const accepted = await tx.game.updateMany({
+        where: {
+          id: gameId,
+          status: GAME_STATUSES.INITIALIZED,
+          rulesetId: preparedGame.rulesetId,
+          skillVersion: preparedGame.skillVersion,
+        },
+        data: { status: GAME_STATUSES.RUNNING },
+      });
+      if (!accepted.count) {
+        if (await tx.gameExecution.findUnique({ where: { gameId } })) return;
+        throw new BadRequestException('准备启动期间对局状态已变化');
+      }
+      await tx.gameExecution.create({
+        data: {
+          gameId,
+          dispatchPending: true,
+          initialState: encodeRecoveryValue(prepared.initialState),
+          manifest: encodeRecoveryValue(prepared.manifest),
+        },
+      });
+    });
 
-  /** 入队失败时撤销 running 状态，使已初始化对局可以安全重试启动。 */
-  async rollbackFailedStart(gameId: string): Promise<void> {
-    await this.prisma.game.updateMany({
-      where: { id: gameId, status: GAME_STATUSES.RUNNING },
-      data: { status: GAME_STATUSES.INITIALIZED },
-    });
-    this.broadcaster.complete(gameId);
+    return this.getGameById(gameId);
   }
 
   /**
@@ -405,7 +371,6 @@ export class GamesService {
   async pauseGame(gameId: string) {
     throw new NotImplementedException(`对局 ${gameId} 暂不支持暂停`);
   }
-
   /**
    * 更新游戏状态
    */
@@ -433,12 +398,32 @@ export class GamesService {
       throw new BadRequestException(`对局已结束，无法取消`);
     }
 
-    // 条件更新会在数据库持锁后复核，不能覆盖读取状态后刚提交的正常终局。
-    const cancelled = await this.prisma.game.updateMany({
-      where: { id: gameId, status: { notIn: [GAME_STATUSES.FINISHED, GAME_STATUSES.ABORTED] } },
-      data: { status: GAME_STATUSES.ABORTED, endedAt: new Date() },
-    });
-    if (!cancelled.count) throw new BadRequestException('对局已结束，无法取消');
+    const newlyAccepted = new Error('取消期间启动记录刚刚提交');
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          // 与提交器保持 execution → game 的锁顺序。
+          const locked = await tx.gameExecution.updateMany({
+            where: { gameId },
+            data: { owner: null, dispatchPending: false },
+          });
+          const cancelled = await tx.game.updateMany({
+            where: {
+              id: gameId,
+              status: { notIn: [GAME_STATUSES.FINISHED, GAME_STATUSES.ABORTED] },
+            },
+            data: { status: GAME_STATUSES.ABORTED, endedAt: new Date() },
+          });
+          if (!cancelled.count) throw new BadRequestException('对局已结束，无法取消');
+          // 无记录时与首次创建相遇：回滚后重新按执行锁优先，不能持有 game 锁反向等待。
+          if (!locked.count && (await tx.gameExecution.findUnique({ where: { gameId } })))
+            throw newlyAccepted;
+        });
+        break;
+      } catch (error) {
+        if (error !== newlyAccepted || attempt > 0) throw error;
+      }
+    }
 
     this.gameExecutor.abortGame(gameId);
     this.broadcaster.emit(gameId, { type: 'game.finished', winner: 'unknown' });

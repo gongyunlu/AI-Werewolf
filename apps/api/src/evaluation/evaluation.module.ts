@@ -1,5 +1,10 @@
 import { EvaluationProjectionService } from './evaluation-projection.service';
 import { LangfuseScoresService } from './langfuse-scores.service';
+import {
+  EvaluationDeliveryService,
+  EVALUATION_DELIVERY_QUEUE,
+} from './evaluation-delivery.service';
+import { EvaluationDeliveryWorker } from './evaluation-delivery.worker';
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { SettlementService } from './settlement.service';
@@ -15,12 +20,15 @@ import { EvaluationController } from './evaluation.controller';
 @Module({
   imports: [
     BullModule.registerQueue({ name: JUDGE_QUEUE_NAME }),
+    BullModule.registerQueue({ name: EVALUATION_DELIVERY_QUEUE }),
     BullModule.registerFlowProducer({ name: JUDGE_FLOW_PRODUCER }),
   ],
   controllers: [EvaluationController],
   providers: [
     EvaluationProjectionService,
     LangfuseScoresService,
+    EvaluationDeliveryService,
+    EvaluationDeliveryWorker,
     SettlementService,
     JudgeService,
     JudgeQueueService,

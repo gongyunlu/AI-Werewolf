@@ -26,7 +26,8 @@ import {
 } from '../src/reflection/reflection-queue.service';
 import { ReflectionWorkerService } from '../src/reflection/reflection.worker';
 import { ReflectionService } from '../src/reflection/reflection.service';
-import { JudgeService } from '../src/evaluation/judge.service';
+import { backfillMemoryRewards } from '../src/evaluation/memory-reward';
+import type { JudgeService } from '../src/evaluation/judge.service';
 import { loadKnowledgeScoredEvents } from '../src/evaluation/learning-knowledge-comparison';
 import { GameReviewService } from '../src/reflection/game-review.service';
 import type { RedisService } from '../src/redis/redis.service';
@@ -752,13 +753,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
           rewardScore: 20,
         },
       });
-      const judge = new JudgeService(
-        prisma,
-        {} as PromptService,
-        llm as unknown as StructuredLlmService,
-        undefined as never,
-      );
-      await expect(judge.backfillRewards(g.id)).resolves.toBe(1);
+      await expect(prisma.$transaction((tx) => backfillMemoryRewards(tx, g.id))).resolves.toBe(1);
       expect(await prisma.memoryUsage.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject(
         { eventId: null, rewardScore: 80 },
       );
@@ -768,7 +763,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
       expect(hits).toEqual(eligible ? [{ id: usage.id }] : []);
       const frozen = await memories.captureExperimentMemories([agentId]);
       expect(frozen.find((m) => m.id === memory.id)?.rank).toBeCloseTo(eligible ? 0 : 80);
-      await expect(judge.backfillRewards(g.id)).resolves.toBe(1);
+      await expect(prisma.$transaction((tx) => backfillMemoryRewards(tx, g.id))).resolves.toBe(1);
       expect(await prisma.memoryUsage.count()).toBe(1);
       expect(llm.invoke).not.toHaveBeenCalled();
     },
@@ -804,13 +799,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
     expect(
       await prisma.$queryRaw`SELECT u.id FROM memory_usages u WHERE true ${CURRENT_LEARNING_USAGE_FILTER}`,
     ).toEqual([]);
-    const judge = new JudgeService(
-      prisma,
-      {} as PromptService,
-      llm as unknown as StructuredLlmService,
-      undefined as never,
-    );
-    await expect(judge.backfillRewards(g.id)).resolves.toBe(0);
+    await expect(prisma.$transaction((tx) => backfillMemoryRewards(tx, g.id))).resolves.toBe(0);
     expect(await prisma.memoryUsage.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject({
       eventId: null,
       rewardScore: null,

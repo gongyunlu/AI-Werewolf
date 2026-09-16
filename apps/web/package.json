@@ -23,7 +23,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.27.0",
-    "markstream-react": "^0.0.55",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.6.3",

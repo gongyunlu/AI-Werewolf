@@ -27,8 +27,6 @@ export interface ReflectFanoutJobData {
   playerId?: string;
   /** 强制重跑时追加到子任务 jobId 的后缀 */
   suffix?: string;
-  /** judge 刚重跑过：reward 刷新失败时必须让 fanout 重试 */
-  refreshRewards?: boolean;
   /** fanout 重试检查点：本次运行的复盘已经成功持久化 */
   reviewCompleted?: boolean;
 }

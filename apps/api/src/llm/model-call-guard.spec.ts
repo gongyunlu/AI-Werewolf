@@ -1,3 +1,4 @@
+import { OpenAIClient } from '@langchain/openai';
 import { ModelCallError, ModelCallGuard } from './model-call-guard';
 
 const unavailable = () => Object.assign(new Error('unavailable'), { status: 503 });
@@ -5,6 +6,35 @@ const unavailable = () => Object.assign(new Error('unavailable'), { status: 503 
 describe('ModelCallGuard', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
+
+  it('SDK 连接超时按真实类型分类，不依赖其 Error 名称', async () => {
+    const guard = new ModelCallGuard();
+    const error = new OpenAIClient.APIConnectionTimeoutError();
+    expect(error.name).toBe('Error');
+    await expect(
+      guard.run('a', async () => {
+        throw error;
+      }),
+    ).rejects.toMatchObject({
+      code: 'transient',
+      cause: error,
+      details: { errorType: 'APIConnectionTimeoutError' },
+    });
+  });
+
+  it.each([
+    new Error('Connection error.'),
+    Object.assign(new Error('未知异常'), { name: 'APIConnectionError' }),
+    new Error('业务处理错误', { cause: Object.assign(new Error(), { code: 'ECONNRESET' }) }),
+  ])('未知错误不按文案、伪造名称或嵌套原因笼统重试：%s', async (error) => {
+    const guard = new ModelCallGuard({ minSamples: 1 });
+    await expect(
+      guard.run('a', async () => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    await expect(guard.run('a', async () => 'ok')).resolves.toBe('ok');
+  });
 
   it('只熔断故障路由，冷却后只允许一次探测', async () => {
     const guard = new ModelCallGuard({ minSamples: 2, cooldownMs: 1000 });

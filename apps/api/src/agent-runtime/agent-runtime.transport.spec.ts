@@ -55,12 +55,13 @@ function setup(modelName = 'glm-5.3', overrides: Partial<Env> = {}) {
     replay: {},
   } as Parameters<AgentRuntimeService['decide']>[0];
   const requests: Record<string, any>[] = [];
-  const responses: Response[] = [];
+  const responses: Array<Response | Error> = [];
   const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     expect(String(url)).toBe('https://provider.test/v3/chat/completions');
     requests.push(JSON.parse(String(init?.body)));
     const response = responses.shift();
     if (!response) throw new Error('意外的额外模型调用');
+    if (response instanceof Error) throw response;
     return response;
   });
   return { runtime, context, requests, responses, fetch, config };
@@ -122,6 +123,56 @@ function providerStreamError(code: string, eventEnvelope = false, partial = fals
   );
 }
 
+function connectionReset() {
+  return new TypeError('fetch failed: https://provider.test/?key=secret-test-key', {
+    cause: Object.assign(new Error('socket reset: secret-test-key'), { code: 'ECONNRESET' }),
+  });
+}
+
+it('SDK 包装的连接失败只重试一次终稿，不重复思考，日志保留脱敏原因链', async () => {
+  const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  const { runtime, context, responses, requests } = setup();
+  responses.push(thinking(), connectionReset(), toolResult());
+
+  await expect(runtime.decide(context, decisionSchema)).resolves.toEqual(valid);
+
+  expect(requests).toHaveLength(3);
+  expect(requests[2]).toEqual(requests[1]);
+  expect(warn).toHaveBeenCalledWith(
+    expect.objectContaining({
+      failureCode: 'transient',
+      errorType: 'APIConnectionError',
+      causes: [{ errorType: 'TypeError' }, { errorType: 'Error', code: 'ECONNRESET' }],
+      receivedChunks: 0,
+      playerId: 'p',
+    }),
+  );
+  expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-test-key');
+  expect(JSON.stringify(warn.mock.calls)).not.toContain('https://provider.test');
+});
+
+it('连续连接失败耗尽原有一次重试后明确失败，不保存替代决策', async () => {
+  const { runtime, context, responses, requests } = setup();
+  responses.push(thinking(), connectionReset(), connectionReset());
+
+  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
+    code: 'transient',
+    details: { errorType: 'APIConnectionError' },
+    cause: { cause: { cause: { code: 'ECONNRESET' } } },
+  });
+  expect(requests).toHaveLength(3);
+  expect(requests[2]).toEqual(requests[1]);
+  expect(context.replay?.decision).toBeUndefined();
+});
+
+it('流式思考的连接失败不会因新分类而重放整轮', async () => {
+  const { runtime, context, responses, requests } = setup();
+  responses.push(connectionReset());
+
+  await expect(runtime.streamSpeech(context)).rejects.toMatchObject({ code: 'transient' });
+  expect(requests).toHaveLength(1);
+});
+
 it.each([
   ['ServerOverloaded', false, false],
   ['ServerOverloaded', true, true],
@@ -164,6 +215,14 @@ it.each(['AccountQuotaExceeded', 'insufficient_quota'])(
     expect(requests).toHaveLength(2);
   },
 );
+
+it.each([401, 403])('HTTP %s 认证与权限错误仍立即终止，不套用连接重试', async (status) => {
+  const { runtime, context, responses, requests } = setup();
+  responses.push(thinking(), Response.json({ error: { message: '需要修正接入配置' } }, { status }));
+  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({ status });
+  expect(requests).toHaveLength(2);
+  expect(context.replay?.decision).toBeUndefined();
+});
 
 it('持续流内过载耗尽原有一次重试，保留供应商错误码且不伪造 HTTP 状态', async () => {
   const { runtime, context, responses, requests } = setup();

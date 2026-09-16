@@ -1,4 +1,4 @@
-import type { PrismaClient } from '../generated/prisma/client';
+import type { Prisma } from '../generated/prisma/client';
 import { ACTION_TYPES } from '@ai-werewolf/shared';
 import { selectMvp, type MvpCandidate } from './metrics';
 
@@ -26,10 +26,10 @@ function combinePlayerScore(
  * 为主，仅并列时用胜负/存活/投票精度依次破平局。无任何评分数据的玩家 score 置 NULL
  * （区别于「打得差分数低」，NULL 表示「无可评行为」），也不参与 MVP。
  *
- * 纯函数（仅依赖 prisma），供 JudgeService 与批量迁移脚本复用，不依赖 Nest DI。
+ * 由调用方提供事务，供评分采用和显式重算复用，不依赖 Nest DI。
  */
 export async function aggregatePlayerScores(
-  prisma: PrismaClient,
+  prisma: Prisma.TransactionClient,
   gameId: string,
 ): Promise<{ scored: number; total: number }> {
   const [decisionGrouped, speechGrouped, performances] = await Promise.all([

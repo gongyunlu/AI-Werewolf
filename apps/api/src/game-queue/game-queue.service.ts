@@ -1,7 +1,28 @@
-import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+
+export const GAME_PRODUCER_QUEUE = Symbol('GAME_PRODUCER_QUEUE');
+
+/** HTTP 与补投使用有限命令期限；Worker 的阻塞连接仍由 BullMQ 管理。 */
+export function createGameProducerQueue(redisUrl: string, prefix?: string) {
+  const queue = new Queue<GameJobData>('game-queue', {
+    prefix,
+    connection: {
+      url: redisUrl,
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+      commandTimeout: 5_000,
+      connectTimeout: 5_000,
+    },
+    skipWaitingForReady: true,
+    // Worker 启动时仍检查 Redis 版本；生产者不能在离线初始化时永久卡住。
+    skipVersionCheck: true,
+  });
+  const logger = new Logger(GameQueueService.name);
+  queue.on('error', (error) => logger.error(error.message));
+  return queue;
+}
 
 export function gameJobId(gameId: string, generation = 1): string {
   return generation === 1 ? gameId : `${gameId}-${generation}`;
@@ -37,7 +58,7 @@ export class GameQueueService {
   private readonly logger = new Logger(GameQueueService.name);
 
   constructor(
-    @InjectQueue('game-queue') private readonly queue: Queue<GameJobData>,
+    @Inject(GAME_PRODUCER_QUEUE) private readonly queue: Queue<GameJobData>,
     @Optional() private readonly prisma?: PrismaService,
   ) {}
 

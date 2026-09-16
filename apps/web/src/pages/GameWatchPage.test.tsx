@@ -142,6 +142,75 @@ it('待恢复快照立即反映生命周期状态', async () => {
   expect(screen.queryByText('观战中')).not.toBeInTheDocument();
 });
 
+it.each(['实时结束', '重连快照', '状态轮询'] as const)(
+  '%s 得知对局中止后，无需刷新即可提示并停止生成，保留已提交记录',
+  async (delivery) => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiClient.getGame).mockResolvedValue(game('g1', 'running'));
+      await act(async () => {
+        renderGames();
+      });
+      const onMessage = vi.mocked(useGameStream).mock.calls.at(-1)![2];
+      const saved = {
+        eventId: 'saved',
+        sceneId: 'saved-scene',
+        sceneType: 'speech' as const,
+        visibility: 'public' as const,
+        status: 'closed' as const,
+        content: '已提交的发言',
+        thinking: '',
+        thinkingDurationMs: 0,
+        contentDurationMs: 0,
+      };
+      act(() => {
+        onMessage({
+          type: 'connection.ready',
+          gameId: 'g1',
+          gameStatus: 'running',
+          lastSequence: 0,
+          playerDeaths: [],
+          snapshot: [saved],
+        });
+        onMessage({
+          type: 'scene.open',
+          sequence: 1,
+          sceneId: 'unfinished',
+          sceneType: 'speech',
+          visibility: 'public',
+          initialContent: '仍在生成的半句话',
+        });
+      });
+      expect(screen.getByText('仍在生成的半句话')).toBeInTheDocument();
+      vi.mocked(apiClient.getGame).mockResolvedValue(game('g1', 'aborted'));
+      await act(async () => {
+        if (delivery === '实时结束') {
+          // 即使终态回读失败，已经收到的失败通知也必须立即显示。
+          vi.mocked(apiClient.getGame).mockRejectedValue(new Error('状态读取暂时失败'));
+          onMessage({ type: 'game.finished', sequence: 2, winner: 'unknown' });
+        } else if (delivery === '重连快照') {
+          onMessage({
+            type: 'connection.ready',
+            gameId: 'g1',
+            gameStatus: 'aborted',
+            lastSequence: 2,
+            playerDeaths: [],
+            snapshot: [saved],
+            gameFinished: { winner: 'unknown' },
+          });
+        } else {
+          await vi.advanceTimersByTimeAsync(8000);
+        }
+      });
+      expect(screen.getByRole('alert')).toHaveTextContent('对局已中止');
+      expect(screen.queryByText('仍在生成的半句话')).not.toBeInTheDocument();
+      expect(screen.getByText('已提交的发言')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
 it('慢于轮询间隔的请求不被后续轮询无限废弃', async () => {
   vi.mocked(apiClient.getGame).mockResolvedValueOnce(game('g1', 'running'));
   vi.useFakeTimers();

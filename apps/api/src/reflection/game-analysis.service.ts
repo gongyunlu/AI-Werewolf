@@ -50,6 +50,7 @@ export interface AnalyzeGameResult {
 export interface AnalysisStatus {
   judgedCount: number;
   judgeableCount: number;
+  judgeComplete: boolean;
   reflectedCount: number;
   playerCount: number;
   narrativeReady: boolean;
@@ -202,8 +203,6 @@ export class GameAnalysisService {
           force: refreshDerivedArtifacts,
           playerId,
           suffix: suffix || undefined,
-          // judge+reflect 恢复路径也必须严格回填；上一次可能正是 backfill 失败后中断。
-          refreshRewards: true,
         });
         this.logger.log({ gameId, reflectPlanned }, '评分已完整，已投递复盘与反思');
         return { judged: 0, reflectPlanned, skipped: false };
@@ -221,7 +220,6 @@ export class GameAnalysisService {
           force: refreshDerivedArtifacts,
           playerId,
           suffix,
-          refreshRewards: true,
         },
         opts: { ...REFLECT_JOB_OPTIONS, jobId: buildReviewJobId(gameId, suffix) },
         children: children.map((child) => ({
@@ -247,8 +245,7 @@ export class GameAnalysisService {
       if (!force) {
         if (progress.complete) {
           // 不需要重评，但仍严格刷新一次 reward，修复旧 completion 可能遗漏的派生数据。
-          await this.judgeService.backfillRewards(gameId);
-          await this.judgeService.aggregatePlayerScores(gameId);
+          await this.judgeService.refreshScores(gameId);
           this.logger.log({ gameId }, '评分已完整，已刷新 reward，跳过重复投递');
           return { judged: 0, reflectPlanned: 0, skipped: true };
         }
@@ -275,7 +272,7 @@ export class GameAnalysisService {
       playerId ? 1 : game._count.players,
     );
     if (progress.platformEvaluationIncomplete) {
-      throw new ConflictException('平台评分尚未完整采用，暂不能只生成复盘与反思');
+      throw new ConflictException('评分批次尚未完整采用，暂不能只生成复盘与反思');
     }
     if (!force && progress.reflectComplete) {
       this.logger.log({ gameId, playerId }, '复盘与反思已完成，跳过重复投递');
@@ -430,6 +427,7 @@ export class GameAnalysisService {
     return {
       judgedCount: progress.judgedCount,
       judgeableCount: progress.judgeableCount,
+      judgeComplete: progress.judgeComplete,
       reflectedCount: progress.reflectedCount,
       playerCount,
       narrativeReady: progress.narrativeReady,

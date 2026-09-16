@@ -32,7 +32,7 @@ describe('ReflectionWorkerService', () => {
     game: { findUnique: jest.fn() },
     player: { findMany: jest.fn() },
   };
-  const judge = { backfillRewards: jest.fn(), aggregatePlayerScores: jest.fn() };
+  const judge = { completeEvaluation: jest.fn() };
   const gameReview = { reviewGame: jest.fn(), loadStoredReview: jest.fn() };
   const reflection = { reflect: jest.fn() };
   const globalMemory = { promotePatterns: jest.fn() };
@@ -45,8 +45,7 @@ describe('ReflectionWorkerService', () => {
     jest.clearAllMocks();
     prisma.game.findUnique.mockResolvedValue({ experiment: null });
     prisma.player.findMany.mockResolvedValue(playerIds.map((id) => ({ id })));
-    judge.backfillRewards.mockResolvedValue(0);
-    judge.aggregatePlayerScores.mockResolvedValue(undefined);
+    judge.completeEvaluation.mockResolvedValue(undefined);
     gameReview.reviewGame.mockResolvedValue({});
     gameReview.loadStoredReview.mockResolvedValue(null);
     globalMemory.promotePatterns.mockResolvedValue(0);
@@ -68,7 +67,7 @@ describe('ReflectionWorkerService', () => {
     prisma.game.findUnique.mockResolvedValue({ experiment: { arm: 'on' } });
     gameReview.loadStoredReview.mockResolvedValue({ patterns: [{ title: '不应晋升的规律' }] });
     await worker.process(fanoutJob({ gameId }));
-    expect(judge.aggregatePlayerScores).toHaveBeenCalledWith(gameId);
+    expect(judge.completeEvaluation).not.toHaveBeenCalled();
     expect(reflection.reflect).not.toHaveBeenCalled();
     expect(gameReview.reviewGame).toHaveBeenCalledWith(gameId, false);
     expect(globalMemory.promotePatterns).not.toHaveBeenCalled();
@@ -115,28 +114,29 @@ describe('ReflectionWorkerService', () => {
     expect(maintenance.enqueueForGame).not.toHaveBeenCalled();
   });
 
-  it('judge 重跑后的 reward 刷新失败会重试且不会重做复盘', async () => {
+  it('本地评分采用失败时先重试采用，成功后才生成复盘和投递反思', async () => {
     const job = fanoutJob({
       gameId,
       force: true,
       suffix: '_run_1',
-      refreshRewards: true,
+      evaluationRunId: 'evaluation-run',
     });
-    judge.backfillRewards.mockRejectedValueOnce(new Error('db unavailable'));
+    judge.completeEvaluation.mockRejectedValueOnce(new Error('db unavailable'));
 
     await expect(worker.process(job)).rejects.toThrow('db unavailable');
     expect(queue.enqueuePlayers).not.toHaveBeenCalled();
+    expect(gameReview.reviewGame).not.toHaveBeenCalled();
 
     await expect(worker.process(job)).resolves.toBeUndefined();
 
     expect(gameReview.reviewGame).toHaveBeenCalledTimes(1);
-    expect(judge.backfillRewards).toHaveBeenCalledTimes(2);
+    expect(judge.completeEvaluation).toHaveBeenCalledTimes(2);
     expect(queue.enqueuePlayers).toHaveBeenCalledTimes(1);
   });
 
-  it('只跑反思时 reward 补历史空值失败仍继续投递玩家任务', async () => {
+  it('只跑反思复用已有评分，不重复采用或刷新奖励', async () => {
     const job = fanoutJob({ gameId });
-    judge.backfillRewards.mockRejectedValue(new Error('db unavailable'));
+    judge.completeEvaluation.mockRejectedValue(new Error('db unavailable'));
 
     await expect(worker.process(job)).resolves.toBeUndefined();
 

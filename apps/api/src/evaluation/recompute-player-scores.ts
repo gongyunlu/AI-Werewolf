@@ -54,7 +54,10 @@ async function main(): Promise<void> {
     let scoredTotal = 0;
     for (const game of targets) {
       try {
-        const { scored, total } = await aggregatePlayerScores(prisma, game.id);
+        const { scored, total } = await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`evaluation/${game.id}`}, 0))`;
+          return aggregatePlayerScores(tx, game.id);
+        });
         scoredTotal += scored;
         print(`对局 ${game.id.slice(0, 8)}：聚合 ${scored}/${total} 名玩家的过程分`);
       } catch (error) {

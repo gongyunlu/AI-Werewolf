@@ -40,7 +40,7 @@ export async function lockReflectionEvaluation(
   }
   if (!run) return undefined;
   if (run.status !== 'complete') {
-    throw new Error(`对局 ${gameId} 的平台评分尚未完整采用，无法生成复盘或反思`);
+    throw new Error(`对局 ${gameId} 的评分批次尚未完整采用，无法生成复盘或反思`);
   }
   const [events, decisions, teams] = await Promise.all([
     tx.event.findMany({
@@ -57,7 +57,7 @@ export async function lockReflectionEvaluation(
     }),
   ]);
   if (!evaluationCompleteness({ run, events, judgments: [...decisions, ...teams] }).complete) {
-    throw new Error(`对局 ${gameId} 的平台评分业务投影不完整，无法生成复盘或反思`);
+    throw new Error(`对局 ${gameId} 的评分业务投影不完整，无法生成复盘或反思`);
   }
   return run.id;
 }

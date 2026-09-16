@@ -9,7 +9,10 @@ import type { Env } from '../config/env.validation';
 import { encryptAgentSecret } from '../agents/agent-secret';
 import { SpeechSummarizerService } from './speech-summarizer.service';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 const SECRET_KEY = 'd'.repeat(64);
 const AGENT_KEY = 'sk-agent-owned';

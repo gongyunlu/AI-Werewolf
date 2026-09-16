@@ -5,7 +5,10 @@ import { z } from 'zod';
 import { ModelCallService, type ModelAccess } from './model-call.service';
 import { ModelCallError, ModelCallGuard } from './model-call-guard';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 const ENV = {
   ARK_BASE_URL: 'https://ark.example/api/v3',

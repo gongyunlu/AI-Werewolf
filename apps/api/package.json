@@ -44,7 +44,6 @@
   },
   "dependencies": {
     "@ai-werewolf/shared": "workspace:*",
-    "@langchain/community": "^0.3.26",
     "@langchain/core": "^1.2.4",
     "@langchain/openai": "^1.5.5",
     "@nestjs/bullmq": "^11.0.5",

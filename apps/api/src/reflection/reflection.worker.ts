@@ -37,7 +37,7 @@ export class ReflectionWorkerService extends WorkerHost {
   }
 
   async process(job: Job<ReflectJobData>): Promise<void> {
-    const { gameId, playerId, force, suffix, refreshRewards } = job.data;
+    const { gameId, playerId, force, suffix } = job.data;
 
     try {
       if (job.data.evaluationRunId)
@@ -76,24 +76,6 @@ export class ReflectionWorkerService extends WorkerHost {
       const review = await this.gameReviewService.loadStoredReview(gameId);
       if (review && writeLearning) {
         await this.globalMemoryService.promotePatterns(gameId, review.patterns);
-      }
-
-      // combined flow 的 judge 已刚刚重跑：backfillRewards 会全量刷新变化过的 reward。
-      // 该路径回填失败会让 fanout 重试，避免反思已完成但 lesson 质量信号仍停留在旧版本。
-      if (refreshRewards) {
-        await this.judgeService.backfillRewards(gameId);
-        await this.judgeService.aggregatePlayerScores(gameId);
-      } else {
-        // 只跑反思时没有产生新评分，回填是尽力补历史空值，不阻断复盘。
-        try {
-          await this.judgeService.backfillRewards(gameId);
-          await this.judgeService.aggregatePlayerScores(gameId);
-        } catch (error) {
-          this.logger.warn(
-            { gameId, err: error instanceof Error ? error.message : String(error) },
-            'reward 回填失败，跳过',
-          );
-        }
       }
 
       const playerIds = playerId

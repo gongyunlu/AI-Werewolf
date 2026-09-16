@@ -13,20 +13,43 @@ import {
 import { decodeRecoveryValue, encodeRecoveryValue } from './recovery-value';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
 
-/** version 只保护持久化格式本身；格式不变的其他差异一律允许续跑。 */
+/** version 同时约束旧执行器的步骤顺序与持久格式，改变步骤键时必须升级。 */
 export interface RecoveryManifest {
   version: 1;
   prompts: FrozenPrompts;
 }
 
+function supportsManifest(value: Partial<RecoveryManifest> | null): value is RecoveryManifest {
+  return (
+    value?.version === 1 &&
+    !!value.prompts &&
+    typeof value.prompts === 'object' &&
+    !Array.isArray(value.prompts)
+  );
+}
+
 interface ExecutionScope {
-  execution: GameExecution;
+  execution: GameExecution & { deadline: Date };
   owner: string;
   manifest: RecoveryManifest;
   prefix: string;
   counters: Map<string, number>;
   signal: AbortSignal;
   visibleThrough?: number;
+}
+
+/** 投递元数据用于所有对局；中断后续跑仅支持当前普通六人局。 */
+export function canRecoverGame(
+  game: { rulesetId: string; skillVersion: string; experiment: unknown },
+  manifest: unknown,
+): boolean {
+  const value = decodeRecoveryValue<Partial<RecoveryManifest> | null>(manifest);
+  return (
+    game.rulesetId === 'standard6p' &&
+    game.skillVersion === 'v1' &&
+    game.experiment === null &&
+    supportsManifest(value)
+  );
 }
 
 type SavedResult<T> =
@@ -53,46 +76,56 @@ export class GameRecoveryService {
     return this.storage.getStore();
   }
 
-  async create(gameId: string, initialState: unknown, manifest: RecoveryManifest, deadline: Date) {
-    return this.prisma.gameExecution.upsert({
-      where: { gameId },
-      update: {},
-      create: {
-        gameId,
-        initialState: encodeRecoveryValue(initialState),
-        manifest: encodeRecoveryValue(manifest),
-        deadline,
-      },
-    });
-  }
-
   async run<T>(
     execution: GameExecution,
     signal: AbortSignal,
     callback: (signal: AbortSignal) => Promise<T>,
+    maxDurationMs?: number,
   ): Promise<T> {
     const owner = randomUUID();
-    const claimed = await this.prisma.gameExecution.updateMany({
-      where: {
-        gameId: execution.gameId,
-        generation: execution.generation,
-        owner: null,
-        game: { status: GAME_STATUSES.RUNNING },
-      },
-      data: { owner, heartbeatAt: new Date(), dispatchPending: false },
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      await tx.gameExecution.updateMany({
+        where: { gameId: execution.gameId },
+        data: { generation: { increment: 0 } },
+      });
+      const current = await tx.gameExecution.findUniqueOrThrow({
+        where: { gameId: execution.gameId },
+      });
+      if (current.generation !== execution.generation || current.owner || !current.dispatchPending)
+        throw new ExecutionOwnershipError();
+      const manifest = decodeRecoveryValue<RecoveryManifest>(current.manifest);
+      if (!supportsManifest(manifest))
+        throw new ConflictException('执行记录的版本或冻结输入不受支持');
+      if (!current.deadline && current.heartbeatAt)
+        throw new ConflictException('已经开始执行的对局缺少原定期限');
+      if (!current.deadline && (!maxDurationMs || maxDurationMs <= 0))
+        throw new ConflictException('首次领取缺少有效运行时限');
+      const deadline = current.deadline ?? new Date(Date.now() + maxDurationMs!);
+      if (deadline.getTime() <= Date.now()) throw new ConflictException('对局原定运行期限已到');
+      const updated = await tx.gameExecution.updateMany({
+        where: {
+          gameId: execution.gameId,
+          generation: execution.generation,
+          owner: null,
+          dispatchPending: true,
+          game: { status: GAME_STATUSES.RUNNING },
+        },
+        data: { owner, deadline, heartbeatAt: new Date(), dispatchPending: false },
+      });
+      if (!updated.count) throw new ExecutionOwnershipError();
+      return { ...current, owner, deadline, dispatchPending: false };
     });
-    if (!claimed.count) throw new ExecutionOwnershipError();
     const controller = new AbortController();
     const combinedSignal = AbortSignal.any([
       signal,
       controller.signal,
-      AbortSignal.timeout(Math.max(0, execution.deadline.getTime() - Date.now())),
+      AbortSignal.timeout(Math.max(0, claimed.deadline.getTime() - Date.now())),
     ]);
     const scope: ExecutionScope = {
-      execution,
+      execution: claimed,
       owner,
       signal: combinedSignal,
-      manifest: decodeRecoveryValue(execution.manifest),
+      manifest: decodeRecoveryValue(claimed.manifest),
       prefix: '',
       counters: new Map(),
     };
@@ -281,18 +314,25 @@ export class GameRecoveryService {
         });
         return stopped.count > 0;
       }
+      if (generation !== undefined && execution.generation !== generation) return false;
+      // 队列失锁发生在领取前时，冻结输入仍完整，只需重新投递。
+      if (execution.dispatchPending && !execution.owner) return false;
+      const game = await tx.game.findUniqueOrThrow({ where: { id: gameId } });
+      const recoverable = canRecoverGame(game, execution.manifest) && !!execution.deadline;
       const changed = await tx.game.updateMany({
         where: {
           id: gameId,
           status: GAME_STATUSES.RUNNING,
           ...(generation === undefined ? {} : { execution: { generation } }),
         },
-        data: { status: GAME_STATUSES.PENDING_RECOVERY },
+        data: recoverable
+          ? { status: GAME_STATUSES.PENDING_RECOVERY }
+          : { status: GAME_STATUSES.ABORTED, endedAt: new Date() },
       });
       if (changed.count)
         await tx.gameExecution.updateMany({
           where: { gameId },
-          data: { generation: { increment: 1 }, owner: null },
+          data: { generation: { increment: 1 }, owner: null, dispatchPending: false },
         });
       return changed.count > 0;
     });
@@ -309,12 +349,13 @@ export class GameRecoveryService {
       });
       const execution = await tx.gameExecution.findUnique({ where: { gameId } });
       if (!execution) throw new ConflictException('此对局没有执行检查点，不能恢复历史对局');
-      const manifest = decodeRecoveryValue<RecoveryManifest>(execution.manifest);
-      if (manifest.version !== 1)
-        throw new ConflictException('执行检查点的存储格式不受支持，无法恢复');
+      const game = await tx.game.findUniqueOrThrow({ where: { id: gameId } });
+      if (!canRecoverGame(game, execution.manifest))
+        throw new ConflictException('只支持当前版本普通六人局的中断恢复');
+      if (!execution.deadline)
+        throw new ConflictException('对局尚未领取或缺少原定期限，应检查启动投递');
       if (execution.deadline.getTime() <= Date.now())
         throw new ConflictException('对局原定运行期限已到，不能延长期限恢复');
-      const game = await tx.game.findUnique({ where: { id: gameId }, select: { status: true } });
       if (game?.status === GAME_STATUSES.RUNNING && execution.dispatchPending) return execution;
       const claimed = await tx.game.updateMany({
         where: { id: gameId, status: GAME_STATUSES.PENDING_RECOVERY },

@@ -1,3 +1,4 @@
+import { createTestExecution, nextTestExecution } from './helpers/execution-fixture';
 import { randomUUID } from 'node:crypto';
 import { EventWriterService } from '../src/game-engine/events/event-writer.service';
 import {
@@ -113,15 +114,22 @@ describe('领域提交协议：真实隔离 PostgreSQL', () => {
   });
   async function runner(recoverable: boolean) {
     const execution = recoverable
-      ? await recovery.create(
+      ? await createTestExecution(
+          prisma,
           gameId,
           {},
           { version: 1, prompts: {} },
           new Date(Date.now() + 60_000),
         )
       : undefined;
-    return <T>(action: () => Promise<T>) =>
-      execution ? recovery.run(execution, new AbortController().signal, action) : action();
+    return async <T>(action: () => Promise<T>) =>
+      execution
+        ? recovery.run(
+            await nextTestExecution(prisma, execution.gameId),
+            new AbortController().signal,
+            action,
+          )
+        : action();
   }
 
   it('同一动作并发提交只产生一个结果并返回原事件 ID', async () => {
@@ -172,15 +180,22 @@ describe('领域提交协议：真实隔离 PostgreSQL', () => {
 
   it.each([false, true])('同键不同内容拒绝且原记录不变（恢复=%s）', async (recoverable) => {
     const execution = recoverable
-      ? await recovery.create(
+      ? await createTestExecution(
+          prisma,
           gameId,
           {},
           { version: 1, prompts: {} },
           new Date(Date.now() + 60_000),
         )
       : undefined;
-    const run = <T>(action: () => Promise<T>) =>
-      execution ? recovery.run(execution, new AbortController().signal, action) : action();
+    const run = async <T>(action: () => Promise<T>) =>
+      execution
+        ? recovery.run(
+            await nextTestExecution(prisma, execution.gameId),
+            new AbortController().signal,
+            action,
+          )
+        : action();
     await run(() => writer.writeWolfDecisionEvent(submission()));
     const original = await saved();
     await expect(run(() => writer.writeWolfDecisionEvent(submission(3)))).rejects.toThrow(/冲突/);
@@ -260,11 +275,12 @@ describe('领域提交协议：真实隔离 PostgreSQL', () => {
     async (recoverable) => {
       const run = await runner(recoverable);
       const transact = prisma.$transaction.bind(prisma);
-      const injection = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async (
+      const injection = jest.spyOn(prisma, '$transaction').mockImplementation((async (
         callback: (tx: Prisma.TransactionClient) => Promise<unknown>,
       ) => {
-        await transact(callback);
-        throw new Error('提交响应丢失');
+        const result = await transact(callback);
+        if (await prisma.event.count({ where: { gameId } })) throw new Error('提交响应丢失');
+        return result;
       }) as never);
       try {
         await expect(run(() => writer.writeVoteBatch(batch()))).rejects.toThrow('提交响应丢失');
@@ -310,7 +326,7 @@ describe('领域提交协议：真实隔离 PostgreSQL', () => {
       const run = await runner(recoverable);
       const controller = new AbortController();
       const transact = prisma.$transaction.bind(prisma);
-      const injection = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async (
+      const injection = jest.spyOn(prisma, '$transaction').mockImplementation((async (
         callback: (tx: Prisma.TransactionClient) => Promise<unknown>,
       ) =>
         transact(async (tx) => {

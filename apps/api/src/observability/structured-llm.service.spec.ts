@@ -8,6 +8,7 @@ const mockInvoke = jest.fn();
 
 // 绕过真实 ChatOpenAI：只验证 invoke 返回值的处理分支
 jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
   ChatOpenAI: jest.fn().mockImplementation(() => ({
     withStructuredOutput: () => ({ invoke: mockInvoke }),
   })),

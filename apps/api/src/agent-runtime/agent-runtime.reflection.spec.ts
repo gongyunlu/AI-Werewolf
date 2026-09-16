@@ -4,7 +4,10 @@ import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { AgentRuntimeService } from './agent-runtime.service';
 import { PromptService } from '../observability/prompt.service';
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 it('缓存等待期间取消后，不能回放发言或返回成功', async () => {
   const { runtime, context } = setup(0);

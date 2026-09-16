@@ -388,7 +388,7 @@ model GameSummary {
 // 决策质量评估（LLM-as-judge），对可归属到单个玩家的关键决策（查验/用药/投票）打分。
 // 每个已提交决策仅保留一行采用投影，完整结果和重评历史由 Langfuse 管理。
 model DecisionJudgment {
-  source Json? @db.JsonB // 仅为已采用的 Langfuse Score 引用；旧评分保持 NULL
+  source Json? @db.JsonB // 评分采用来源及对应 Langfuse Score 引用；旧评分保持 NULL
   evaluationRunId String? @map("evaluation_run_id") @db.VarChar(200)
   id           String   @id @default(uuid()) @db.Uuid
   gameId       String   @map("game_id") @db.Uuid
@@ -534,7 +534,7 @@ model GameExecution {
   owner       String?  @db.Uuid
   initialState Json    @map("initial_state") @db.JsonB
   manifest    Json     @db.JsonB
-  deadline    DateTime @db.Timestamptz
+  deadline    DateTime? @db.Timestamptz // 首次领取时固定；排队不计时，恢复不延期
   heartbeatAt DateTime? @map("heartbeat_at") @db.Timestamptz
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
   game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
@@ -605,8 +605,8 @@ model EvaluationRun {
   status String @default("pending") @db.VarChar(16)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   completedAt DateTime? @map("completed_at") @db.Timestamptz
-  definition Json? @db.JsonB // 未完成时冻结 evaluator 输入定义；完成后仅保留平台版本引用
-  pendingResults Json @default("{}") @map("pending_results") @db.JsonB // 暂存判分及交付凭据，采用后清空
+  definition Json? @db.JsonB // 冻结 evaluator 定义；采用与上报均完成后仅保留引用
+  pendingResults Json @default("{}") @map("pending_results") @db.JsonB // 本地最终判分兼作待上报载荷，采用与上报均完成后清空
   deliveredEventIds String[] @default([]) @map("delivered_event_ids") @db.Uuid
   selection Json? @db.JsonB // 显式采用的外部 Score 身份；普通 evaluator 结果按 run/event 推导
   @@index([gameId, createdAt])

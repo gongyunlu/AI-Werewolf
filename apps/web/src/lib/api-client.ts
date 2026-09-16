@@ -56,6 +56,7 @@ export interface PersonaStrategyView {
 export interface AnalysisStatus {
   judgedCount: number;
   judgeableCount: number;
+  judgeComplete: boolean;
   reflectedCount: number;
   playerCount: number;
   narrativeReady: boolean;

@@ -5,7 +5,10 @@ import { z } from 'zod';
 import { WitchAntidoteNode } from '../game-engine/nodes/night/witch-antidote.node';
 import { FALLBACK_TEMPLATES, renderTemplate } from '../observability/prompt-templates';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 /** 决策前的思考轮是普通流式调用，这里只要求它产出一段非空思考。 */
 const thinkingStream = async () =>

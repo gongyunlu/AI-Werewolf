@@ -9,6 +9,10 @@ export interface ScoreConfigReference {
   id: string;
   name: string;
 }
+export interface ScoreDestination {
+  baseUrl: string;
+  publicKey?: string;
+}
 export interface ScoreReference {
   id: string;
   name: string;
@@ -73,10 +77,18 @@ function sameCategories(
   );
 }
 
-/** 成功回包仅表示接收；采用前还必须按完整身份回读 Scores v3。 */
+/** 上报以平台确认接收为完成；Scores v3 只用于显式读取或采用外部评分。 */
 @Injectable()
 export class LangfuseScoresService {
   constructor(private readonly config: ConfigService<Env, true>) {}
+
+  /** 离线冻结上报目标；密钥不进入业务记录，项目和评分配置由交付任务确认。 */
+  destination(): ScoreDestination {
+    return {
+      baseUrl: this.config.get('LANGFUSE_HOST').replace(/\/$/, ''),
+      publicKey: this.config.get('LANGFUSE_PUBLIC_KEY'),
+    };
+  }
 
   private async request<T>(path: string, body?: unknown): Promise<T> {
     const publicKey = this.config.get('LANGFUSE_PUBLIC_KEY');

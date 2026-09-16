@@ -1,3 +1,4 @@
+import { createTestExecution } from './helpers/execution-fixture';
 import { randomUUID } from 'node:crypto';
 import { ConflictException } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
@@ -53,7 +54,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       providers: [GameRecoveryService, { provide: PrismaService, useValue: prisma }],
     }).compile();
     recovery = module.get(GameRecoveryService);
-    rulesetId = randomUUID();
+    rulesetId = 'standard6p';
     await prisma.ruleset.create({
       data: { id: rulesetId, name: 'Recovery tests', playerCount: 1, definition: {} },
     });
@@ -67,10 +68,11 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   beforeEach(async () => {
     // Each example owns a game; every query below is scoped to that game.
     const game = await prisma.game.create({
-      data: { rulesetId, skillVersion: 'test', status: GAME_STATUSES.RUNNING },
+      data: { rulesetId, skillVersion: 'v1', status: GAME_STATUSES.RUNNING },
     });
     gameId = game.id;
-    execution = await recovery.create(
+    execution = await createTestExecution(
+      prisma,
       gameId,
       initialState,
       manifest,
@@ -78,8 +80,21 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
     );
   });
 
-  const run = <T>(callback: () => Promise<T>) =>
-    recovery.run(execution, new AbortController().signal, callback);
+  const run = async <T>(callback: () => Promise<T>) => {
+    const current = await prisma.gameExecution.findUniqueOrThrow({ where: { gameId } });
+    if (!current.dispatchPending && !current.owner && current.generation === execution.generation) {
+      await recovery.interrupt(gameId);
+      execution = await recovery.prepareResume(gameId);
+    }
+    return recovery.run(execution, new AbortController().signal, callback);
+  };
+
+  async function interruptStarted() {
+    const current = await prisma.gameExecution.findUnique({ where: { gameId } });
+    if (current?.dispatchPending && !current.owner)
+      await recovery.run(current, new AbortController().signal, async () => {});
+    return recovery.interrupt(gameId);
+  }
   const steps = () => prisma.gameExecutionStep.findMany({ where: { gameId } });
   const events = () => prisma.event.findMany({ where: { gameId }, orderBy: { sequence: 'asc' } });
 
@@ -210,6 +225,8 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
   it('缓存查询等待期间取消后，不返回已保存的模型结果', async () => {
     await run(() => recovery.value('cached-speech', async () => '已缓存的发言'));
+    await interruptStarted();
+    execution = await recovery.prepareResume(gameId);
     const controller = new AbortController();
     const read = prisma.gameExecutionStep.findUnique.bind(prisma.gameExecutionStep);
     const query = jest.spyOn(prisma.gameExecutionStep, 'findUnique').mockImplementationOnce((async (
@@ -267,18 +284,6 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
     throw new Error('Concurrent transaction did not reach the expected row lock');
   }
 
-  it('keeps the original state, prompts and deadline when creation is retried', async () => {
-    const retry = await recovery.create(
-      gameId,
-      { day: 99 },
-      { version: 1, prompts: { turn: { text: 'other prompt', version: 8 } } },
-      new Date(Date.now() + 900_000),
-    );
-    expect(decodeRecoveryValue(retry.initialState)).toEqual(initialState);
-    expect(decodeRecoveryValue(retry.manifest)).toEqual(manifest);
-    expect(retry.deadline).toEqual(execution.deadline);
-  });
-
   it('reuses frozen node state and saved model input/output after an unfinished node restarts', async () => {
     const input = jest.fn().mockResolvedValue({ prompt: 'original prompt', history: ['event-1'] });
     const model = jest
@@ -296,6 +301,8 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
     const restoredState = jest.fn();
     const restarted = new GameRecoveryService(prisma);
+    await interruptStarted();
+    execution = await restarted.prepareResume(gameId);
     const result = await restarted.run(execution, new AbortController().signal, () =>
       restarted.node(0, 'vote', { ...initialState, day: 99, players: new Map() }, async (state) => {
         restoredState(state);
@@ -554,7 +561,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
     );
     await started.promise;
     try {
-      expect(await recovery.interrupt(gameId)).toBe(true);
+      expect(await interruptStarted()).toBe(true);
       await recovery.prepareResume(gameId);
       const successor = await prisma.gameExecution.findUniqueOrThrow({ where: { gameId } });
       await recovery.run(successor, new AbortController().signal, async () => {
@@ -577,7 +584,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   it('fences domain writes after interruption before invoking the effect callback', async () => {
     const write = jest.fn((tx: Prisma.TransactionClient) => event(tx));
     await run(async () => {
-      await recovery.interrupt(gameId);
+      await interruptStarted();
       await expect(recovery.effect('vote', write)).rejects.toBeInstanceOf(ExecutionOwnershipError);
     });
     expect(write).not.toHaveBeenCalled();
@@ -586,6 +593,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('ignores a delayed interruption from a previous generation after a successor starts', async () => {
+    await run(async () => {});
     await recovery.interrupt(gameId, execution.generation);
     const successor = await recovery.prepareResume(gameId);
     await recovery.run(successor, new AbortController().signal, async () => {
@@ -616,7 +624,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
         });
       }),
     );
-    expect(await recovery.interrupt(gameId)).toBe(false);
+    expect(await interruptStarted()).toBe(false);
     expect(await prisma.game.findUniqueOrThrow({ where: { id: gameId } })).toMatchObject({
       status: GAME_STATUSES.FINISHED,
       endedAt,
@@ -649,7 +657,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
     let interruption: Promise<boolean> | undefined;
     try {
       const pid = await written.promise;
-      interruption = recovery.interrupt(gameId);
+      interruption = interruptStarted();
       await waitForBlockedTransaction(pid);
       expect((await prisma.game.findUniqueOrThrow({ where: { id: gameId } })).status).toBe(
         GAME_STATUSES.RUNNING,
@@ -686,7 +694,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
       }),
     );
     const pid = await fenced.promise;
-    const interruption = recovery.interrupt(gameId);
+    const interruption = interruptStarted();
     const outcomes = Promise.allSettled([finish, interruption]);
     try {
       await waitForBlockedTransaction(pid);
@@ -733,7 +741,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('returns an execution that can immediately run after resume', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const resumed = await recovery.prepareResume(gameId);
     await expect(
       recovery.run(resumed, new AbortController().signal, async () => 'resumed'),
@@ -742,7 +750,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('reuses one dispatch generation for concurrent resume requests before a worker claims it', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const outcomes = await Promise.all([
       recovery.prepareResume(gameId),
       recovery.prepareResume(gameId),
@@ -761,7 +769,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
   it('reuses the committed dispatch after the resume response is lost and the API restarts', async () => {
     const originalEvent = await run(() => recovery.effect('vote', (tx) => event(tx)));
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     await expect(
       (async () => {
         await recovery.prepareResume(gameId);
@@ -790,9 +798,10 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('fences a dispatch interrupted before delivery and creates only one replacement generation', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const firstDispatch = await recovery.prepareResume(gameId);
-    expect(await recovery.interrupt(gameId, firstDispatch.generation)).toBe(true);
+    expect(await recovery.interrupt(gameId, firstDispatch.generation)).toBe(false);
+    await recovery.renewDispatch(gameId, firstDispatch.generation);
     const afterInterruption = await prisma.gameExecution.findUniqueOrThrow({ where: { gameId } });
     const staleWorker = jest.fn().mockResolvedValue(undefined);
     await expect(
@@ -802,7 +811,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
     const replacement = await recovery.prepareResume(gameId);
     const replacementRetry = await recovery.prepareResume(gameId);
-    expect(replacement.generation).toBe(afterInterruption.generation + 1);
+    expect(replacement.generation).toBe(afterInterruption.generation);
     expect(replacementRetry).toEqual(replacement);
     expect(replacement.deadline).toEqual(execution.deadline);
     await expect(
@@ -811,7 +820,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('clears pending dispatch on claim and refuses resume both during and after that claim', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const prepared = await recovery.prepareResume(gameId);
     expect(prepared.dispatchPending).toBe(true);
     await recovery.run(prepared, new AbortController().signal, async () => {
@@ -832,7 +841,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('rolls back the running status when persisting pending dispatch fails', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const before = await prisma.gameExecution.findUniqueOrThrow({ where: { gameId } });
     await prisma.$executeRawUnsafe(
       `ALTER TABLE "${schema}"."game_executions" ADD CONSTRAINT recovery_reject_dispatch CHECK (NOT dispatch_pending) NOT VALID`,
@@ -853,7 +862,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('still validates the original deadline when retrying an unclaimed dispatch', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const prepared = await recovery.prepareResume(gameId);
     expect(prepared).toMatchObject({ dispatchPending: true });
     const expired = await prisma.gameExecution.update({
@@ -866,7 +875,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
   it('renewDispatch advances concurrent retries once and fences the replaced worker', async () => {
     const originalEvent = await run(() => recovery.effect('vote', (tx) => event(tx)));
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const prepared = await recovery.prepareResume(gameId);
     const [first, second] = await Promise.all([
       recovery.renewDispatch(gameId, prepared.generation),
@@ -892,7 +901,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('renewDispatch refuses claimed execution and a terminal game even with a stale dispatch flag', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const prepared = await recovery.prepareResume(gameId);
     await recovery.run(prepared, new AbortController().signal, async () => {
       const claimed = await prisma.gameExecution.findUniqueOrThrow({ where: { gameId } });
@@ -926,7 +935,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
   it('renewDispatch preserves the original pending dispatch when its transaction fails', async () => {
     await run(() => recovery.effect('vote', (tx) => event(tx)));
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     const prepared = await recovery.prepareResume(gameId);
     const gameBefore = await prisma.game.findUniqueOrThrow({ where: { id: gameId } });
     const stepsBefore = await steps();
@@ -966,7 +975,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
 
   it('rejects an unsupported checkpoint version without modifying recovery state', async () => {
     const stored = { ...manifest, version: 2 };
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     await prisma.gameExecution.update({
       where: { gameId },
       data: { manifest: encodeRecoveryValue(stored) },
@@ -980,7 +989,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('does not extend an expired original execution deadline', async () => {
-    await recovery.interrupt(gameId);
+    await interruptStarted();
     await prisma.gameExecution.update({
       where: { gameId },
       data: { deadline: new Date(Date.now() - 1_000) },

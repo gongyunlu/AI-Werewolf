@@ -1,3 +1,6 @@
+import { OpenAIClient } from '@langchain/openai';
+import { isNativeError } from 'node:util/types';
+
 export type ModelFailureCode = 'transient' | 'invalid_output' | 'circuit_open';
 export type ModelCallMode = 'invoke' | 'stream';
 type TimeoutPhase = 'first_chunk' | 'idle' | 'total';
@@ -10,12 +13,13 @@ export interface ModelFailureDetails {
   httpStatus?: number;
   providerCode?: string;
   errorType?: string;
+  causes?: Array<{ errorType: string; code?: string }>;
   finishReason?: string;
   inputTokens?: number;
   outputTokens?: number;
 }
 
-/** 只有模型调用失败可以交给游戏层选择合法替代动作。 */
+/** 失败分类决定调用策略，不生成替代行动。 */
 export class ModelCallError extends Error {
   constructor(
     readonly code: ModelFailureCode,
@@ -71,7 +75,9 @@ function classify(error: unknown): 'transient' | 'invalid_output' | 'fatal' {
   if (details.code === 'ServerOverloaded' || details.code === 'RequestBurstTooFast')
     return 'transient';
   if (
-    ['APIConnectionError', 'APIConnectionTimeoutError', 'TimeoutError'].includes(error.name) ||
+    // SDK 的连接异常（含超时子类）沿用 name="Error"，必须按真实类型识别。
+    error instanceof OpenAIClient.APIConnectionError ||
+    error.name === 'TimeoutError' ||
     ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN'].includes(details.code ?? '')
   )
     return 'transient';
@@ -185,11 +191,27 @@ export class ModelCallGuard {
       if (kind === 'fatal') throw error;
       const httpStatus = (error as { status?: number }).status;
       const providerCode = (error as { code?: unknown }).code;
+      const causes: NonNullable<ModelFailureDetails['causes']> = [];
+      // SDK → fetch → 网络错误；只取类型和错误码，避免原因消息带出 URL、凭据或响应正文。
+      for (
+        let cause = error instanceof Error ? error.cause : undefined;
+        (cause instanceof Error || isNativeError(cause)) && causes.length < 3;
+        cause = cause.cause
+      ) {
+        const code = (cause as Error & { code?: unknown }).code;
+        causes.push({
+          errorType: cause.name === 'Error' ? cause.constructor.name : cause.name,
+          ...(typeof code === 'string' ? { code } : {}),
+        });
+      }
       throw new ModelCallError(kind, { cause: error }, circuit.openUntil || undefined, {
         elapsedMs: Date.now() - startedAt,
         ...(typeof httpStatus === 'number' ? { httpStatus } : {}),
         ...(typeof providerCode === 'string' ? { providerCode } : {}),
-        ...(error instanceof Error ? { errorType: error.name } : {}),
+        ...(error instanceof Error
+          ? { errorType: error.name === 'Error' ? error.constructor.name : error.name }
+          : {}),
+        ...(causes.length ? { causes } : {}),
         ...(controller.signal.aborted
           ? { reason: 'timeout', ...expired }
           : kind === 'invalid_output'

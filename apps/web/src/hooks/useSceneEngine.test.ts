@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useSceneEngine } from './useSceneEngine';
-import type { EventsCommittedEvent, SceneSnapshot } from '@/types/sse';
+import type { EventsCommittedEvent, SceneSnapshot, SseMessage } from '@/types/sse';
 
 function finalScene(eventId: string, sceneId: string, eventSequence = 1): SceneSnapshot {
   return {
@@ -30,6 +30,61 @@ function committed(scenes: SceneSnapshot[]): EventsCommittedEvent {
 }
 
 describe('useSceneEngine', () => {
+  it.each([
+    { type: 'game.finished', winner: 'unknown' },
+    { ...committed([]), gameFinished: { winner: 'villager' } },
+  ] satisfies SseMessage[])(
+    '收到 $type 终态后清除生成中预览，迟到片段和关闭不能恢复它',
+    (message) => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useSceneEngine('god'));
+        act(() => {
+          result.current.handleMessage(committed([finalScene('saved', 'saved-scene')]));
+          result.current.handleMessage({
+            type: 'scene.open',
+            sequence: 11,
+            sceneId: 'unfinished',
+            sceneType: 'vote',
+            visibility: 'public',
+            initialContent: '未提交的投票预览',
+          });
+          result.current.handleMessage({
+            type: 'scene.close',
+            sequence: 12,
+            sceneId: 'unfinished',
+            thinkingDurationMs: 10,
+            contentDurationMs: 20,
+          });
+          result.current.handleMessage(message);
+        });
+        expect(result.current.state.gameOver).toBe(true);
+        expect(result.current.state.activeScene).toBeNull();
+        act(() => {
+          result.current.handleMessage({
+            type: 'scene.append',
+            sequence: 13,
+            sceneId: 'unfinished',
+            contentType: 'content',
+            token: '迟到片段',
+          });
+          result.current.handleMessage({
+            type: 'scene.close',
+            sequence: 14,
+            sceneId: 'unfinished',
+            thinkingDurationMs: 10,
+            contentDurationMs: 20,
+          });
+          vi.runAllTimers();
+        });
+        expect(result.current.state.activeScene).toBeNull();
+        expect(result.current.state.closedScenes.map((scene) => scene.eventId)).toEqual(['saved']);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('最终卡片接收迟到耗时，再次交付不重置耗时或追加卡片', () => {
     const { result } = renderHook(() => useSceneEngine('god'));
     act(() => {

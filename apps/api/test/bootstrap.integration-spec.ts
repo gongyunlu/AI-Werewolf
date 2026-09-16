@@ -8,7 +8,10 @@ import { GamesService } from '../src/games/games.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { createMockGame, type MockGame } from '../src/game-engine/testing/mock-game-harness';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 describe('首版正式迁移、seed 与持久化完整对局', () => {
   let database: Awaited<ReturnType<typeof createLearningTestDatabase>>;
@@ -159,9 +162,14 @@ describe('首版正式迁移、seed 与持久化完整对局', () => {
     await seed();
     const agents = await prisma.agent.findMany({ orderBy: { name: 'asc' } });
     const broadcaster = { getOrCreate: jest.fn() };
+    const executor = {
+      prepareExecution: (...args: Parameters<MockGame['executor']['prepareExecution']>) =>
+        game!.executor.prepareExecution(...args),
+    };
+    let game: MockGame | undefined;
     const games = new GamesService(
       prisma,
-      {} as never,
+      executor as never,
       broadcaster as never,
       { get: () => 'https://mock.invalid' } as never,
     );
@@ -188,10 +196,9 @@ describe('首版正式迁移、seed 与持久化完整对局', () => {
         where: { id: player.id },
         data: { modelName: 'mock-seat-' + player.seatNo },
       });
-    expect((await games.startGame(created.id)).status).toBe(GAME_STATUSES.RUNNING);
-    let game: MockGame | undefined;
     try {
       game = await createMockGame('villager', {}, { prisma, gameId: created.id, recovery: true });
+      expect((await games.startGame(created.id)).status).toBe(GAME_STATUSES.RUNNING);
       await game.run();
       expect(await prisma.game.findUniqueOrThrow({ where: { id: created.id } })).toMatchObject({
         status: GAME_STATUSES.FINISHED,

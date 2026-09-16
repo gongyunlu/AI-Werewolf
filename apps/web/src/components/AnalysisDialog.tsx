@@ -73,7 +73,7 @@ export function AnalysisDialog({ gameId, onOpenChange, experiment = false }: Pro
     [gameId],
   );
 
-  const runAll = useCallback(() => run({ judge: true, reflect: true, force: true }), [run]);
+  const runAll = useCallback(() => run({ judge: true, reflect: true, force: false }), [run]);
   const runJudgeOnly = useCallback(() => run({ judge: true, reflect: false, force: true }), [run]);
   const runReflectOnly = useCallback(
     () => run({ judge: false, reflect: true, force: true }),
@@ -101,6 +101,18 @@ export function AnalysisDialog({ gameId, onOpenChange, experiment = false }: Pro
               </span>
             </div>
             <div className={styles.statusRow}>
+              <span className={styles.statusLabel}>评分采用</span>
+              <span className={styles.statusValue}>
+                {status
+                  ? status.judgeComplete
+                    ? '已采用'
+                    : status.judgedCount === status.judgeableCount
+                      ? '待采用'
+                      : '判分未完成'
+                  : '—'}
+              </span>
+            </div>
+            <div className={styles.statusRow}>
               <span className={styles.statusLabel}>玩家反思</span>
               <span className={styles.statusValue}>
                 {status ? `${status.reflectedCount} / ${status.playerCount}` : '—'}
@@ -120,10 +132,12 @@ export function AnalysisDialog({ gameId, onOpenChange, experiment = false }: Pro
             </div>
           </div>
 
+          <p className={styles.hint}>评分进度包含已保存的判分，评分采用完成后才开始复盘与反思。</p>
+
           <p className={styles.hint}>
             {experiment
               ? '评分包含决策与发言。反思仅生成本局分析，不写回经验、对手建模或全局记忆。两个操作分别执行。'
-              : '开始分析会强制全量重跑评分与反思。重跑评分只重新打分决策与发言（复用已有反思）；重跑反思只重新复盘与玩家反思（复用已有评分），并会把本局此前产出的记忆标记为失效。'}
+              : '开始/继续分析会复用已保存的评分，补齐未完成的分析。重跑评分会重新调用裁判；重跑反思会重新生成复盘与玩家反思，并将本局此前产出的记忆标记为失效。'}
           </p>
 
           {error && (
@@ -169,7 +183,7 @@ export function AnalysisDialog({ gameId, onOpenChange, experiment = false }: Pro
                 aria-busy={loading}
                 className={styles.primaryButton}
               >
-                {loading ? '投递中...' : '开始分析'}
+                {loading ? '投递中...' : '开始/继续分析'}
               </Button>
             )}
           </div>

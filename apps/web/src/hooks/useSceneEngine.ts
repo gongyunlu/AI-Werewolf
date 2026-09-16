@@ -97,7 +97,10 @@ export function sceneReducer(state: SceneState, action: Action): SceneState {
         ...state,
         closedScenes,
         activeScene:
-          state.activeScene && aliases.has(state.activeScene.sceneId) ? null : state.activeScene,
+          action.winner !== undefined ||
+          (state.activeScene && aliases.has(state.activeScene.sceneId))
+            ? null
+            : state.activeScene,
         gameOver: state.gameOver || action.winner !== undefined,
         winner: action.winner ?? state.winner,
       };
@@ -116,7 +119,7 @@ export function sceneReducer(state: SceneState, action: Action): SceneState {
         ),
       };
     case 'GAME_OVER':
-      return { ...state, gameOver: true, winner: action.winner };
+      return { ...state, activeScene: null, gameOver: true, winner: action.winner };
     default:
       return state;
   }
@@ -194,11 +197,17 @@ export function useSceneEngine(perspective: string) {
       if (msg.type === 'events.committed') {
         for (const scene of msg.scenes) committedAliasesRef.current.add(scene.sceneId);
         const aliases = new Set(msg.scenes.map((scene) => scene.sceneId));
-        if (pendingCloseRef.current && aliases.has(pendingCloseRef.current.sceneId)) {
+        if (
+          msg.gameFinished ||
+          (pendingCloseRef.current && aliases.has(pendingCloseRef.current.sceneId))
+        ) {
           cancelCloseTimer();
           pendingCloseRef.current = null;
         }
-        if (activeSceneRef.current && aliases.has(activeSceneRef.current.sceneId))
+        if (
+          msg.gameFinished ||
+          (activeSceneRef.current && aliases.has(activeSceneRef.current.sceneId))
+        )
           activeSceneRef.current = null;
         dispatch({
           type: 'COMMITTED',
@@ -269,7 +278,10 @@ export function useSceneEngine(perspective: string) {
         pendingCloseRef.current = closed;
         closeTimerRef.current = setTimeout(flushPendingClose, HOLD_UNTIL_MS[scene.sceneType] ?? 0);
       } else if (msg.type === 'game.finished') {
-        flushPendingClose();
+        // 终态只保留已完成的历史，未提交预览不能被延迟关闭定时器变成最终卡片。
+        cancelCloseTimer();
+        pendingCloseRef.current = null;
+        activeSceneRef.current = null;
         dispatch({ type: 'GAME_OVER', winner: msg.winner });
       }
     },

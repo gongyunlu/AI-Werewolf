@@ -1,6 +1,5 @@
-import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
-import { GameQueueService } from './game-queue.service';
+import { GAME_PRODUCER_QUEUE, GameQueueService } from './game-queue.service';
 
 describe('GameQueueService', () => {
   it('同一对局只执行一次引擎，但允许 FINISHED 后重试分析投递', async () => {
@@ -9,7 +8,7 @@ describe('GameQueueService', () => {
       close: jest.fn(),
     };
     const moduleRef = await Test.createTestingModule({
-      providers: [GameQueueService, { provide: getQueueToken('game-queue'), useValue: queue }],
+      providers: [GameQueueService, { provide: GAME_PRODUCER_QUEUE, useValue: queue }],
     }).compile();
     const service = moduleRef.get(GameQueueService);
 

@@ -18,6 +18,7 @@ import { aggregatePlayerScores as aggregateScores } from './player-score';
 import { readExperiment } from './experiment-snapshot';
 import { ExperimentInvalidError } from './experiment-integrity';
 import { evaluationCompleteness, judgeableEventIds } from './evaluation-completeness';
+import { EVALUATION_VERSION } from './evaluation-version';
 
 import {
   EvaluationProjectionService,
@@ -31,7 +32,7 @@ const EVIDENCE_POLICY =
 /**
  * LLM-as-judge 决策质量评估服务。
  *
- * 对单个决策事件做「决策时点视角还原」，调用冻结的 judge 定义，结果交付 Langfuse 后由完整批次生成最小业务投影。
+ * 对单个决策事件做「决策时点视角还原」，调用冻结的 judge 定义；整批采用本地结果，上报独立进行。
  */
 @Injectable()
 export class JudgeService {
@@ -460,7 +461,6 @@ export class JudgeService {
 
   async adoptScores(gameId: string, input: AdoptScoresInput): Promise<void> {
     await this.projection.adopt(gameId, input);
-    await this.aggregatePlayerScores(gameId);
   }
 
   /** 状态与恢复共用事件覆盖校验；旧局无批次时只用于判断是否需要补评。 */
@@ -490,11 +490,23 @@ export class JudgeService {
         const evaluation = evaluationCompleteness({ run, events, judgments });
         const scored = new Set(judgments.map((j) => j.eventId));
         const missing = run ? evaluation.missing : expected.filter((id) => !scored.has(id));
+        const missingSet = new Set(missing);
+        const saved = run?.pendingResults as Record<string, { result?: unknown }> | undefined;
+        const currentResults =
+          run?.status === 'pending' &&
+          (run.definition as unknown as EvaluationDefinition | null)?.domainVersion ===
+            EVALUATION_VERSION;
+        // 判分进度包含最新批次已保存的结果；能否消费仍由整批采用的完整度决定。
+        const judgedCount = expected.filter(
+          (id) =>
+            !missingSet.has(id) ||
+            (currentResults && run.expectedEventIds.includes(id) && saved?.[id]?.result),
+        ).length;
         return {
           runId: run?.id,
           complete: run ? evaluation.complete : missing.length === 0,
           judgeableCount: expected.length,
-          judgedCount: expected.length - missing.length,
+          judgedCount,
         };
       },
       { isolationLevel: 'RepeatableRead' },
@@ -515,23 +527,18 @@ export class JudgeService {
   }
 
   /**
-   * 回填本局 memory_usages 的 rewardScore：把注入过的经验关联到它服务的那次行为的评分。
+   * 显式修复已完成批次的派生数据：经验奖励、个人分和 MVP 必须一起提交。
    *
    * 新数据在行为 Event 写入后记录 eventId，可精确关联同日多次发言；旧数据 eventId 为 NULL，
    * 仅在 (playerId, actionType, day) 恰好一条真实 Event 且该 Event 有评分时保守兼容。
    * 「唯一评分」本身不够：同日弃权 + PK 有效票可能只有一条评分但有两次行为。每次读取全部 usage，
    * 因此 force 重评后会刷新旧 reward；不再可唯一匹配的旧样本会清空，避免保留陈旧分数。
    */
-  async backfillRewards(gameId: string): Promise<number> {
-    return this.prisma.$transaction(async (tx) => {
+  async refreshScores(gameId: string): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`evaluation/${gameId}`}, 0))`;
-      return backfillMemoryRewards(tx, gameId);
+      await backfillMemoryRewards(tx, gameId);
+      await aggregateScores(tx, gameId);
     });
-  }
-
-  /** 聚合个人过程分 + 选 MVP（实现见 player-score.ts 纯函数） */
-  async aggregatePlayerScores(gameId: string): Promise<void> {
-    const { scored, total } = await aggregateScores(this.prisma, gameId);
-    this.logger.log({ gameId, scored, total }, '个人过程分聚合完成');
   }
 }

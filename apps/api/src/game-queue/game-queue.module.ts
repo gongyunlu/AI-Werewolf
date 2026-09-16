@@ -1,13 +1,18 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { GameQueueService } from './game-queue.service';
+import {
+  GameQueueService,
+  GAME_PRODUCER_QUEUE,
+  createGameProducerQueue,
+} from './game-queue.service';
 import { GameWorkerService } from './game-worker.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { GameExecutorModule } from '../game-executor/game-executor.module';
 import type { Env } from '../config/env.validation';
 import { SseModule } from '../sse/sse.module';
 import { GameRecoveryModule } from '../game-recovery/game-recovery.module';
+import { GameDispatchService } from './game-dispatch.service';
 
 /**
  * 游戏队列模块
@@ -21,19 +26,13 @@ import { GameRecoveryModule } from '../game-recovery/game-recovery.module';
   imports: [
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService<Env, true>) => {
-        const redisUrl = configService.get('REDIS_URL', { infer: true });
-        const url = new URL(redisUrl);
-
-        return {
-          connection: {
-            host: url.hostname,
-            port: parseInt(url.port) || 6379,
-            password: url.password || undefined,
-            maxRetriesPerRequest: null,
-          },
-        };
-      },
+      useFactory: (configService: ConfigService<Env, true>) => ({
+        connection: {
+          // 与生产者使用同一完整 URL，避免数据库、认证或 TLS 配置被手工解析遗漏。
+          url: configService.get('REDIS_URL', { infer: true }),
+          maxRetriesPerRequest: null,
+        },
+      }),
       inject: [ConfigService],
     }),
     BullModule.registerQueue({
@@ -45,7 +44,17 @@ import { GameRecoveryModule } from '../game-recovery/game-recovery.module';
     SseModule,
     GameRecoveryModule,
   ],
-  providers: [GameQueueService, GameWorkerService],
-  exports: [GameQueueService],
+  providers: [
+    GameQueueService,
+    GameWorkerService,
+    GameDispatchService,
+    {
+      provide: GAME_PRODUCER_QUEUE,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>) =>
+        createGameProducerQueue(config.get('REDIS_URL')),
+    },
+  ],
+  exports: [GameQueueService, GameDispatchService],
 })
 export class GameQueueModule {}

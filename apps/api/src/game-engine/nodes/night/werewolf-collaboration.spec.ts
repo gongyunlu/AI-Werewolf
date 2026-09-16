@@ -2,7 +2,10 @@ import { pairedWolfOrder, wolfDiscussion } from './werewolf-collaboration';
 import { createGameState, createPlayer } from '../../testing/test-utils';
 import { ModelCallError } from '@/llm/model-call-guard';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 it('配对讨论顺序只由 pair/day/seat 决定，不受输入顺序及玩家 UUID 影响', () => {
   const on = [

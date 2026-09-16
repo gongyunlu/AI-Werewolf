@@ -82,7 +82,7 @@ export class SettlementService {
       );
 
       // 正常结算时 role/faction 已在 initialize 阶段分配，?? '' 仅为兜底满足非空约束
-      // score 不在此写入：个人分由 judge 过程分聚合（JudgeService.aggregatePlayerScores）
+      // score 不在此写入：评分整批采用时统一写入个人分与 MVP。
       // 在赛后异步落库，结算只负责胜负/存活/投票等客观统计。
       await this.prisma.agentPerformance.upsert({
         where: { gameId_playerId: { gameId, playerId: p.id } },

@@ -5,7 +5,10 @@ import type { Event } from '@/generated/prisma/client';
 import { createMockGame, type MockGame } from './mock-game-harness';
 import type { ModelRequest } from './scripted-game-model';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 const content = (event: Event) => event.content as Record<string, unknown>;
 const unavailable = () => Object.assign(new Error('mock provider unavailable'), { status: 503 });

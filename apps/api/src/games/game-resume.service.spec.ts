@@ -2,6 +2,7 @@ import { ConflictException } from '@nestjs/common';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
 import { GameQueueService, gameJobId } from '../game-queue/game-queue.service';
 import { GameResumeService } from './game-resume.service';
+import { GameDispatchService } from '../game-queue/game-dispatch.service';
 
 const gameId = 'game-1';
 
@@ -40,7 +41,11 @@ function createHarness() {
   };
   const prisma = {
     gameExecution: {
-      findUnique: jest.fn().mockImplementation(async () => ({ generation: state.generation })),
+      findUnique: jest.fn().mockImplementation(async () => ({
+        generation: state.generation,
+        dispatchPending: state.dispatchPending,
+        game: { status: state.status },
+      })),
     },
   };
   const queue = new GameQueueService(bullQueue as never, prisma as never);
@@ -64,7 +69,11 @@ function createHarness() {
   const games = {
     getGameById: jest.fn().mockImplementation(async () => ({ id: gameId, ...state })),
   };
-  const service = new GameResumeService(queue, recovery as never, games as never);
+  const service = new GameResumeService(
+    new GameDispatchService(prisma as never, queue, recovery as never),
+    recovery as never,
+    games as never,
+  );
   return { service, bullQueue, queue, recovery, games, previousJob, state, jobs };
 }
 

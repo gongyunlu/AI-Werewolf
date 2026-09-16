@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import styles from './GameWatchPage.module.css';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { PlayerCard } from '@/components/game-watch/PlayerCard';
 import { SceneCard } from '@/components/game-watch/SceneCard';
 import { ActiveSceneCard } from '@/components/game-watch/ActiveSceneCard';
@@ -14,7 +15,7 @@ import { apiClient } from '@/lib/api-client';
 import type { GameListItem } from '@/types/game';
 import type { PlayerDeathSnapshot, SseMessage } from '@/types/sse';
 import { GAME_STATUSES } from '@ai-werewolf/shared';
-import { Play } from 'lucide-react';
+import { CircleAlert, Play } from 'lucide-react';
 
 const PERSPECTIVE_LABELS: Record<string, string> = {
   god: '上帝视角',
@@ -105,6 +106,7 @@ function GameWatchContent({ gameId, perspective }: { gameId?: string; perspectiv
   // 中止后刷新则读 DB status=aborted——两种都归为「对局已中止」，与正常结束分开呈现。
   const isAborted =
     game?.status === GAME_STATUSES.ABORTED || (state.gameOver && state.winner === 'unknown');
+  const hasEnded = isAborted || state.gameOver || game?.status === GAME_STATUSES.FINISHED;
 
   useGameStream(gameId ?? '', perspective, onMessage, {
     enabled: !!game && game.id === gameId && game.status !== GAME_STATUSES.CREATED,
@@ -161,7 +163,8 @@ function GameWatchContent({ gameId, perspective }: { gameId?: string; perspectiv
   const rightPlayers = players.filter((_, i) => i >= half);
 
   // 获取当前活动场景的演员信息
-  const activeScene = state.activeScene;
+  // 轮询也能先于 SSE 确认终态，此时不能继续展示生成中的卡片。
+  const activeScene = hasEnded ? null : state.activeScene;
   const activeActorId = activeScene?.actorId;
   const activeActor = activeActorId ? players.find((p) => p.id === activeActorId) : null;
 
@@ -197,6 +200,18 @@ function GameWatchContent({ gameId, perspective }: { gameId?: string; perspectiv
           <Badge variant="outline">{PERSPECTIVE_LABELS[perspective] ?? perspective}</Badge>
         </div>
       </div>
+
+      {isAborted && (
+        <div className="px-6 pt-4">
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertTitle>对局已中止</AlertTitle>
+            <AlertDescription>
+              本局未正常完成，已停止生成。你可以查看已保存的对局记录。
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
 
       {/* 三栏布局 */}
       <div className={styles.columns}>
@@ -237,7 +252,7 @@ function GameWatchContent({ gameId, perspective }: { gameId?: string; perspectiv
 
           {/* 场景流 */}
           <div className={styles.sceneFlow}>
-            {state.closedScenes.length === 0 && !activeScene && (
+            {state.closedScenes.length === 0 && !activeScene && !hasEnded && (
               <div className={styles.emptyState}>
                 <span className={styles.emptyIcon} aria-hidden="true">
                   ◌
@@ -264,14 +279,14 @@ function GameWatchContent({ gameId, perspective }: { gameId?: string; perspectiv
                 />
               );
             })}
-            {state.activeScene && (
+            {activeScene && (
               <ActiveSceneCard
-                sceneType={state.activeScene.sceneType}
-                actorId={state.activeScene.actorId}
+                sceneType={activeScene.sceneType}
+                actorId={activeScene.actorId}
                 actorName={activeActor?.displayName}
                 actorSeatNo={activeActor?.seatNo ?? undefined}
-                thinking={state.activeScene.thinking}
-                content={state.activeScene.content}
+                thinking={activeScene.thinking}
+                content={activeScene.content}
                 isTyping
               />
             )}

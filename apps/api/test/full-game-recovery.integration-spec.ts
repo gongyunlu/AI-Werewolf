@@ -8,8 +8,12 @@ import { createMockGame, type MockGame } from '../src/game-engine/testing/mock-g
 import { MockGameStore } from '../src/game-engine/testing/mock-game-store';
 import { ModelCallError } from '../src/llm/model-call-guard';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
+import { GamesService } from '../src/games/games.service';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 function deferred() {
   let resolve!: () => void;
@@ -59,7 +63,7 @@ describe('standard six player recovery through executor, engine and agent runtim
       data: {
         rulesetId: 'standard6p',
         skillVersion: 'v1',
-        status: 'running',
+        status: 'initialized',
       },
     });
     gameId = row.id;
@@ -77,6 +81,9 @@ describe('standard six player recovery through executor, engine and agent runtim
     }
     config = { GAME_MAX_DURATION_MS: 600_000, LLM_CALL_TIMEOUT_MS: 10_000 };
     game = await start();
+    await new GamesService(prisma, game.executor, game.broadcaster as never, {} as never).startGame(
+      gameId,
+    );
   });
 
   afterEach(async () => {

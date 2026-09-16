@@ -22,6 +22,9 @@ import { EventBusService } from '../event-bus/event-bus.service';
 import { GameAnalysisService } from '../reflection/game-analysis.service';
 import { PromptService } from '../observability/prompt.service';
 import { PostGameAnalysisError } from './game-executor.exception';
+import type { Game, Player } from '../generated/prisma/client';
+import { readExperiment } from '../evaluation/experiment-snapshot';
+import type { RecoveryManifest } from '../game-recovery/game-recovery.service';
 
 /**
  * 游戏执行服务
@@ -49,6 +52,31 @@ export class GameExecutorService {
     private readonly engineFactory: GameEngineFactory,
     @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
+
+  /** 外部输入在接受启动前准备；失败时不把对局留在 running。 */
+  async prepareExecution(game: Game & { players: Player[] }) {
+    if (!ALL_PRESETS[game.rulesetId]) throw new Error(`不支持规则集 ${game.rulesetId}`);
+    await this.agentRuntime.validateRequiredSkills({
+      rulesetId: game.rulesetId,
+      skillVersion: game.skillVersion,
+      roles: game.players.map((player) => {
+        if (!player.role || !player.faction || !player.seatNo)
+          throw new Error('启动前必须完成角色与座次分配');
+        return player.role;
+      }),
+    });
+    const manifest: RecoveryManifest = {
+      version: 1,
+      prompts:
+        readExperiment(game.experiment)?.prompts ??
+        (await this.promptService.captureSnapshot([
+          ...PLAYER_TURN_PROMPT_NAMES,
+          PROMPT_NAMES.summarizerGlobalSummary,
+          PROMPT_NAMES.summarizerJudgmentHuman,
+        ])),
+    };
+    return { initialState: this.buildInitialState(game), manifest };
+  }
 
   /**
    * 执行游戏对局
@@ -83,33 +111,18 @@ export class GameExecutorService {
       throw new Error(`ruleset ${game.ruleset.id} 不支持，请检查数据一致性`);
     }
 
-    await this.agentRuntime.validateRequiredSkills({
-      rulesetId: game.ruleset.id,
-      skillVersion: game.skillVersion,
-      roles: game.players.map((player) => player.role).filter((role): role is string => !!role),
-    });
+    if (!this.recovery)
+      await this.agentRuntime.validateRequiredSkills({
+        rulesetId: game.ruleset.id,
+        skillVersion: game.skillVersion,
+        roles: game.players.map((player) => player.role).filter((role): role is string => !!role),
+      });
 
-    // 旧对局没有执行记录，不能通过重新初始化来冒充恢复。
+    // 所有队列对局都必须先持久接受启动；执行记录存在不代表允许中断后恢复。
     let execution;
-    if (this.recovery && game.rulesetId === 'standard6p' && !game.experiment) {
+    if (this.recovery) {
       execution = await this.prisma.gameExecution.findUnique({ where: { gameId } });
-      if (!execution) {
-        if (await this.prisma.event.count({ where: { gameId } }))
-          throw new ConflictException('已有事件的历史对局缺少执行检查点，不能从第一夜重新执行');
-        execution = await this.recovery.create(
-          gameId,
-          initialState,
-          {
-            version: 1,
-            prompts: await this.promptService.captureGameSnapshot(gameId, [
-              ...PLAYER_TURN_PROMPT_NAMES,
-              PROMPT_NAMES.summarizerGlobalSummary,
-              PROMPT_NAMES.summarizerJudgmentHuman,
-            ]),
-          },
-          new Date(Date.now() + this.configService.get('GAME_MAX_DURATION_MS')),
-        );
-      }
+      if (!execution) throw new ConflictException('对局缺少已接受的启动记录，不能从第一夜重新执行');
     }
     if (execution) {
       if (generation !== undefined && execution.generation !== generation)
@@ -137,7 +150,12 @@ export class GameExecutorService {
       };
       const finalState =
         execution && this.recovery
-          ? await this.recovery.run(execution, abortController.signal, run)
+          ? await this.recovery.run(
+              execution,
+              abortController.signal,
+              run,
+              this.configService.get('GAME_MAX_DURATION_MS'),
+            )
           : await run(abortController.signal);
 
       // 6. 投递赛后分析。用显式错误类型告诉 Worker「引擎已完整返回，只需重试分析」，

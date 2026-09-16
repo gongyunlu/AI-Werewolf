@@ -1,8 +1,6 @@
-import { JudgeService } from './judge.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
-import type { EvaluationProjectionService } from './evaluation-projection.service';
+import type { PrismaService } from '../prisma/prisma.service';
+import { backfillMemoryRewards } from './memory-reward';
+import { aggregatePlayerScores } from './player-score';
 
 /** mock PrismaService（仅覆盖 reward 回填与个人分聚合用到的读写面） */
 function createMockPrisma() {
@@ -21,24 +19,13 @@ function createMockPrisma() {
   return db;
 }
 
-/** 本文件只覆盖 reward 回填与个人分聚合，提示词、模型调用与评分投影都不参与这些路径。 */
-function createJudgeService(db: ReturnType<typeof createMockPrisma>) {
-  return new JudgeService(
-    db as unknown as PrismaService,
-    {} as unknown as PromptService,
-    {} as unknown as StructuredLlmService,
-    {} as unknown as EvaluationProjectionService,
-  );
-}
-
-describe('JudgeService.backfillRewards', () => {
+describe('backfillMemoryRewards', () => {
   it('只回填有排序消费者的记忆，不再读取或维护攻略分数副本', async () => {
     const db = createMockPrisma();
     db.decisionJudgment.findMany.mockResolvedValue([]);
     db.memoryUsage.findMany.mockResolvedValue([]);
     db.knowledgeUsage.findMany.mockResolvedValue([]);
-    const judge = createJudgeService(db);
-    await judge.backfillRewards('g');
+    await backfillMemoryRewards(db as unknown as PrismaService, 'g');
     expect(db.knowledgeUsage.findMany).not.toHaveBeenCalled();
     expect(db.knowledgeUsage.update).not.toHaveBeenCalled();
   });
@@ -59,19 +46,16 @@ describe('JudgeService.backfillRewards', () => {
     };
     db.memoryUsage.findMany.mockResolvedValue([usage]);
     db.knowledgeUsage.findMany.mockResolvedValue([usage]);
-    const judge = createJudgeService(db);
-    await judge.backfillRewards('g');
+    await backfillMemoryRewards(db as unknown as PrismaService, 'g');
     for (const table of [db.memoryUsage])
       expect(table.update).toHaveBeenCalledWith({ where: { id: 'u' }, data: { rewardScore: 88 } });
   });
-  let service: JudgeService;
   let prisma: ReturnType<typeof createMockPrisma>;
 
   beforeEach(() => {
     prisma = createMockPrisma();
     // 攻略使用关系保留历史读取桩，本路径不再读取分数副本。
     (prisma.knowledgeUsage.findMany as jest.Mock).mockResolvedValue([]);
-    service = createJudgeService(prisma);
   });
 
   it('通过 eventId 精确回填同一天的多条发言', async () => {
@@ -98,7 +82,7 @@ describe('JudgeService.backfillRewards', () => {
       },
     ]);
 
-    const n = await service.backfillRewards('g1');
+    const n = await backfillMemoryRewards(prisma as unknown as PrismaService, 'g1');
 
     expect(n).toBe(2);
     expect(prisma.memoryUsage.update).toHaveBeenNthCalledWith(1, {
@@ -126,7 +110,7 @@ describe('JudgeService.backfillRewards', () => {
       },
     ]);
 
-    const n = await service.backfillRewards('g1');
+    const n = await backfillMemoryRewards(prisma as unknown as PrismaService, 'g1');
 
     expect(n).toBe(1);
     expect(prisma.memoryUsage.update).toHaveBeenCalledWith({
@@ -153,7 +137,7 @@ describe('JudgeService.backfillRewards', () => {
       { id: 'e1', actorId: 'p1', actionType: 'vote', day: 1 },
     ]);
 
-    const n = await service.backfillRewards('g1');
+    const n = await backfillMemoryRewards(prisma as unknown as PrismaService, 'g1');
 
     expect(n).toBe(1);
     expect(prisma.memoryUsage.update).toHaveBeenCalledWith({
@@ -182,7 +166,7 @@ describe('JudgeService.backfillRewards', () => {
       { id: 'e2', actorId: 'p1', actionType: 'speech', day: 1 },
     ]);
 
-    const n = await service.backfillRewards('g1');
+    const n = await backfillMemoryRewards(prisma as unknown as PrismaService, 'g1');
 
     expect(n).toBe(0);
     expect(prisma.memoryUsage.update).toHaveBeenCalledWith({
@@ -210,7 +194,7 @@ describe('JudgeService.backfillRewards', () => {
       { id: 'pk-vote', actorId: 'p1', actionType: 'vote', day: 1 },
     ]);
 
-    await expect(service.backfillRewards('g1')).resolves.toBe(0);
+    await expect(backfillMemoryRewards(prisma as unknown as PrismaService, 'g1')).resolves.toBe(0);
     expect(prisma.memoryUsage.update).toHaveBeenCalledWith({
       where: { id: 'u1' },
       data: { rewardScore: null },
@@ -218,13 +202,11 @@ describe('JudgeService.backfillRewards', () => {
   });
 });
 
-describe('JudgeService.aggregatePlayerScores', () => {
-  let service: JudgeService;
+describe('aggregatePlayerScores', () => {
   let prisma: ReturnType<typeof createMockPrisma>;
 
   beforeEach(() => {
     prisma = createMockPrisma();
-    service = createJudgeService(prisma);
   });
 
   it('决策与发言各占 50% 加权合成，最高分当选 MVP', async () => {
@@ -242,7 +224,7 @@ describe('JudgeService.aggregatePlayerScores', () => {
       { playerId: 'p2', isWinner: true, survivalDays: 4, voteAccuracy: 1 },
     ]);
 
-    await service.aggregatePlayerScores('g1');
+    await aggregatePlayerScores(prisma as unknown as PrismaService, 'g1');
 
     // p1 = 0.5*80 + 0.5*60 = 70；p2 = 0.5*50 + 0.5*50 = 50
     expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
@@ -267,7 +249,7 @@ describe('JudgeService.aggregatePlayerScores', () => {
       { playerId: 'p1', isWinner: true, survivalDays: 3, voteAccuracy: 0.8 },
     ]);
 
-    await service.aggregatePlayerScores('g1');
+    await aggregatePlayerScores(prisma as unknown as PrismaService, 'g1');
 
     expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
       where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
@@ -287,7 +269,7 @@ describe('JudgeService.aggregatePlayerScores', () => {
       { playerId: 'p1', isWinner: false, survivalDays: 1, voteAccuracy: null },
     ]);
 
-    await service.aggregatePlayerScores('g1');
+    await aggregatePlayerScores(prisma as unknown as PrismaService, 'g1');
 
     expect(prisma.agentPerformance.update).toHaveBeenCalledWith({
       where: { gameId_playerId: { gameId: 'g1', playerId: 'p1' } },
@@ -307,7 +289,7 @@ describe('JudgeService.aggregatePlayerScores', () => {
       { playerId: 'p1', isWinner: true, survivalDays: 3, voteAccuracy: 0.8 },
     ]);
 
-    await service.aggregatePlayerScores('g1');
+    await aggregatePlayerScores(prisma as unknown as PrismaService, 'g1');
 
     // 0.5*66.6667 + 0.5*66.6667 = 66.6667 → 66.67
     expect(prisma.agentPerformance.update).toHaveBeenCalledWith({

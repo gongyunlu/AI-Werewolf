@@ -40,8 +40,7 @@ describe('GameAnalysisService', () => {
   const settlement = { settleGame: jest.fn() };
   const judge = {
     getEvaluationProgress: jest.fn(),
-    backfillRewards: jest.fn(),
-    aggregatePlayerScores: jest.fn(),
+    refreshScores: jest.fn(),
   };
   const flowProducer = { add: jest.fn() };
   const scheduleLease = { assertOwned: jest.fn() };
@@ -66,8 +65,7 @@ describe('GameAnalysisService', () => {
       judgedCount: 0,
       judgeableCount: 2,
     });
-    judge.backfillRewards.mockResolvedValue(0);
-    judge.aggregatePlayerScores.mockResolvedValue(undefined);
+    judge.refreshScores.mockResolvedValue(undefined);
     reflectionQueue.withGameScheduleLock.mockImplementation(
       async (_gameId: string, task: (lease: typeof scheduleLease) => Promise<unknown>) => ({
         acquired: true,
@@ -229,7 +227,6 @@ describe('GameAnalysisService', () => {
           evaluationRunId: `${gameId}_initial`,
           force: false,
           suffix: '',
-          refreshRewards: true,
         }),
         opts: expect.objectContaining({ jobId: `review_${gameId}` }),
         children: [
@@ -287,14 +284,13 @@ describe('GameAnalysisService', () => {
       judgedCount: 2,
       judgeableCount: 2,
     });
-    judge.backfillRewards.mockResolvedValue(2);
+    judge.refreshScores.mockResolvedValue(undefined);
 
     await expect(
       service.analyzeGame(gameId, { judge: true, reflect: false }),
     ).resolves.toMatchObject({ judged: 0, reflectPlanned: 0 });
 
-    expect(judge.backfillRewards).toHaveBeenCalledWith(gameId);
-    expect(judge.aggregatePlayerScores).toHaveBeenCalledWith(gameId);
+    expect(judge.refreshScores).toHaveBeenCalledWith(gameId);
     expect(judgeQueue.enqueueGame).not.toHaveBeenCalled();
   });
 
@@ -335,7 +331,6 @@ describe('GameAnalysisService', () => {
           data: expect.objectContaining({
             suffix,
             force: false,
-            refreshRewards: true,
             evaluationRunId: 'original-run',
           }),
           opts: expect.objectContaining({ jobId: `review_${gameId}${suffix}` }),
@@ -370,7 +365,6 @@ describe('GameAnalysisService', () => {
       gameId,
       force: false,
       playerId: undefined,
-      refreshRewards: true,
       suffix: `_resume_${now}`,
     });
   });
@@ -439,6 +433,8 @@ describe('GameAnalysisService', () => {
     prisma.agentPerformance.count.mockResolvedValue(6);
 
     expect(await service.getStatus(gameId)).toMatchObject({
+      judgedCount: 2,
+      judgeComplete: false,
       narrativeReady: false,
       reflectedCount: 0,
     });
@@ -466,6 +462,7 @@ describe('GameAnalysisService', () => {
     prisma.agentPerformance.count.mockResolvedValue(6);
 
     expect(await service.getStatus(gameId)).toMatchObject({
+      judgeComplete: true,
       narrativeReady: true,
       reflectedCount: 6,
     });

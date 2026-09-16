@@ -101,7 +101,9 @@ export class GameWorkerService extends WorkerHost {
     // BullMQ 失锁后会重新取出同一任务；这里等待人工恢复，不重新开始第一夜。
     if (job.stalledCounter > 0) {
       await this.recovery?.interrupt(gameId, generation);
-      throw new UnrecoverableError('执行进程中断；有检查点的对局等待手动恢复，无检查点的对局中止');
+      throw new UnrecoverableError(
+        '执行任务中断；未领取的启动等待补投，已执行的普通局等待手动恢复，其余中止',
+      );
     }
 
     this.logger.info({ gameId, jobId: job.id, attempt, maxAttempts }, '开始执行对局');

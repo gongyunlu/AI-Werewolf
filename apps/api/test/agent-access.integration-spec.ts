@@ -10,8 +10,12 @@ import { createMockGame, type MockGame } from '../src/game-engine/testing/mock-g
 import { MockGameStore } from '../src/game-engine/testing/mock-game-store';
 import { encryptAgentSecret } from '../src/agents/agent-secret';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
+import { GamesService } from '../src/games/games.service';
 
-jest.mock('@langchain/openai', () => ({ ChatOpenAI: jest.fn() }));
+jest.mock('@langchain/openai', () => ({
+  OpenAIClient: jest.requireActual('@langchain/openai').OpenAIClient,
+  ChatOpenAI: jest.fn(),
+}));
 
 const SECRET_KEY = 'c'.repeat(64);
 const DEFAULT_ENDPOINT = 'https://mock.invalid';
@@ -72,7 +76,7 @@ describe('局内模型调用使用的接入端点', () => {
   /** endpoints 按座号给出自带端点，未列出的玩家走环境变量默认接入。 */
   async function runGame(endpoints: Record<number, string>): Promise<BuiltGame> {
     const row = await prisma.game.create({
-      data: { rulesetId: 'standard6p', skillVersion: 'v1', status: 'running' },
+      data: { rulesetId: 'standard6p', skillVersion: 'v1', status: 'initialized' },
     });
     const gameId = row.id;
     for (const template of new MockGameStore().players) {
@@ -104,6 +108,9 @@ describe('局内模型调用使用的接入端点', () => {
 
     const game = await createMockGame('villager', config, { prisma, gameId, recovery: true });
     openGames.push(game);
+    await new GamesService(prisma, game.executor, game.broadcaster as never, {} as never).startGame(
+      gameId,
+    );
     // 只统计本局产生的模型调用
     jest.mocked(ChatOpenAI).mockClear();
     const state = await game.executor.executeGame(gameId);
