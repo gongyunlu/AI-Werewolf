@@ -17,7 +17,13 @@ import { VoteTurnAdapter } from '@/game-executor/vote-turn.adapter';
 
 function setup() {
   const runtime = {
-    prepareContextPublic: jest.fn().mockResolvedValue({}),
+    prepareContextPublic: jest.fn().mockResolvedValue({
+      source: { actionKey: 'key' },
+      replay: { scenario: 'vote' },
+      pendingMemoryUsages: [],
+      pendingKnowledgeUsages: [],
+    }),
+    voteVisibleThrough: jest.fn().mockResolvedValue(0),
     decide: jest.fn().mockResolvedValue({ reasoning: 'test', decision: {} }),
     streamSpeech: jest.fn().mockResolvedValue({ thinking: 'test', content: 'speech' }),
     recordExperienceUsages: jest.fn().mockResolvedValue(undefined),
@@ -273,7 +279,10 @@ describe.each(cases)('$name 的提交边界', ({ Node, writer, action, role }) =
     // 故意模拟下游也抛出模型错误类型，确保外层 catch 不会误选 gameplay fallback。
     const error = new ModelCallError('transient');
     if (failure === 'commit') eventWriter[writer].mockRejectedValue(error);
-    if (failure === 'usage') runtime.recordExperienceUsages.mockRejectedValue(error);
+    if (failure === 'usage') {
+      if (Node === VoteNode) eventWriter[writer].mockRejectedValue(error);
+      else runtime.recordExperienceUsages.mockRejectedValue(error);
+    }
     if (failure === 'publish') {
       if (Node === WerewolfKillNode)
         eventWriter.writeWolfKillEvent.mockRejectedValue(new Error('lost commit response'));

@@ -1,30 +1,17 @@
 import { ModelCallError } from '@/llm/model-call-guard';
 import { failModelCall, settleGameActions } from '../../core/game-failure-policy';
 import { Injectable } from '@nestjs/common';
-import { z } from 'zod';
 import type { GameGraphState } from '../../core/types';
 import type { NodeFactory, NodeContext } from '../node.types';
-import type { VoteTurnReference } from '../../ports/vote-turn.port';
+import type { VoteTurnCandidate } from '../../ports/vote-turn.port';
+import { isLegalVoteAction } from '../../rules/ordinary-vote';
 import { resolveVotes } from '../../rules/vote-resolution';
-
-export function buildVoteSchema(legalSeatNos: number[]) {
-  return z.object({
-    action: z.enum(['cast_vote', 'abstain']),
-    targetSeatNo: z
-      .number()
-      .int()
-      .optional()
-      .describe(`要投票的座位号（只能选：${legalSeatNos.join('、')}号；action=cast_vote 时必填）`),
-  });
-}
 
 interface CollectedVote {
   voter: GameGraphState['players'][0];
   targetId: string | null; // null 表示弃权
   targetSeatNo: number; // 0 表示弃权
-  reference?: VoteTurnReference;
-  thinking?: string;
-  source?: import('@/observability/action-source').ActionSource;
+  candidate: VoteTurnCandidate;
 }
 
 @Injectable()
@@ -41,10 +28,13 @@ export class VoteNode {
 
       // 合法投票目标 = 存活玩家（含自己）
       const legalSeatNos = alivePlayers.map((p) => p.seatNo);
+      const visibleThrough = await context.voteTurn.visibleThrough(state.gameId);
 
       // 先并行收齐全部候选：本轮投票在收齐后一次提交，批次内不写 Event。
       const collected = await settleGameActions(
-        alivePlayers.map((voter) => this.collectVote(voter, state, context, legalSeatNos)),
+        alivePlayers.map((voter) =>
+          this.collectVote(voter, state, context, legalSeatNos, visibleThrough),
+        ),
       );
 
       const events = await context.eventWriter.writeVoteBatch({
@@ -53,18 +43,17 @@ export class VoteNode {
         gameId: state.gameId,
         day: state.currentDay,
         expectedActorIds: alivePlayers.map((player) => player.id),
-        sources: Object.fromEntries(collected.map((vote) => [vote.voter.id, vote.source])),
-        votes: collected.map(({ voter, targetSeatNo, thinking }) => ({
+        sources: Object.fromEntries(
+          collected.map((vote) => [vote.voter.id, vote.candidate.source]),
+        ),
+        turns: collected.map((vote) => vote.candidate),
+        votes: collected.map(({ voter, targetSeatNo, candidate }) => ({
           actorId: voter.id,
           voterSeatNo: voter.seatNo,
           targetSeatNo,
-          thinking,
+          thinking: candidate.reasoning,
         })),
       });
-      const eventByActor = new Map(events.map((event) => [event.actorId, event]));
-      for (const vote of collected)
-        if (vote.reference)
-          await context.voteTurn.confirm(vote.reference, eventByActor.get(vote.voter.id)!);
       for (const event of events) await context.eventBus?.publish(event);
 
       // 汇总为 resolveVotes 需要的结构：被投票人 ID → 投票人 ID[]
@@ -123,9 +112,10 @@ export class VoteNode {
     state: GameGraphState,
     context: NodeContext,
     legalSeatNos: number[],
+    visibleThrough: number,
   ): Promise<CollectedVote> {
     try {
-      const { reference, reasoning, source } = await context.voteTurn.vote({
+      const candidate = await context.voteTurn.vote({
         phaseInstanceId: state.phaseInstanceId,
         gameId: state.gameId,
         playerId: voter.id,
@@ -135,13 +125,13 @@ export class VoteNode {
         round: 0,
         aliveSeatNos: state.players.filter((p) => p.isAlive).map((p) => p.seatNo),
         legalSeatNos,
-        schema: buildVoteSchema(legalSeatNos),
+        visibleThrough,
         signal: context.signal,
       });
 
-      const action = reference.action;
-      if (action.action === 'abstain')
-        return { voter, targetId: null, targetSeatNo: 0, reference, thinking: reasoning, source };
+      const action = candidate.reference.action;
+      if (!isLegalVoteAction(action, legalSeatNos)) throw new ModelCallError('invalid_output');
+      if (action.action === 'abstain') return { voter, targetId: null, targetSeatNo: 0, candidate };
 
       const target = state.players.find((p) => p.seatNo === action.targetSeatNo);
       if (!target || !target.isAlive) throw new ModelCallError('invalid_output');
@@ -149,9 +139,7 @@ export class VoteNode {
         voter,
         targetId: target.id,
         targetSeatNo: target.seatNo,
-        reference,
-        thinking: reasoning,
-        source,
+        candidate,
       };
     } catch (error) {
       failModelCall(error, context, `[投票阶段] ${voter.seatNo}号位投票出错`);

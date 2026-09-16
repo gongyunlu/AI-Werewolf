@@ -64,7 +64,14 @@ describe('游戏执行器生产模块装配', () => {
   async function createComposition() {
     const runtime = {
       validateRequiredSkills: jest.fn(async () => {}),
-      prepareContextPublic: jest.fn(async ({ gameId }: { gameId: string }) => ({ gameId })),
+      prepareContextPublic: jest.fn(async ({ gameId }: { gameId: string }) => ({
+        gameId,
+        source: { actionKey: 'key' },
+        replay: { scenario: 'vote' },
+        pendingMemoryUsages: [],
+        pendingKnowledgeUsages: [],
+      })),
+      voteVisibleThrough: jest.fn(async () => 0),
       decide: jest.fn(async () => ({ decision: { action: 'abstain' } })),
       recordExperienceUsages: jest.fn(async () => {}),
     };

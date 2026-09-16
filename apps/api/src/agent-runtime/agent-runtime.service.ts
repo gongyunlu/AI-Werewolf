@@ -204,6 +204,18 @@ export class AgentRuntimeService {
     };
   }
 
+  /** 普通投票全员共享水位；恢复时沿用节点已冻结的截止序号。 */
+  async voteVisibleThrough(gameId: string): Promise<number> {
+    if (this.recovery?.current?.visibleThrough !== undefined)
+      return this.recovery.current.visibleThrough;
+    const event = await this.prisma.event.findFirst({
+      where: { gameId },
+      orderBy: { sequence: 'desc' },
+      select: { sequence: true },
+    });
+    return event?.sequence ?? 0;
+  }
+
   /**
    * 行为 Event 成功写入后确认本次真正使用的经验。
    *
@@ -369,7 +381,7 @@ export class AgentRuntimeService {
   private async prepareContext(input: TurnContextRequest): Promise<AgentContext> {
     const { gameId, playerId, scenario, additionalContext, position, actionType } = input;
     const currentDay = position.day;
-    const visibleThrough = this.recovery?.current?.visibleThrough;
+    const visibleThrough = input.visibleThrough ?? this.recovery?.current?.visibleThrough;
     const eventCutoff = visibleThrough === undefined ? {} : { sequence: { lte: visibleThrough } };
 
     // 1. 查询 Player + Game

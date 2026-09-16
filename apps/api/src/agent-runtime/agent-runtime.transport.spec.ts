@@ -8,7 +8,7 @@ import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { ModelCallService } from '../llm/model-call.service';
 import { replayDecision, type DecisionReplaySnapshot } from '../player-turn/decision-replay';
 import { PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
-import { buildVoteSchema } from '../game-engine/nodes/day/vote.node';
+import { buildVoteSchema } from '../game-executor/vote-turn.adapter';
 import { buildSeerCheckSchema } from '../game-engine/nodes/night/seer-check.node';
 import { ProposeKillDecisionSchema } from '../game-engine/nodes/night/werewolf-collaboration';
 

@@ -17,8 +17,10 @@ export interface DecisionReplaySnapshot {
   reasoningHistory?: Array<{ type: string; content: BaseMessage['content'] }>;
 }
 
-/** 当前动作契约是浅层对象：沿用在线 z.object 的剔除额外字段及字符串枚举语义。 */
-function restoreDecisionSchema(definition: Record<string, unknown>): z.ZodObject {
+/** 沿用在线对象的字段和枚举语义；投票的合法动作集合按原顺序恢复。 */
+function restoreDecisionSchema(definition: Record<string, unknown>): z.ZodType {
+  if (Array.isArray(definition.anyOf))
+    return z.union(definition.anyOf.map((option) => restoreDecisionSchema(option)));
   // z.number().int() 本身已有安全整数范围；转换器会把导出的同一范围再添加一次。
   const parserDefinition = JSON.parse(
     JSON.stringify(definition, (_key, value) => {

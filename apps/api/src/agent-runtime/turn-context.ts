@@ -14,6 +14,7 @@ export interface TurnPosition {
 export interface TurnContextRequest {
   phaseInstanceId?: string;
   actionOrdinal?: number;
+  visibleThrough?: number;
   gameId: string;
   playerId: string;
   scenario: AgentScenario;

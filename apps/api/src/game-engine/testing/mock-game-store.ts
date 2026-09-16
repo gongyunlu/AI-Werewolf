@@ -13,6 +13,7 @@ function matches(row: object, where: Query['where'] = {}): boolean {
       return Object.entries(filter).every(([operator, value]) => {
         if (operator === 'in' && Array.isArray(value)) return value.includes(actual);
         if (operator === 'not') return actual !== value;
+        if (operator === 'lte') return Number(actual) <= Number(value);
         throw new Error(`Mock store 不支持查询条件 ${key}.${operator}`);
       });
     }
@@ -111,6 +112,7 @@ export class MockGameStore {
       ),
     },
     game: {
+      findUniqueOrThrow: jest.fn(async () => structuredClone(this.game)),
       findUnique: jest.fn(async ({ where }: Query) =>
         matches(this.game, where)
           ? structuredClone({ ...this.game, players: this.players, ruleset: this.ruleset })
@@ -168,6 +170,10 @@ export class MockGameStore {
     },
     ruleset: { findUnique: jest.fn(async () => structuredClone(this.ruleset)) },
     decisionContext: {
+      createMany: jest.fn(async ({ data }: { data: Array<{ eventId: string }> }) => {
+        for (const row of data) this.snapshots.set(row.eventId, structuredClone(row));
+        return { count: data.length };
+      }),
       findMany: jest.fn(async (query: Query) =>
         selectRows([...this.snapshots.values()] as Array<Record<string, unknown>>, query),
       ),
@@ -179,6 +185,7 @@ export class MockGameStore {
         },
       ),
     },
+    memoryUsage: { createMany: jest.fn(async () => ({ count: 0 })) },
     $transaction: async <T>(action: (tx: MockGameStore['prisma']) => Promise<T>): Promise<T> => {
       const previous = this.transactionTail;
       let release!: () => void;

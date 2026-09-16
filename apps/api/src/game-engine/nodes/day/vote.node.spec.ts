@@ -6,7 +6,14 @@ import type { NodeContext } from '../node.types';
 
 function setup(decide: jest.Mock) {
   const agentRuntime = {
-    prepareContextPublic: jest.fn().mockResolvedValue({ id: 'handle' }),
+    prepareContextPublic: jest.fn().mockResolvedValue({
+      id: 'handle',
+      source: { actionKey: 'key' },
+      replay: { scenario: 'vote' },
+      pendingMemoryUsages: [],
+      pendingKnowledgeUsages: [],
+    }),
+    voteVisibleThrough: jest.fn().mockResolvedValue(0),
     decide,
     recordExperienceUsages: jest.fn().mockResolvedValue(undefined),
   };
@@ -38,7 +45,7 @@ function setup(decide: jest.Mock) {
 }
 
 describe('VoteNode', () => {
-  it('照常投票时整批提交并确认本人记录', async () => {
+  it('照常投票时将完整产物交给批次事务，提交后直接发布', async () => {
     const { context, state, agentRuntime, writeVoteBatch } = setup(
       jest.fn().mockResolvedValue({
         reasoning: '归票自己',
@@ -52,16 +59,19 @@ describe('VoteNode', () => {
     });
 
     expect(writeVoteBatch).toHaveBeenCalledTimes(1);
-    expect(writeVoteBatch).toHaveBeenCalledWith({
-      gameId: 'game-1',
-      phaseInstanceId: 'node/0/test',
-      signal: undefined,
-      day: 1,
-      expectedActorIds: ['player-1'],
-      sources: { 'player-1': undefined },
-      votes: [{ actorId: 'player-1', voterSeatNo: 1, targetSeatNo: 1, thinking: '归票自己' }],
-    });
-    expect(agentRuntime.recordExperienceUsages).toHaveBeenCalledTimes(1);
+    expect(writeVoteBatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gameId: 'game-1',
+        phaseInstanceId: 'node/0/test',
+        signal: undefined,
+        day: 1,
+        expectedActorIds: ['player-1'],
+        sources: { 'player-1': { actionKey: 'key' } },
+        turns: [expect.objectContaining({ attribution: expect.any(Object) })],
+        votes: [{ actorId: 'player-1', voterSeatNo: 1, targetSeatNo: 1, thinking: '归票自己' }],
+      }),
+    );
+    expect(agentRuntime.recordExperienceUsages).not.toHaveBeenCalled();
     expect(context.eventBus?.publish).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'vote-event-0' }),
     );
@@ -82,7 +92,7 @@ describe('VoteNode', () => {
     expect(context.eventBus?.publish).not.toHaveBeenCalled();
   });
 
-  it('事件与请求不符时报绑定错误，不改写为弃票也不广播', async () => {
+  it('事务内绑定失败时不广播，也不补写第二张票', async () => {
     const { context, state, writeVoteBatch } = setup(
       jest.fn().mockResolvedValue({
         reasoning: '投自己',
@@ -90,16 +100,7 @@ describe('VoteNode', () => {
       }),
     );
     // 事件写出的目标与本次动作不符，属于绑定错误，不能降级成第二张弃票。
-    writeVoteBatch.mockResolvedValueOnce([
-      {
-        id: 'vote-event-0',
-        gameId: 'game-1',
-        actionType: 'vote',
-        actorId: 'player-1',
-        day: 1,
-        content: { voteRound: 0, voterSeatNo: 1, targetSeatNo: 0 },
-      },
-    ]);
+    writeVoteBatch.mockRejectedValueOnce(new Error('投票事件与本次请求不符'));
 
     await expect(new VoteNode().create()(context)(state)).rejects.toThrow('投票事件与本次请求不符');
     expect(writeVoteBatch).toHaveBeenCalledTimes(1);

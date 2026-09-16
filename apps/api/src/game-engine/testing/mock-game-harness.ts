@@ -12,7 +12,7 @@ import { ModelCallService } from '@/llm/model-call.service';
 import { PlayerTurnService } from '@/player-turn/player-turn.service';
 import { MemoryService } from '@/memory/memory.service';
 import { GlobalMemoryService } from '@/memory/global-memory.service';
-import { KnowledgeService } from '@/knowledge/knowledge.service';
+import { KnowledgeService, type KnowledgeHit } from '@/knowledge/knowledge.service';
 import { SkillLoaderService } from '@/skills/skill-loader.service';
 import { SpeechSummarizerService } from '@/speech-summarizer/speech-summarizer.service';
 import { LangfuseService } from '@/observability/langfuse.service';
@@ -31,6 +31,7 @@ import { GameEngineModule } from '../core/game-engine.module';
 import { MockGameStore } from './mock-game-store';
 import { ScriptedGameModel } from './scripted-game-model';
 import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
+import { retrieveFrozenMemories, type ExperimentSnapshot } from '@/evaluation/experiment-snapshot';
 
 interface MockGameDependencies {
   prisma?: PrismaService;
@@ -78,6 +79,12 @@ export async function createMockGame(
     forExecution: () => ({ emit }),
   };
   const memory = {
+    retrieveFrozen: jest.fn(
+      async (
+        snapshot: ExperimentSnapshot,
+        input: Omit<Parameters<typeof retrieveFrozenMemories>[1], 'queryVector'>,
+      ) => retrieveFrozenMemories(snapshot.memories, { ...input, queryVector: [1, 0] }),
+    ),
     retrieveActiveMemories: jest.fn(async () => []),
     retrieveExperience: jest.fn(async () => ({
       lessons: [
@@ -94,7 +101,38 @@ export async function createMockGame(
     })),
     recordUsages: jest.fn(async (_usages: Array<{ eventId: string }>) => {}),
   };
+  if (dependencies.prisma) {
+    const gamePlayers = await dependencies.prisma.player.findMany({
+      where: { gameId: dependencies.gameId },
+    });
+    const rows = await dependencies.prisma.memory.createManyAndReturn({
+      data: gamePlayers.map((player) => ({
+        agentId: player.agentId,
+        label: 'default',
+        type: 'lesson',
+        title: '测试经验',
+        content: '依据可见信息行动。',
+      })),
+    });
+    const lessons = new Map(rows.map((lesson) => [lesson.agentId, lesson.id]));
+    memory.retrieveExperience.mockImplementation(async (...args: unknown[]) => ({
+      lessons: [
+        {
+          id: lessons.get((args[0] as { agentId: string }).agentId)!,
+          type: 'lesson',
+          title: '测试经验',
+          content: '依据可见信息行动。',
+          importance: 1,
+          similarity: 1,
+        },
+      ],
+      playerModels: [],
+    }));
+  }
   const analysis = { analyzeGame: jest.fn(async () => ({ judged: 0, reflectPlanned: 0 })) };
+  const knowledge = {
+    retrieve: jest.fn(async (..._args: unknown[]): Promise<KnowledgeHit[]> => []),
+  };
   const summaries = {
     readPersonalJudgments: jest.fn(async () => ({
       recentSpeeches: [],
@@ -143,7 +181,7 @@ export async function createMockGame(
         provide: GlobalMemoryService,
         useValue: { retrieveActivePatterns: jest.fn(async () => []) },
       },
-      { provide: KnowledgeService, useValue: {} },
+      { provide: KnowledgeService, useValue: knowledge },
       { provide: SpeechSummarizerService, useValue: summaries },
       { provide: GameAnalysisService, useValue: analysis },
       {
@@ -168,6 +206,9 @@ export async function createMockGame(
     published,
     broadcaster,
     memory,
+    knowledge,
+    prompts: module.get(PromptService),
+    skills: module.get(SkillLoaderService),
     summaries,
     analysis,
     executor,

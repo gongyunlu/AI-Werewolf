@@ -151,6 +151,33 @@ describe('standard six player recovery through executor, engine and agent runtim
     expect(await prisma.gameExecutionStep.count({ where: { gameId, completed: false } })).toBe(0);
   });
 
+  it('普通投票的决策快照写入失败时，事件、批次和交付意图全部回滚', async () => {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE decision_contexts ADD CONSTRAINT reject_vote_snapshot CHECK (snapshot->>'scenario' <> 'vote') NOT VALID`,
+    );
+    try {
+      await expect(game!.executor.executeGame(gameId)).rejects.toThrow();
+      expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
+      expect(
+        await prisma.effectBatchCommit.count({ where: { gameId, batchKey: { contains: 'vote' } } }),
+      ).toBe(0);
+      expect(
+        await prisma.decisionContext.count({
+          where: { gameId, snapshot: { path: ['scenario'], equals: 'vote' } },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.gameExecutionStep.count({
+          where: { gameId, key: { contains: 'event-batch/vote/' }, completed: true },
+        }),
+      ).toBe(0);
+    } finally {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE decision_contexts DROP CONSTRAINT reject_vote_snapshot',
+      );
+    }
+  });
+
   it('提交后私有理由记录失败不中止对局，也不产生第二次动作', async () => {
     let failedEventId: string | undefined;
     // Prisma 的 upsert 是重载泛型签名，测试里按实际入参形状收窄后再挂钩。
@@ -196,6 +223,13 @@ describe('standard six player recovery through executor, engine and agent runtim
     await expect(game!.executor.executeGame(gameId)).rejects.toThrow('sixth voter disconnected');
     // 整批提交：第六人没有生成之前，本轮一张票都不可见。
     expect((await events()).filter((event) => event.actionType === A.VOTE)).toHaveLength(0);
+    expect(await prisma.memoryUsage.count({ where: { gameId, actionType: 'vote' } })).toBe(0);
+    expect(await prisma.knowledgeUsage.count({ where: { gameId, actionType: 'vote' } })).toBe(0);
+    expect(
+      await prisma.decisionContext.count({
+        where: { gameId, snapshot: { path: ['scenario'], equals: 'vote' } },
+      }),
+    ).toBe(0);
 
     const generation = await restart();
     const contexts: Awaited<ReturnType<typeof prepare>>[] = [];

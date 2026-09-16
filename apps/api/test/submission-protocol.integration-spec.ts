@@ -384,11 +384,30 @@ describe('领域提交协议：真实隔离 PostgreSQL', () => {
     async (recoverable) => {
       const run = await runner(recoverable);
       const voteTurn: VoteTurnPort = {
+        visibleThrough: async () => 0,
         vote: async (request) => ({
           reasoning: '弃票',
           reference: { ...request, action: { action: 'abstain' } },
+          source: {
+            actionKey: JSON.stringify([
+              request.gameId,
+              request.phaseInstanceId,
+              'vote',
+              request.playerId,
+              0,
+            ]),
+            attemptId: request.playerId,
+            traceId: 'trace',
+            outputObservationId: 'output',
+            startedAt: '2026-09-16T00:00:00Z',
+          },
+          attribution: {
+            snapshot: { scenario: 'vote' },
+            memoryUsages: [],
+            knowledgeUsages: [],
+            experiment: false,
+          },
         }),
-        confirm: async () => {},
       };
       const registry = new NodeRegistry({
         vote: new VoteNode().create(),

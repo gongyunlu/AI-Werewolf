@@ -1,51 +1,48 @@
-import type { z } from 'zod';
 import type { ActionSource } from '@/observability/action-source';
-
-/** 普通投票的领域动作；只有游戏规则决定取值。 */
-export type VoteAction = { action: 'cast_vote'; targetSeatNo: number } | { action: 'abstain' };
+import type { VoteAction } from '../rules/ordinary-vote';
 
 export interface VoteTurnRequest {
-  phaseInstanceId?: string;
+  phaseInstanceId: string;
   gameId: string;
   playerId: string;
   seatNo: number;
   day: number;
-  /** 引擎给出的阶段标签，player-turn 不再自行推断。 */
   phase: string;
   round: number;
   aliveSeatNos: number[];
-  /** 合法目标由游戏侧计算，player-turn 不重新推导第二套值。 */
   legalSeatNos: number[];
-  /** 游戏生成的动作契约；player-turn 只校验和收窄，不重新定义合法目标。 */
-  schema: z.ZodType<{ action: 'cast_vote' | 'abstain'; targetSeatNo?: number }>;
+  /** 整轮共用进入节点时的事件水位。 */
+  visibleThrough: number;
   signal?: AbortSignal;
 }
 
-/**
- * 仅在本代执行内有效的私有回合引用。
- *
- * 它绑定本次请求与最终动作，供应用侧在事件提交后确认历史与归因；不写库、不冒充持久
- * turnId，恢复时按原输入重新生成，因此不能跨执行代次传递或作长期缓存。
- *
- * 引用本身只有领域动作和绑定字段：应用侧的上下文句柄不放在这里，节点拿不到。
- * 原样回传同一个对象即可确认，复制或改写后的引用无法通过确认。
- */
+/** 核心校验和计票只消费行动及必要身份。 */
 export interface VoteTurnReference {
-  readonly gameId: string;
-  readonly playerId: string;
-  readonly seatNo: number;
-  readonly day: number;
-  readonly round: number;
-  readonly action: VoteAction;
+  gameId: string;
+  phaseInstanceId: string;
+  playerId: string;
+  seatNo: number;
+  day: number;
+  round: number;
+  visibleThrough: number;
+  action: VoteAction;
 }
 
-/** 一次投票候选：引用与它的形成理由分开返回，节点拿不到应用侧的上下文句柄。 */
+/** 只摘取提交所需资料；不得放入完整 AgentContext、凭据或运行时对象。 */
+export interface VoteAttribution {
+  snapshot: Record<string, unknown>;
+  memoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
+  knowledgeUsages: Array<{ chunkId: string }>;
+  retrievalId?: string;
+  experiment: boolean;
+}
+
+/** 可跨进程传递的应用产物，节点只转交归因资料，不将其交给规则函数。 */
 export interface VoteTurnCandidate {
-  source?: ActionSource;
-  /** 原样回传，用于事件提交后确认本人历史与归因 */
+  source: ActionSource;
   reference: VoteTurnReference;
-  /** 该候选的形成理由，随投票事件落库并在观战页展示 */
   reasoning: string;
+  attribution: VoteAttribution;
 }
 
 export interface CommittedVoteEvent {
@@ -57,7 +54,6 @@ export interface CommittedVoteEvent {
   content: unknown;
 }
 
-/** 事件与本次请求不符：属于绑定错误，不能降级成第二张弃票。 */
 export class VoteTurnBindingError extends Error {
   constructor(message: string) {
     super(message);
@@ -68,8 +64,6 @@ export class VoteTurnBindingError extends Error {
 export const VOTE_TURN_PORT = Symbol('VOTE_TURN_PORT');
 
 export interface VoteTurnPort {
-  /** 生成一次普通投票候选；模型与协议失败沿用线上回合原有的错误分类。 */
+  visibleThrough(gameId: string): Promise<number>;
   vote(request: VoteTurnRequest): Promise<VoteTurnCandidate>;
-  /** 行为 Event 提交后确认本人历史与归因；事件与请求不符时抛绑定错误。 */
-  confirm(reference: VoteTurnReference, event: CommittedVoteEvent): Promise<void>;
 }

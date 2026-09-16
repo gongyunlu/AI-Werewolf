@@ -4,6 +4,13 @@ import { PrismaService } from '@/prisma/prisma.service';
 import type { Prisma } from '@/generated/prisma/client';
 import { recordEventDelivery } from '@/event-bus/record-event-delivery';
 import type { PlayerDeathSnapshot } from '@/sse/sse-event.types';
+import { VoteTurnBindingError, type VoteTurnCandidate } from '../ports/vote-turn.port';
+import { isLegalVoteAction } from '../rules/ordinary-vote';
+import {
+  assertVoteEventMatches,
+  persistVoteAttributions,
+  voteAttributionHash,
+} from './vote-attribution';
 import {
   ACTION_TYPES,
   GAME_STATUSES,
@@ -501,6 +508,7 @@ export class EventWriterService {
     options: SubmissionScope & {
       day: number;
       expectedActorIds: string[];
+      turns?: VoteTurnCandidate[];
       votes: Array<{
         actorId: string;
         voterSeatNo: number;
@@ -528,6 +536,7 @@ export class EventWriterService {
           thinking: vote.thinking,
         },
       })),
+      options.turns,
     );
   }
 
@@ -719,6 +728,7 @@ export class EventWriterService {
     slot: string,
     expectedActorIds: string[],
     inputDrafts: EventDraft[],
+    turns?: VoteTurnCandidate[],
   ): Promise<CommittedEvent[]> {
     const batchKey = submissionKey(scope, 'batch/' + slot);
     const expected = sortedUnique(expectedActorIds, '批次参与者');
@@ -731,6 +741,42 @@ export class EventWriterService {
     );
     if (JSON.stringify(expected) !== JSON.stringify(actual))
       throw new Error('批次结果未完整覆盖预期参与者');
+    const turnByActor = new Map(turns?.map((turn) => [turn.reference.playerId, turn]));
+    if (turns) {
+      if (
+        JSON.stringify(
+          sortedUnique(
+            turns.map((turn) => turn.reference.playerId),
+            '投票产物',
+          ),
+        ) !== JSON.stringify(expected)
+      )
+        throw new VoteTurnBindingError('投票产物未完整覆盖批次');
+      const cutoff = turns[0]?.reference.visibleThrough;
+      for (const turn of turns) {
+        const reference = turn.reference;
+        const draft = drafts.find((entry) => entry.actorId === reference.playerId)!;
+        assertVoteEventMatches(reference, {
+          gameId: scope.gameId,
+          actionType: draft.actionType,
+          actorId: draft.actorId ?? null,
+          day: draft.day ?? null,
+          content: draft.content,
+        });
+        if (
+          reference.phaseInstanceId !== scope.phaseInstanceId ||
+          reference.round !== 0 ||
+          !Number.isInteger(reference.visibleThrough) ||
+          reference.visibleThrough < 0 ||
+          reference.visibleThrough !== cutoff ||
+          draft.content?.['thinking'] !== turn.reasoning ||
+          !turn.attribution.snapshot ||
+          submissionHash(turn.source) !==
+            submissionHash(scope.sources?.[reference.playerId] ?? null)
+        )
+          throw new VoteTurnBindingError('投票产物的行动身份、输入截止或来源不一致');
+      }
+    }
     const effects = drafts.map((draft) => ({
       draft,
       effectKey: submissionKey(scope, slot, draft.actorId!),
@@ -741,6 +787,9 @@ export class EventWriterService {
         actorId: effect.draft.actorId!,
         effectKey: effect.effectKey,
         source: this.source(scope, effect.effectKey, effect.draft.actorId!),
+        ...(turns
+          ? { attributionHash: voteAttributionHash(turnByActor.get(effect.draft.actorId!)!) }
+          : {}),
       })),
     )!;
     const payloadHash = submissionHash({
@@ -767,6 +816,35 @@ export class EventWriterService {
             JSON.stringify(saved.map((event) => event.id)) !== JSON.stringify(previous.eventIds))
         )
           throw new Error('批次记录与事件或恢复检查点不一致');
+        if (turns) {
+          const old = previous.outcomes as Array<{
+            actorId: string;
+            effectKey: string;
+            source?: unknown;
+            attributionHash?: string;
+          }>;
+          const current = outcomes as typeof old;
+          if (
+            old.length !== current.length ||
+            old.some((outcome, index) => {
+              const next = current[index];
+              const event = events.find((entry) => entry.actorId === outcome.actorId);
+              return (
+                outcome.actorId !== next.actorId ||
+                outcome.effectKey !== next.effectKey ||
+                submissionHash(outcome.source ?? null) !== submissionHash(next.source ?? null) ||
+                submissionHash(event?.source ?? null) !== submissionHash(next.source ?? null) ||
+                (outcome.attributionHash !== undefined &&
+                  outcome.attributionHash !== next.attributionHash)
+              );
+            })
+          )
+            throw new SubmissionConflictError(batchKey);
+          if (old.some((outcome) => outcome.attributionHash === undefined)) {
+            await persistVoteAttributions(tx, scope, events, turns, true);
+            await tx.effectBatchCommit.update({ where: { batchKey }, data: { outcomes } });
+          }
+        }
         return events.map((event) => ({ ...event, replayed: true }));
       }
       if (saved) throw new Error('旧批次检查点缺少可验证的业务提交记录，拒绝重复写入');
@@ -786,10 +864,21 @@ export class EventWriterService {
         if (legacy) throw new Error('旧逐条提交检查点不能安全转换为批次，拒绝重复写入');
       }
       const players = await tx.player.findMany({
-        where: { gameId: scope.gameId, id: { in: expected } },
+        where: { gameId: scope.gameId, ...(turns ? { deathDay: null } : { id: { in: expected } }) },
         select: { id: true, seatNo: true },
       });
       if (players.length !== expected.length) throw new Error('批次参与者不属于当前对局');
+      if (
+        turns &&
+        turns.some(
+          (turn) =>
+            !isLegalVoteAction(
+              turn.reference.action,
+              players.map((player) => player.seatNo!),
+            ),
+        )
+      )
+        throw new VoteTurnBindingError('普通投票目标不合法');
       for (const effect of effects) {
         const content = effect.draft.content as Record<string, unknown>;
         if (
@@ -820,6 +909,7 @@ export class EventWriterService {
         });
         events.push({ ...event, replayed: false });
       }
+      if (turns) await persistVoteAttributions(tx, scope, events, turns);
       await tx.effectBatchCommit.create({
         data: {
           batchKey,

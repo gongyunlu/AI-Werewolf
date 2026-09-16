@@ -29,7 +29,8 @@ export class ScriptedGameModel {
   ): Promise<ModelRequest> {
     signal.throwIfAborted();
     const prompt = typeof messages === 'string' ? messages : String(messages[0].content);
-    const decision = schema?.properties?.decision as
+    const decisionSchema = schema?.properties?.decision as { anyOf?: unknown[] } | undefined;
+    const decision = (decisionSchema?.anyOf?.[0] ?? decisionSchema) as
       { properties?: { action?: { enum?: string[]; const?: string } } } | undefined;
     const action =
       decision?.properties?.action?.enum?.[0] ?? decision?.properties?.action?.const ?? '';
