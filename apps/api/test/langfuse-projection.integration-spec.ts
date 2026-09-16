@@ -1,3 +1,5 @@
+import { stageModels } from './helpers/stage-models';
+import { JudgeOutputSchema } from '../src/evaluation/judge-schema';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -8,7 +10,7 @@ import type { Env } from '../src/config/env.validation';
 import type { Event } from '../src/generated/prisma/client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { PromptService } from '../src/observability/prompt.service';
-import type { StructuredLlmService } from '../src/observability/structured-llm.service';
+import type { ModelGenerationService } from '../src/llm/model-generation.service';
 import { traceIdentity } from '../src/observability/action-source';
 import {
   EvaluationProjectionService,
@@ -160,10 +162,76 @@ describe('Langfuse 评分投影：隔离 PostgreSQL 与 HTTP 平台桩', () => {
     return new EvaluationProjectionService(
       prisma,
       prompts as unknown as PromptService,
-      llm as unknown as StructuredLlmService,
+      llm as unknown as ModelGenerationService,
       scores,
     );
   }
+
+  it('裁判初评已保存而反思耗尽预算，换实例重消费不重跑任何已完成请求', async () => {
+    const { game, events } = await fixture(1);
+    const baseUrl = 'https://stage.test/v1';
+    llm.captureConfiguration.mockReturnValueOnce({ modelName: 'script', baseUrl });
+    await service.begin(game.id, 'stage-budget');
+    let calls = 0;
+    fetchSpy.mockImplementation(async () => {
+      if (++calls > 1) return Response.json({ error: { message: '脚本过载' } }, { status: 503 });
+      return new Response(
+        `data: ${JSON.stringify({ id: 'first', object: 'chat.completion.chunk', created: 1, model: 'script', choices: [{ index: 0, delta: { content: JSON.stringify({ score: 80, verdict: 'good', reasoning: '授权证据' }) }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    });
+    const compute: Parameters<EvaluationProjectionService['evaluate']>[3] = async (
+      definition,
+      source,
+      stages,
+    ) => {
+      const { generations } = stageModels(baseUrl);
+      const result = await generations.invokeReflective({
+        schema: JudgeOutputSchema,
+        modelName: definition.modelName,
+        baseUrl: definition.baseUrl,
+        source,
+        stages,
+        system: '冻结初评',
+        user: '授权内容',
+        refineSystem: '冻结反思',
+        refineUser: (output) => JSON.stringify(output),
+        gameId: game.id,
+        playerId: game.id,
+        runName: 'judge',
+        scenario: 'judge',
+      });
+      return { ...result.output, modelName: result.modelName };
+    };
+    await expect(
+      service.evaluate(game.id, events[0].id, 'stage-budget', compute),
+    ).rejects.toThrow();
+    service = processServices();
+    await expect(
+      service.evaluate(game.id, events[0].id, 'stage-budget', compute),
+    ).rejects.toThrow();
+    expect(calls).toBe(4);
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: 'stage-budget' } });
+    const stages = (run.pendingResults as any)[events[0].id].stages;
+    expect(stages.judge.attempts).toBe(1);
+    expect(stages['judge-refine'].attempts).toBe(3);
+  });
+
+  it('旧评估复用已保存最终结果，未知请求次数的未完成目标明确拒绝', async () => {
+    const { game, events } = await fixture(2);
+    await service.begin(game.id, 'legacy-budget');
+    await service.evaluate(game.id, events[0].id, 'legacy-budget', async () => result());
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: 'legacy-budget' } });
+    const legacy = { ...(run.definition as Record<string, any>) };
+    delete legacy.modelStateVersion;
+    await prisma.evaluationRun.update({ where: { id: run.id }, data: { definition: legacy } });
+    const compute = jest.fn(async () => result());
+    await service.evaluate(game.id, events[0].id, run.id, compute);
+    await expect(service.evaluate(game.id, events[1].id, run.id, compute)).rejects.toThrow(
+      '旧评估',
+    );
+    expect(compute).not.toHaveBeenCalled();
+  });
 
   it.each(['domain-evaluator', 'committed-action'])(
     'Scores 成功但 %s 被拒绝后，恢复必须先补齐正文再清理暂存',
@@ -908,7 +976,7 @@ describe('Langfuse 评分投影：隔离 PostgreSQL 与 HTTP 平台桩', () => {
         {
           render: async () => ({ text: '隔离脚本裁判', name: 'test', version: 1 }),
         } as unknown as PromptService,
-        scriptModel as unknown as StructuredLlmService,
+        scriptModel as unknown as ModelGenerationService,
         service,
       );
       const judgeWorker = new JudgeWorkerService(judge);
@@ -916,6 +984,8 @@ describe('Langfuse 评分投影：隔离 PostgreSQL 与 HTTP 平台桩', () => {
       let playersEnqueued = false;
       const reflectionWorker = new ReflectionWorkerService(
         ...([
+          { withJob: (_store: unknown, run: () => unknown) => run() },
+          {},
           prisma,
           judge,
           {

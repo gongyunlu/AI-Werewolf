@@ -1,6 +1,6 @@
 import type { PrismaService } from '../prisma/prisma.service';
 import type { PromptService } from '../observability/prompt.service';
-import type { StructuredLlmService } from '../observability/structured-llm.service';
+import type { ModelGenerationService } from '../llm/model-generation.service';
 import { GameReviewService } from './game-review.service';
 import { EVALUATION_VERSION } from '../evaluation/evaluation-version';
 
@@ -32,7 +32,7 @@ function platformReview(status = 'complete') {
   const service = new GameReviewService(
     prisma as unknown as PrismaService,
     { render: jest.fn().mockResolvedValue({ text: 'test' }) } as unknown as PromptService,
-    llm as unknown as StructuredLlmService,
+    llm as unknown as ModelGenerationService,
   );
   return { prisma, llm, service };
 }
@@ -46,7 +46,7 @@ describe('GameReviewService.loadReview', () => {
     const service = new GameReviewService(
       prisma as unknown as PrismaService,
       {} as PromptService,
-      {} as StructuredLlmService,
+      {} as ModelGenerationService,
     );
 
     await expect(service.loadReview('g1')).resolves.toBeNull();
@@ -74,7 +74,7 @@ describe('GameReviewService.loadReview', () => {
         invoke: jest
           .fn()
           .mockResolvedValue({ output: { narrative: '复盘', patterns: [], turningPoints: [] } }),
-      } as unknown as StructuredLlmService,
+      } as unknown as ModelGenerationService,
     );
     await service.reviewGame('g1', true);
     expect(prisma.decisionJudgment.findMany).toHaveBeenCalledWith(
@@ -107,7 +107,7 @@ describe('GameReviewService.loadReview', () => {
       const service = new GameReviewService(
         prisma as unknown as PrismaService,
         {} as PromptService,
-        {} as StructuredLlmService,
+        {} as ModelGenerationService,
       );
       await expect(service.loadReview('g1')).resolves.toBeNull();
     },
@@ -132,7 +132,7 @@ describe('GameReviewService.loadReview', () => {
       const service = new GameReviewService(
         prisma as unknown as PrismaService,
         {} as PromptService,
-        {} as StructuredLlmService,
+        {} as ModelGenerationService,
       );
       await expect(service.loadStoredReview('g1')).resolves.toEqual(output);
     },
@@ -155,7 +155,7 @@ describe('GameReviewService.loadReview', () => {
     const service = new GameReviewService(
       prisma as unknown as PrismaService,
       {} as PromptService,
-      {} as StructuredLlmService,
+      {} as ModelGenerationService,
     );
     await expect(service.loadReview('g1')).resolves.toEqual(output);
   });

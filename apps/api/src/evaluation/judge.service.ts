@@ -3,10 +3,11 @@ import type { AdoptScoresInput } from './evaluation-projection.service';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
+import type { ModelStageStore } from '../llm/model-stage';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { ACTION_TYPES, FACTIONS } from '@ai-werewolf/shared';
-import { JudgeOutputSchema, SpeechJudgeOutputSchema, validateSpeechOutput } from './judge-schema';
+import { JudgeOutputSchema, speechJudgeSchema } from './judge-schema';
 import {
   buildJudgePromptVariables,
   buildRefineUser,
@@ -41,7 +42,7 @@ export class JudgeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly promptService: PromptService,
-    private readonly structuredLlm: StructuredLlmService,
+    private readonly structuredLlm: ModelGenerationService,
     private readonly projection: EvaluationProjectionService,
   ) {}
 
@@ -63,8 +64,8 @@ export class JudgeService {
   /** 评估单个已提交决策并交付平台。 */
   async judgeEvent(gameId: string, eventId: string, runId?: string): Promise<void> {
     if (!runId) throw new Error('评分必须属于明确的评估运行');
-    await this.projection.evaluate(gameId, eventId, runId, (definition, source) =>
-      this.computeEvent(gameId, eventId, definition, source),
+    await this.projection.evaluate(gameId, eventId, runId, (definition, source, stages) =>
+      this.computeEvent(gameId, eventId, definition, source, stages),
     );
   }
 
@@ -73,6 +74,7 @@ export class JudgeService {
     eventId: string,
     definition: EvaluationDefinition,
     source: ActionSource,
+    stages: ModelStageStore,
   ): Promise<EvaluatedResult> {
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
@@ -240,6 +242,7 @@ export class JudgeService {
       modelName: definition.modelName,
       baseUrl: definition.baseUrl,
       source,
+      stages,
       user: userPrompt.text,
       gameId,
       playerId: player.id,
@@ -374,7 +377,7 @@ export class JudgeService {
     if (!runId) throw new Error('评分必须属于明确的评估运行');
     const targetId = events.find((event) => event.sequence === targetSequence)?.id;
     if (!targetId || targets.length !== 1) throw new Error('发言目标事件无法唯一确定');
-    await this.projection.evaluate(gameId, targetId, runId, async (definition, source) => {
+    await this.projection.evaluate(gameId, targetId, runId, async (definition, source, stages) => {
       const game = await this.prisma.game.findUnique({
         where: { id: gameId },
         select: { experiment: true },
@@ -392,10 +395,11 @@ export class JudgeService {
       ]);
 
       const { output, modelName } = await this.structuredLlm.invokeReflective({
-        schema: SpeechJudgeOutputSchema,
+        schema: speechJudgeSchema(targets.length),
         modelName: definition.modelName,
         baseUrl: definition.baseUrl,
         source,
+        stages,
         runName: 'judge-speeches',
         scenario: 'judge',
         system: systemPrompt.text + EVIDENCE_POLICY,
@@ -415,20 +419,6 @@ export class JudgeService {
         refinePromptOrigin: refineSystemPrompt.origin,
         refineUser: (first) => buildRefineUser(userPrompt.text, first),
       });
-
-      // 弱模型频繁漏标 index：条数对齐且全部漏标时按输出顺序回填（全漏标说明模型只是
-      // 没写该字段而非乱序，顺序即时间线顺序，无错位风险）。部分漏标仍交 validateSpeechOutput
-      // 抛错重试，不静默错位。
-      if (
-        output.items.length === targets.length &&
-        output.items.every((item) => item.index == null)
-      ) {
-        output.items = output.items.map((item, i) => ({ ...item, index: i + 1 }));
-      }
-
-      // 校验 index 映射能否安全落到事件：数量对不上或 index 越界/重复/半标时抛错，
-      // 让 job 失败重试，而不是把评分错位写进错误的事件
-      validateSpeechOutput(output.items, targets.length);
 
       const item = output.items[0];
       return {

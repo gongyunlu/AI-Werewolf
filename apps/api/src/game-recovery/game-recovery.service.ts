@@ -12,16 +12,17 @@ import {
 } from '../llm/model-call-guard';
 import { decodeRecoveryValue, encodeRecoveryValue } from './recovery-value';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
+import type { ModelStageState, ModelStageStore } from '../llm/model-stage';
 
 /** version 同时约束旧执行器的步骤顺序与持久格式，改变步骤键时必须升级。 */
 export interface RecoveryManifest {
-  version: 1;
+  version: 1 | 2;
   prompts: FrozenPrompts;
 }
 
 function supportsManifest(value: Partial<RecoveryManifest> | null): value is RecoveryManifest {
   return (
-    value?.version === 1 &&
+    (value?.version === 1 || value?.version === 2) &&
     !!value.prompts &&
     typeof value.prompts === 'object' &&
     !Array.isArray(value.prompts)
@@ -74,6 +75,37 @@ export class GameRecoveryService {
 
   get current() {
     return this.storage.getStore();
+  }
+
+  modelStageStore(): ModelStageStore | undefined {
+    const scope = this.current;
+    if (!scope) return undefined;
+    return {
+      update: async (label, change) => {
+        scope.signal.throwIfAborted();
+        if (scope.manifest.version !== 2)
+          throw new ConflictException('旧执行记录缺少单次请求预算，不能重启尚未保存的模型阶段');
+        const key = `${scope.prefix}model-stage/${label}`;
+        return this.prisma.$transaction(async (tx) => {
+          await this.fence(tx, scope);
+          const old = await tx.gameExecutionStep.findUnique({
+            where: { gameId_key: { gameId: scope.execution.gameId, key } },
+          });
+          const state = change(old ? decodeRecoveryValue<ModelStageState>(old.output) : undefined);
+          const data = {
+            output: encodeRecoveryValue(state),
+            completed: !!(state.output || state.failure),
+          };
+          await tx.gameExecutionStep.upsert({
+            where: { gameId_key: { gameId: scope.execution.gameId, key } },
+            create: { gameId: scope.execution.gameId, key, ...data },
+            update: data,
+          });
+          scope.signal.throwIfAborted();
+          return state;
+        });
+      },
+    };
   }
 
   async run<T>(

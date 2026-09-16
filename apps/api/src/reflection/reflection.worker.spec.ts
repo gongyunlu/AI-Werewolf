@@ -15,6 +15,7 @@ import { ReflectionWorkerService } from './reflection.worker';
 function fanoutJob(data: ReflectJobData): Job<ReflectJobData> {
   const job = {
     id: 'fanout-1',
+    token: 'test-token',
     name: REFLECT_JOB_NAMES.fanout,
     data,
     updateData: jest.fn(async (next: ReflectJobData) => {
@@ -53,6 +54,8 @@ describe('ReflectionWorkerService', () => {
     queue.enqueuePlayers.mockResolvedValue(playerIds.length);
 
     worker = new ReflectionWorkerService(
+      { withJob: (_store: unknown, run: () => unknown) => run() } as never,
+      {} as never,
       prisma as unknown as PrismaService,
       judge as unknown as JudgeService,
       gameReview as unknown as GameReviewService,
@@ -149,6 +152,7 @@ describe('ReflectionWorkerService', () => {
   it('complete 分支在全部玩家反思完成后投递记忆维护任务', async () => {
     const job = {
       id: 'complete-1',
+      token: 'test-token',
       name: REFLECT_JOB_NAMES.complete,
       data: { gameId },
     } as unknown as Job<ReflectJobData>;

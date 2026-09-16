@@ -65,7 +65,7 @@ describe('普通投票采用：脚本模型与真实隔离 PostgreSQL', () => {
         fixture.gameId,
         {},
         {
-          version: 1,
+          version: 2,
           prompts: await fixture.game.prompts.captureGameSnapshot(
             fixture.gameId,
             PLAYER_TURN_PROMPT_NAMES,
@@ -361,7 +361,7 @@ describe('普通投票采用：脚本模型与真实隔离 PostgreSQL', () => {
       fixture.gameId,
       {},
       {
-        version: 1,
+        version: 2,
         prompts: await fixture.game.prompts.captureGameSnapshot(
           fixture.gameId,
           PLAYER_TURN_PROMPT_NAMES,

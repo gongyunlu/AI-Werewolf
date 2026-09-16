@@ -974,7 +974,7 @@ describe('game recovery: isolated PostgreSQL execution journal', () => {
   });
 
   it('rejects an unsupported checkpoint version without modifying recovery state', async () => {
-    const stored = { ...manifest, version: 2 };
+    const stored = { ...manifest, version: 999 };
     await interruptStarted();
     await prisma.gameExecution.update({
       where: { gameId },

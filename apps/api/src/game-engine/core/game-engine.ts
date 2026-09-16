@@ -307,18 +307,12 @@ export class GameEngine {
   /**
    * 白天结束时统一生成摘要与判断（底层上下文维护，非游戏节点）
    *
-   * 失败仅记录日志，不阻塞游戏进程。
+   * 生成失败交给执行边界处理，不能缺少已开启的判断却继续下一天。
    */
   private async generateDaySummaries(gameId: string, day: number): Promise<void> {
-    try {
-      const generate = () => this.speechSummarizer.generateDaySummaries(gameId, day);
-      if (this.recovery) await this.recovery.value(`summary/${day}`, generate);
-      else await generate();
-    } catch (error) {
-      gameLogger.error(
-        `[日间总结] 生成失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    const generate = () => this.speechSummarizer.generateDaySummaries(gameId, day);
+    if (this.recovery) await this.recovery.value(`summary/${day}`, generate);
+    else await generate();
   }
 
   /**

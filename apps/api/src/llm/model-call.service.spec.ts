@@ -3,6 +3,8 @@ import { AIMessageChunk } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
 import { ModelCallService, type ModelAccess } from './model-call.service';
+import { ModelGenerationService } from './model-generation.service';
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 import { ModelCallError, ModelCallGuard } from './model-call-guard';
 
 jest.mock('@langchain/openai', () => ({
@@ -20,8 +22,28 @@ const ACCESS: ModelAccess = {
   apiKey: 'sk-agent-owned-key',
 };
 
-const service = (env: Record<string, unknown> = ENV) =>
-  new ModelCallService({ get: (key: string) => env[key] } as never);
+const service = (env: Record<string, unknown> = ENV) => {
+  const models = [
+    'deepseek-chat',
+    'doubao-pro',
+    'deepseek-flash',
+    'minimax-m3',
+    'deepseek-v4-pro',
+    'deepseek-v4-flash',
+    'glm-5.2',
+  ];
+  const capabilities = JSON.stringify(
+    [ENV.ARK_BASE_URL, ACCESS.baseUrl].flatMap((url) =>
+      JSON.parse(testModelCapabilities(url, models)),
+    ),
+  );
+  const config = {
+    get: (key: string) => (key === 'MODEL_CAPABILITIES' ? capabilities : env[key]),
+  } as never;
+  return new ModelGenerationService(config, new ModelCallService(config), {
+    trace: () => ({ callbacks: [], metadata: {}, tags: [], runName: 'test-retry' }),
+  } as never);
+};
 
 function stubModel(chunks: string[]) {
   return {
@@ -70,7 +92,7 @@ describe('模型调用的接入端点', () => {
 
     await service().streamText('deepseek-chat', [], undefined, undefined, undefined, ACCESS);
 
-    expect(run.mock.calls[0][0]).toBe('https://deepseek.example/v1:stub-model');
+    expect(run.mock.calls[0][0]).toBe('https://deepseek.example/v1:deepseek-chat');
   });
 
   it('失败日志里不出现自带密钥', async () => {
@@ -113,7 +135,7 @@ describe('结构化输出的协议选择', () => {
     }));
   };
 
-  it.each(['deepseek-flash', ' minimax-m3 '])('%s 走 jsonMode', async (modelName) => {
+  it.each(['deepseek-flash', 'minimax-m3'])('%s 走 jsonMode', async (modelName) => {
     const stub = stubStructured();
 
     await expect(callStructured(modelName, stub)).resolves.toEqual({ target: '3号' });
@@ -182,7 +204,9 @@ describe('结构化输出的协议选择', () => {
     ).resolves.toEqual({ target: '3号' });
 
     expect(invoke).toHaveBeenCalledTimes(2);
-    const retryPrompt = String(invoke.mock.calls[1][0].at(-1)?.content);
+    const retryPrompt = invoke.mock.calls[1][0]
+      .map((message: { content: unknown }) => String(message.content))
+      .join('\n');
     expect(retryPrompt).toContain('以下是上次未通过校验的响应');
     expect(retryPrompt).toContain('BADOUTPUT');
   });

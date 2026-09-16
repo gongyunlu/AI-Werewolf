@@ -8,9 +8,9 @@ import { GlobalMemoryService, type ActivePattern } from '../memory/global-memory
 import { KnowledgeService, type KnowledgeHit } from '../knowledge/knowledge.service';
 import { SkillLoaderService } from '../skills/skill-loader.service';
 import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.service';
-import type { ModelCallMode } from '../llm/model-call-guard';
 import { throwIfAborted } from '../llm/abort.utils';
-import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
+import type { ModelAccess } from '../llm/model-call.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { resolvePlayerAccess } from '../agents/agent-access';
 import { PromptService } from '../observability/prompt.service';
@@ -100,19 +100,13 @@ export class AgentRuntimeService {
     private readonly skillLoader: SkillLoaderService,
     private readonly speechSummarizer: SpeechSummarizerService,
     private readonly promptService: PromptService,
-    private readonly modelCalls: ModelCallService,
+    private readonly modelCalls: ModelGenerationService,
     private readonly playerTurn: PlayerTurnService,
     @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
-  runModelCall<T>(
-    modelName: string,
-    call: (signal: AbortSignal, reportProgress: () => void) => Promise<T>,
-    signal?: AbortSignal,
-    diagnostics?: Record<string, unknown>,
-    mode: ModelCallMode = 'invoke',
-  ): Promise<T> {
-    return this.modelCalls.run(modelName, call, signal, diagnostics, mode);
+  generateText(...args: Parameters<ModelGenerationService['streamText']>): Promise<string> {
+    return this.modelCalls.streamText(...args);
   }
 
   /**

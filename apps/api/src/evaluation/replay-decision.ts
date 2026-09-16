@@ -7,6 +7,7 @@ import { PrismaClient } from '../generated/prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { validateEnv, type Env } from '../config/env.validation';
 import { ModelCallService } from '../llm/model-call.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { replayDecision, type DecisionReplaySnapshot } from '../player-turn/decision-replay';
 import { PromptService } from '../observability/prompt.service';
@@ -131,7 +132,7 @@ async function main() {
       await langfuse.onModuleInit();
       const turns = new PlayerTurnService(
         config,
-        new ModelCallService(config),
+        new ModelGenerationService(config, new ModelCallService(config), langfuse),
         new PromptService(config),
         langfuse,
       );

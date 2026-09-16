@@ -3,10 +3,12 @@ import { Logger } from '@nestjs/common';
 import { HumanMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { ModelCallService } from './model-call.service';
+import { ModelGenerationService } from './model-generation.service';
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 
 afterEach(() => jest.restoreAllMocks());
 
-it.each([1, 2])('真实 TCP 连续断开 %s 次时，结构化调用最多发出两次请求', async (failures) => {
+it.each([1, 3])('真实 TCP 连续断开 %s 次时，应用阶段最多发出三次请求', async (failures) => {
   const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
   const requests: unknown[] = [];
   // 完整接收请求后主动断开，覆盖供应商可能已经接收请求但客户端未获响应的情况。
@@ -36,7 +38,15 @@ it.each([1, 2])('真实 TCP 连续断开 %s 次时，结构化调用最多发出
       ARK_API_KEY: 'isolated-test-key',
       ARK_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
     };
-    const service = new ModelCallService({ get: (key: string) => config[key] } as never);
+    config.MODEL_CAPABILITIES = testModelCapabilities(String(config.ARK_BASE_URL), [
+      'local-scripted-model',
+    ]);
+    const settings = { get: (key: string) => config[key] } as never;
+    const service = new ModelGenerationService(
+      settings,
+      new ModelCallService(settings),
+      {} as never,
+    );
     const result = service.structured(
       'local-scripted-model',
       z.object({ targetSeatNo: z.literal(2) }),
@@ -51,7 +61,7 @@ it.each([1, 2])('真实 TCP 连续断开 %s 次时，结构化调用最多发出
         details: { errorType: 'APIConnectionError' },
       });
     }
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(failures === 1 ? 2 : 3);
     expect(requests[1]).toEqual(requests[0]);
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({

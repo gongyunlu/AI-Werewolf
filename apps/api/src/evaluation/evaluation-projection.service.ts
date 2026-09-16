@@ -6,11 +6,12 @@ import { isDeepStrictEqual } from 'node:util';
 import { Prisma, type EvaluationRun, type Event } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { traceIdentity, type ActionSource } from '../observability/action-source';
 import { readExperiment, type FrozenPrompts } from './experiment-snapshot';
 import { EVALUATION_VERSION } from './evaluation-version';
+import type { ModelStageState, ModelStageStore } from '../llm/model-stage';
 import { judgeableEventIds } from './evaluation-completeness';
 import {
   LangfuseScoresService,
@@ -25,6 +26,7 @@ import {
 } from './langfuse-scores.service';
 
 export interface EvaluationDefinition {
+  modelStateVersion?: 1;
   id: string;
   projectId?: string;
   destination?: ScoreDestination;
@@ -47,6 +49,7 @@ type PendingResult = {
   instanceId: string;
   leaseUntil: string;
   result?: EvaluatedResult;
+  stages?: Record<string, ModelStageState>;
 };
 export interface AdoptScoresInput {
   runId: string;
@@ -69,7 +72,7 @@ export class EvaluationProjectionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly prompts: PromptService,
-    private readonly llm: StructuredLlmService,
+    private readonly llm: ModelGenerationService,
     private readonly platform: LangfuseScoresService,
   ) {}
 
@@ -103,6 +106,7 @@ export class EvaluationProjectionService {
     ]);
     const model = this.llm.captureConfiguration(experiment?.judgeModel);
     const body = {
+      modelStateVersion: 1 as const,
       destination: this.platform.destination(),
       domainVersion: EVALUATION_VERSION,
       ...model,
@@ -150,7 +154,11 @@ export class EvaluationProjectionService {
     gameId: string,
     eventId: string,
     runId: string,
-    compute: (definition: EvaluationDefinition, source: ActionSource) => Promise<EvaluatedResult>,
+    compute: (
+      definition: EvaluationDefinition,
+      source: ActionSource,
+      stages: ModelStageStore,
+    ) => Promise<EvaluatedResult>,
   ): Promise<void> {
     const token = randomUUID();
     const claimed = await this.changeRun(runId, async (tx, run) => {
@@ -169,10 +177,13 @@ export class EvaluationProjectionService {
       const entries = pending(run);
       const saved = entries[eventId];
       if (saved?.result) return { skip: true, run };
+      if (definition(run).modelStateVersion !== 1)
+        throw new Error('旧评估缺少历史请求预算，请显式创建新的评估运行');
       // 死在本进程里的租约没人会释放，只挡真实并发：上一进程的遗留租约由本次判分接管。
       if (saved?.instanceId === this.instanceId && Date.parse(saved.leaseUntil) > Date.now())
         throw new Error('该行动已有判分进行中');
       entries[eventId] = {
+        ...saved,
         token,
         instanceId: this.instanceId,
         leaseUntil: new Date(Date.now() + 25 * 60_000).toISOString(),
@@ -187,12 +198,32 @@ export class EvaluationProjectionService {
     try {
       const frozen = definition(claimed.run);
       if (!frozen.prompts) throw new Error('未完成评估缺少冻结 Prompt');
-      const result = await compute(frozen, {
-        actionKey: runId + '/' + eventId,
-        traceId: evaluationTrace(runId),
-        attemptId: traceIdentity('judge-target', runId, eventId),
-        startedAt: claimed.run.createdAt.toISOString(),
-      });
+      const stages: ModelStageStore = {
+        update: (label, change) =>
+          this.changeRun(runId, async (tx, run) => {
+            const entries = pending(run);
+            const entry = entries[eventId];
+            if (run.status === 'superseded' || run.status === 'complete' || entry?.token !== token)
+              throw new Error('判分执行权已过期');
+            const state = change(entry.stages?.[label]);
+            entry.stages = { ...entry.stages, [label]: state };
+            await tx.evaluationRun.update({
+              where: { id: runId },
+              data: { pendingResults: json(entries) },
+            });
+            return state;
+          }),
+      };
+      const result = await compute(
+        frozen,
+        {
+          actionKey: runId + '/' + eventId,
+          traceId: evaluationTrace(runId),
+          attemptId: traceIdentity('judge-target', runId, eventId),
+          startedAt: claimed.run.createdAt.toISOString(),
+        },
+        stages,
+      );
       this.validateResult(result);
       await this.changeRun(runId, async (tx, run) => {
         const entries = pending(run);
@@ -208,7 +239,7 @@ export class EvaluationProjectionService {
       await this.changeRun(runId, async (tx, run) => {
         const entries = pending(run);
         if (entries[eventId]?.token === token && !entries[eventId].result) {
-          delete entries[eventId];
+          entries[eventId].leaseUntil = new Date(0).toISOString();
           await tx.evaluationRun.update({
             where: { id: runId },
             data: { pendingResults: json(entries) },

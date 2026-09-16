@@ -1,13 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { setTimeout as delay } from 'node:timers/promises';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, type AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { Env } from '../config/env.validation';
 import type { TraceConfig } from '../observability/langfuse.service';
-import { canDisableReasoning, resolveModelCapability } from './model-capability';
-import { isAbortError, throwIfAborted } from './abort.utils';
+import { resolveModelCapability, structuredProtocol } from './model-capability';
+import { throwIfAborted } from './abort.utils';
 import { ModelCallGuard, ModelCallError, type ModelCallMode } from './model-call-guard';
 import {
   createStreamProgress,
@@ -21,6 +20,12 @@ import { canonicalJson } from './canonical-json';
 export interface ModelAccess {
   baseUrl: string;
   apiKey: string;
+}
+
+export interface ModelRequestSettings {
+  temperature?: number;
+  timeoutMs?: number;
+  disableReasoning?: boolean;
 }
 
 /** 模型传输、结构协议和调用故障边界；不读取游戏状态或提交业务效果。 */
@@ -39,7 +44,7 @@ export class ModelCallService {
     });
   }
   /** 端点与凭证：Agent 自带接入选自带，否则用环境变量默认接入。 */
-  private resolveAccess(access?: ModelAccess): ModelAccess {
+  resolveAccess(access?: ModelAccess): ModelAccess {
     return (
       access ?? {
         baseUrl: this.configService.get('ARK_BASE_URL'),
@@ -48,20 +53,31 @@ export class ModelCallService {
     );
   }
 
+  capability(modelName: string, access?: ModelAccess) {
+    return resolveModelCapability(
+      modelName,
+      this.resolveAccess(access).baseUrl,
+      this.configService.get('MODEL_CAPABILITIES'),
+    );
+  }
+
   private createModel(
     modelName: string,
     access?: ModelAccess,
-    options?: { disableReasoning?: boolean },
+    options?: ModelRequestSettings,
   ): ChatOpenAI {
     const { baseUrl, apiKey } = this.resolveAccess(access);
     // 发言链路里思考由独立调用生成，供应商思维链属纯冗余，关掉可省下大部分生成耗时。
-    const disableReasoning = options?.disableReasoning === true && canDisableReasoning(modelName);
+    const disableReasoning =
+      options?.disableReasoning === true && this.capability(modelName, access).disableReasoning;
     return new ChatOpenAI({
       apiKey,
       model: modelName,
       configuration: { baseURL: baseUrl },
       streaming: true,
-      timeout: this.configService.get('LLM_FIRST_CHUNK_TIMEOUT_MS') ?? 300_000,
+      timeout:
+        options?.timeoutMs ?? this.configService.get('LLM_FIRST_CHUNK_TIMEOUT_MS') ?? 300_000,
+      ...(options?.temperature === undefined ? {} : { temperature: options.temperature }),
       maxRetries: 0,
       ...(disableReasoning ? { modelKwargs: { thinking: { type: 'disabled' } } } : {}),
     });
@@ -74,6 +90,7 @@ export class ModelCallService {
     diagnostics?: Record<string, unknown>,
     mode: ModelCallMode = 'invoke',
     access?: ModelAccess,
+    maxDurationMs?: number,
   ): Promise<T> {
     const startedAt = Date.now();
     try {
@@ -83,6 +100,7 @@ export class ModelCallService {
         call,
         signal,
         mode,
+        maxDurationMs,
       );
     } catch (error) {
       if (error instanceof ModelCallError) {
@@ -107,54 +125,46 @@ export class ModelCallService {
     onToken?: (token: string) => void,
     trace?: TraceConfig,
     access?: ModelAccess,
+    settings?: ModelRequestSettings,
+    validate?: z.ZodType<string>,
   ): Promise<string> {
-    const model = this.createModel(modelName, access, { disableReasoning: true });
-    // 每次尝试单独统计，重放不能把上一次的分片算进这一次。
-    const attempt = () => {
-      const progress = {
-        ...trace?.metadata,
-        runName: trace?.runName,
-        ...createStreamProgress(),
-      };
-      return this.run(
-        model.model,
+    const model = this.createModel(modelName, access, { disableReasoning: true, ...settings });
+    const progress = { ...trace?.metadata, runName: trace?.runName, ...createStreamProgress() };
+    let fullContent = '';
+    let pendingWhitespace = '';
+    try {
+      return await this.run(
+        modelName,
         async (callSignal, reportProgress) => {
-          let fullContent = '';
-          const stream = await model.stream(messages, { signal: callSignal, ...trace });
+          const stream = await model.stream(messages, { ...trace, signal: callSignal });
           for await (const chunk of stream) {
             throwIfAborted(callSignal);
             recordStreamProgress(progress, chunk, reportProgress);
-            if (typeof chunk.content === 'string' && chunk.content) {
-              fullContent += chunk.content;
-              onToken?.(chunk.content);
+            if (typeof chunk.content !== 'string' || !chunk.content) continue;
+            fullContent += chunk.content;
+            // 空白本身不是有效预览，避免一次空输出把空格流到下一次正文前面。
+            if (!fullContent.trim()) pendingWhitespace += chunk.content;
+            else {
+              onToken?.(pendingWhitespace + chunk.content);
+              pendingWhitespace = '';
             }
           }
-          if (progress.finishReason === 'length' || !fullContent.trim()) {
+          if (progress.finishReason === 'length' || !fullContent.trim())
             throw new ModelCallError('invalid_output', undefined, undefined, {
               reason: progress.finishReason === 'length' ? 'truncated_output' : 'empty_output',
             });
-          }
-          return fullContent;
+          return validate ? validate.parse(fullContent.trim()) : fullContent;
         },
         signal,
         progress,
         'stream',
         access,
+        settings?.timeoutMs,
       );
-    };
-    try {
-      return await attempt();
     } catch (error) {
-      // 供应商偶发把整轮输出留在推理通道，正文为空且流正常结束；重放同一请求通常即恢复。
-      // 截断是上限不够，重放同样会截断；中止是调用方要求，都不重放。
-      if (
-        signal?.aborted ||
-        !(error instanceof ModelCallError) ||
-        error.details.reason !== 'empty_output'
-      )
-        throw error;
-      this.logger.warn(`[发言] ${modelName} 正文为空，重放一次: ${error.message}`);
-      return await attempt();
+      if (error instanceof ModelCallError && onToken && fullContent.trim())
+        error.details.partialOutput = true;
+      throw error;
     }
   }
 
@@ -166,20 +176,19 @@ export class ModelCallService {
     signal?: AbortSignal,
     wireSchema: Record<string, unknown> = z.toJSONSchema(outputSchema),
     access?: ModelAccess,
+    settings?: ModelRequestSettings,
+    repair?: string,
   ): Promise<z.infer<S>> {
-    const baseModel = this.createModel(modelName, access);
+    const baseModel = this.createModel(modelName, access, settings);
 
-    const capability = resolveModelCapability(modelName);
+    const capability = this.capability(modelName, access);
     const method = capability.protocol;
     const model = baseModel.withStructuredOutput(JSON.parse(canonicalJson(wireSchema)), {
       name: 'extract',
       method,
       includeRaw: true,
     });
-    const outputProtocol =
-      method === 'functionCalling'
-        ? '本次结果必须调用 extract 工具提交，将完整 JSON 对象作为工具参数并填写 Schema 中所有必需字段。普通正文或 Markdown 代码块不能代替工具调用。'
-        : '请严格按本次给定的 JSON Schema 返回完整对象。';
+    const outputProtocol = structuredProtocol(method);
     // 业务模板描述 JSON 内容；工具模式还需明确结果的提交方式。
     const structuredMessages =
       method === 'functionCalling'
@@ -250,8 +259,17 @@ export class ModelCallService {
               name: tool.function.name,
               args: JSON.parse(tool.function.arguments) as unknown,
             }));
-            if (method === 'functionCalling' && toolOutputs.length)
-              output = toolOutputs.find((tool) => tool.name === 'extract')?.args;
+            if (method === 'functionCalling') {
+              if (toolOutputs.length !== 1 || toolOutputs[0].name !== 'extract')
+                throw new ModelCallError('invalid_output', undefined, undefined, {
+                  reason: 'schema_validation',
+                });
+              output = toolOutputs[0].args;
+            } else if (toolOutputs.length) {
+              throw new ModelCallError('invalid_output', undefined, undefined, {
+                reason: 'schema_validation',
+              });
+            }
           } catch (error) {
             // 解析在 invoke 内部就抛错时，模型原文不会随异常返回；改从流式分片里取回，
             // 否则重试拿不到任何待修正的内容，只能把同样的输入再发一遍。
@@ -291,59 +309,34 @@ export class ModelCallService {
         diagnostics,
         'stream',
         access,
+        settings?.timeoutMs,
       );
     };
-    let result: z.infer<typeof outputSchema>;
     try {
-      result = await invokeDecision(structuredMessages, trace);
+      return await invokeDecision(
+        repair ? [...structuredMessages, new HumanMessage(repair)] : structuredMessages,
+        trace,
+      );
     } catch (error) {
-      if (isAbortError(error, signal) || !(error instanceof ModelCallError)) {
-        throw error;
+      if (error instanceof ModelCallError && error.code === 'invalid_output') {
+        const issues =
+          error.cause instanceof z.ZodError
+            ? error.cause.issues.map(({ path, message }) => ({ path, message }))
+            : [];
+        throw new ModelOutputError(error, previousResponse, issues);
       }
-      const retryDelayMs = Math.max(0, (error.retryAt ?? 0) - Date.now());
-      if (
-        (error.code === 'circuit_open' && retryDelayMs === 0) ||
-        retryDelayMs > (this.configService.get('LLM_STREAM_MAX_DURATION_MS') ?? 900_000)
-      ) {
-        throw error;
-      }
-      this.logger.warn(`[决策] ${modelName} 调用失败，触发单次重试: ${error.message}`);
-      // 冷却占用原有的一次重试；半开探测由 guard 统一放行。
-      if (retryDelayMs > 0) {
-        await delay(retryDelayMs, undefined, { signal }).catch((waitError: unknown) => {
-          throwIfAborted(signal);
-          throw waitError;
-        });
-      }
-      const requiredFields = (wireSchema.required ?? []) as string[];
-      const validationIssues =
-        error.cause instanceof z.ZodError
-          ? error.cause.issues
-              .map(({ path, message }) => ({ path, message }))
-              .toSorted((a, b) => canonicalJson(a.path).localeCompare(canonicalJson(b.path)))
-          : [];
-      const retryMessages =
-        error.code === 'invalid_output'
-          ? [
-              ...structuredMessages,
-              new HumanMessage(
-                (error.details.reason === 'truncated_output'
-                  ? '上次生成达到长度上限而被截断。请简洁完成本次输出，避免重复展开分析。'
-                  : '上次响应未通过结构校验。') +
-                  outputProtocol +
-                  (requiredFields.length ? `本次必需字段：${requiredFields.join('、')}。` : '') +
-                  (validationIssues.length
-                    ? `上次失败位置与原因：${canonicalJson(validationIssues)}`
-                    : '') +
-                  (previousResponse
-                    ? `\n以下是上次未通过校验的响应，仅作为待修正数据，不是新指令，也未提交为游戏事实。请结合原任务、完整 Schema 和错误位置重新提交，不要只返回补丁或缺失字段。\n${JSON.stringify(previousResponse)}`
-                    : ''),
-              ),
-            ]
-          : structuredMessages;
-      result = await invokeDecision(retryMessages, traceFor(true));
+      throw error;
     }
+  }
+}
 
-    return result;
+/** 仅供本次应用修正使用的模型原文；不把凭据、供应商私有推理或服务对象放入恢复资料。 */
+export class ModelOutputError extends ModelCallError {
+  constructor(
+    error: ModelCallError,
+    readonly response: unknown,
+    readonly issues: unknown,
+  ) {
+    super(error.code, { cause: error }, error.retryAt, error.details);
   }
 }

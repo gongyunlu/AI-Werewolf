@@ -1,3 +1,4 @@
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PlayerTurnService } from './player-turn.service';
 
 it('同日不同节点、并发玩家和重新生成使用独立来源，同次多轮调用保持同一 attempt', async () => {
@@ -9,12 +10,20 @@ it('同日不同节点、并发玩家和重新生成使用独立来源，同次�
       return { observationId: String(observed.length) };
     }),
   };
-  const model = { streamText: jest.fn().mockResolvedValue('完整文本') };
+  const calls = {
+    streamText: jest.fn().mockResolvedValue('完整文本'),
+    capability: () => ({ protocol: 'jsonSchema' }),
+    resolveAccess: () => ({ baseUrl: 'https://model.test' }),
+  };
+  const config = {
+    get: (key: string) => (key === 'TURN_REFLECTION_MAX_ROUNDS' ? 1 : undefined),
+  } as never;
+  const model = new ModelGenerationService(config, calls as never, langfuse as never);
   const prompts = {
     render: jest.fn(async (name) => ({ name, text: '冻结模板', version: 2, source: 'langfuse' })),
   };
   const service = new PlayerTurnService(
-    ...([{ get: () => 1 }, model, prompts, langfuse] as unknown as ConstructorParameters<
+    ...([config, model, prompts, langfuse] as unknown as ConstructorParameters<
       typeof PlayerTurnService
     >),
   );

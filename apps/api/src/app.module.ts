@@ -18,6 +18,7 @@ import { GameQueueModule } from './game-queue/game-queue.module';
 import { GameExecutorModule } from './game-executor/game-executor.module';
 import { HealthModule } from './health/health.module';
 import { ObservabilityModule } from './observability/observability.module';
+import { ModelGenerationModule } from './llm/model-generation.module';
 import { BatchModule } from './evaluation/batch.module';
 
 @Module({
@@ -28,6 +29,7 @@ import { BatchModule } from './evaluation/batch.module';
       validate: validateEnv,
     }),
     ObservabilityModule,
+    ModelGenerationModule,
     PrismaModule,
     RedisModule,
     GamesModule,

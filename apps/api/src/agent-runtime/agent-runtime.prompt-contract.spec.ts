@@ -156,7 +156,7 @@ it.each([401, 503])('供应商返回 %s 时遵守统一调用次数', async (sta
   await expect(
     runtime.decide(context, z.object({ action: z.literal('abstain') })),
   ).rejects.toThrow();
-  expect(invoke).toHaveBeenCalledTimes(status === 401 ? 1 : 2);
+  expect(invoke).toHaveBeenCalledTimes(status === 401 ? 1 : 3);
   expect(ChatOpenAI).toHaveBeenLastCalledWith(expect.objectContaining({ maxRetries: 0 }));
 });
 

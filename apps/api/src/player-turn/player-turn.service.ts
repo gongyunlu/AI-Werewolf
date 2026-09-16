@@ -7,9 +7,10 @@ import type { FrozenPrompts } from '../evaluation/experiment-snapshot';
 import { LangfuseService } from '../observability/langfuse.service';
 import { PromptService, type RenderedPrompt } from '../observability/prompt.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
-import { ModelCallService, type ModelAccess } from '../llm/model-call.service';
+import type { ModelAccess } from '../llm/model-call.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { throwIfAborted } from '../llm/abort.utils';
-import { createActionSource, type ActionSource } from '../observability/action-source';
+import { type ActionSource } from '../observability/action-source';
 
 /** 只包含已授权输入与追踪标识，生成器不持有数据库玩家对象或历史存储。 */
 export interface TurnGenerationContext {
@@ -42,7 +43,7 @@ type TraceParams = Omit<
 export class PlayerTurnService {
   constructor(
     private readonly configService: ConfigService<Env, true>,
-    private readonly modelCalls: ModelCallService,
+    private readonly modelCalls: ModelGenerationService,
     private readonly promptService: PromptService,
     private readonly langfuse: LangfuseService,
   ) {}
@@ -59,7 +60,7 @@ export class PlayerTurnService {
   ) {
     const { signal, onThinking, onContent } = options;
     throwIfAborted(signal);
-    this.beginAttempt(context);
+    await this.beginAttempt(context);
     const startTime = Date.now();
     const modelName = context.player.modelName;
 
@@ -99,14 +100,15 @@ export class PlayerTurnService {
       },
       context.prompts,
     );
-    const contentTrace = this.langfuse.trace({
-      runName: 'speech-content',
-      ...traceParams,
-      promptName: contentPrompt.name,
-      promptVersion: contentPrompt.version,
-      promptSource: contentPrompt.source,
-      promptOrigin: contentPrompt.origin,
-    });
+    const contentTrace = (retry: boolean) =>
+      this.langfuse.trace({
+        runName: 'speech-content' + (retry ? '-retry' : ''),
+        ...traceParams,
+        promptName: contentPrompt.name,
+        promptVersion: contentPrompt.version,
+        promptSource: contentPrompt.source,
+        promptOrigin: contentPrompt.origin,
+      });
 
     // 终稿只有这一次调用，产出的正文即最终发言，因此可以一路逐 token 外发
     const content = await this.modelCalls.streamText(
@@ -116,10 +118,13 @@ export class PlayerTurnService {
       onContent,
       contentTrace,
       context.access,
+      'final',
+      (id) => {
+        if (context.source) context.source.outputObservationId = id;
+      },
     );
 
     const contentEndTime = Date.now();
-    if (context.source) context.source.outputObservationId = contentTrace.observationId;
     return {
       thinking,
       content,
@@ -140,7 +145,7 @@ export class PlayerTurnService {
     } = {},
   ): Promise<{ reasoning: string; decision: T }> {
     throwIfAborted(signal);
-    this.beginAttempt(context);
+    await this.beginAttempt(context);
     const outputSchema = z.object({
       reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
       decision: zodSchema,
@@ -251,15 +256,17 @@ export class PlayerTurnService {
           history,
           signal,
           onThinking,
-          this.langfuse.trace({
-            runName: `${options.runName}-${round + 1}`,
-            ...options.traceParams,
-            promptName: prompt.name,
-            promptVersion: prompt.version,
-            promptSource: prompt.source,
-            promptOrigin: prompt.origin,
-          }),
+          (retry) =>
+            this.langfuse.trace({
+              runName: `${options.runName}-${round + 1}` + (retry ? '-retry' : ''),
+              ...options.traceParams,
+              promptName: prompt.name,
+              promptVersion: prompt.version,
+              promptSource: prompt.source,
+              promptOrigin: prompt.origin,
+            }),
           context.access,
+          `thinking/${round}`,
         ),
       );
     }
@@ -311,18 +318,25 @@ export class PlayerTurnService {
           promptOrigin: prompt.origin,
           source: context.source,
         });
-        if (context.source) context.source.outputObservationId = trace.observationId;
         return trace;
       },
       signal,
       wireSchema,
       context.access,
+      undefined,
+      'final',
+      (id) => {
+        if (context.source) context.source.outputObservationId = id;
+      },
     );
   }
 
-  private beginAttempt(context: TurnGenerationContext): void {
+  private async beginAttempt(context: TurnGenerationContext): Promise<void> {
     if (!context.actionKey) return;
-    context.source = createActionSource(context.actionKey);
-    this.langfuse.startAttempt(context.source, context.player.gameId, context.player.id);
+    context.source = await this.modelCalls.beginAttempt(
+      context.actionKey,
+      context.player.gameId,
+      context.player.id,
+    );
   }
 }

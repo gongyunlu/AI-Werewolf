@@ -66,7 +66,7 @@ export class GameExecutorService {
       }),
     });
     const manifest: RecoveryManifest = {
-      version: 1,
+      version: 2,
       prompts:
         readExperiment(game.experiment)?.prompts ??
         (await this.promptService.captureSnapshot([

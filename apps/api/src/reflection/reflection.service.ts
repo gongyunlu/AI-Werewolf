@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { MemoryType } from '@ai-werewolf/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { MemoryService, type CreateMemoryInput } from '../memory/memory.service';
 import { ACTION_TYPES } from '@ai-werewolf/shared';
@@ -50,7 +50,7 @@ export class ReflectionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly promptService: PromptService,
-    private readonly structuredLlm: StructuredLlmService,
+    private readonly structuredLlm: ModelGenerationService,
     private readonly memoryService: MemoryService,
     private readonly gameReviewService: GameReviewService,
   ) {}
@@ -157,7 +157,10 @@ export class ReflectionService {
     const label = player.memoryLabelSnapshot;
     const opponentByName = new Map(others.map((o) => [o.agentName, o]));
     const systemPromptPromise = this.promptService.render(PROMPT_NAMES.reflectionSystem);
-    let modelSnapshot = initialModelSnapshot;
+    let modelSnapshot = await this.structuredLlm.freezeJobInput(
+      'player-model/1',
+      async () => initialModelSnapshot,
+    );
 
     for (let attempt = 1; attempt <= PLAYER_MODEL_CAS_MAX_ATTEMPTS; attempt += 1) {
       const variables = buildReflectionVariables({
@@ -201,6 +204,7 @@ export class ReflectionService {
       const { output } = await this.structuredLlm.invoke({
         schema: ReflectionOutputSchema,
         runName: 'reflection',
+        stageLabel: `reflection/${attempt}`,
         scenario: 'reflection',
         system: systemPrompt.text,
         user: userPrompt.text,
@@ -370,7 +374,9 @@ export class ReflectionService {
           { gameId, playerId, attempt },
           'player_model 快照已变化，将在事务外基于最新建模重新生成反思',
         );
-        modelSnapshot = await this.loadExistingPlayerModelSnapshot(player.agentId, label);
+        modelSnapshot = await this.structuredLlm.freezeJobInput(`player-model/${attempt + 1}`, () =>
+          this.loadExistingPlayerModelSnapshot(player.agentId, label),
+        );
         continue;
       }
 

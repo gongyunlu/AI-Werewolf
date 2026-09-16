@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { GameReviewOutputSchema, type GameReviewOutput } from './reflection-schema';
 import { buildGameReviewVariables, type ReviewPlayer } from './reflection-prompt';
@@ -32,7 +32,7 @@ export class GameReviewService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly promptService: PromptService,
-    private readonly structuredLlm: StructuredLlmService,
+    private readonly structuredLlm: ModelGenerationService,
   ) {}
 
   /** 读取已生成的复盘；未生成或与当前评分运行对不上时返回 null */

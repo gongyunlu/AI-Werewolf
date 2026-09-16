@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EmbeddingService } from '../memory/embedding.service';
 import { MemoryService } from '../memory/memory.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import { ConsolidationOutputSchema } from './memory-consolidate.schema';
 
@@ -81,7 +81,7 @@ export class MemoryMaintenanceService {
     private readonly embeddingService: EmbeddingService,
     private readonly memoryService: MemoryService,
     private readonly promptService: PromptService,
-    private readonly structuredLlm: StructuredLlmService,
+    private readonly structuredLlm: ModelGenerationService,
   ) {}
 
   /** 幂等投递：同局维护任务只入队一次，重复调用直接复用已存在任务 */
@@ -320,6 +320,10 @@ export class MemoryMaintenanceService {
       const { output } = await this.structuredLlm.invoke({
         schema: ConsolidationOutputSchema,
         runName: 'memory-consolidation',
+        stageLabel: `memory-consolidation/${agentId}/${label}/${members
+          .map((member) => member.id)
+          .toSorted()
+          .join(',')}`,
         scenario: 'consolidation',
         system: systemPrompt.text,
         user: userPrompt.text,

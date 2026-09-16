@@ -168,7 +168,7 @@ describe('标准六人 mock 完整对局', () => {
     ).toBe(true);
   });
 
-  it('03 查验模型超时取消，单次重试成功后正常完局', async () => {
+  it('03 查验模型超时取消后中止，不自动重试', async () => {
     game = await createMockGame();
     const arrived = deferred<ModelRequest>();
     const late = deferred<void>();
@@ -179,7 +179,7 @@ describe('标准六人 mock 完整对局', () => {
         await late.promise;
       }
     };
-    const finished = assertFinished('villager');
+    const finished = assertAborted();
     const request = await arrived.promise;
     await jest.advanceTimersByTimeAsync(1001);
     late.resolve();
@@ -187,15 +187,22 @@ describe('标准六人 mock 完整对局', () => {
     expect(request.signal.aborted).toBe(true);
     expect(
       game.model.requests.filter((r) => r.day === 1 && r.action === 'check_identity'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it('04 模型故障直接中止对局，不写替代查验也不让该玩家继续行动', async () => {
     game = await createMockGame();
+    const arrived = deferred<void>();
     game.model.beforeRequest = (r) => {
-      if (r.seat === 3) throw unavailable();
+      if (r.seat === 3) {
+        arrived.resolve();
+        throw unavailable();
+      }
     };
-    await assertAborted();
+    const failed = assertAborted();
+    await arrived.promise;
+    await jest.advanceTimersByTimeAsync(3000);
+    await failed;
     expect(game.store.events.filter((e) => e.actionType === A.SEER_CHECK)).toHaveLength(0);
     expect(game.store.events.some((e) => e.actionType === A.VOTE && e.actorId === 'player-3')).toBe(
       false,

@@ -21,7 +21,11 @@ function projectionHarness() {
       ) => {
         results.set(
           eventId,
-          await compute(definition, createActionSource(`${gameId}/${runId}/${eventId}`)),
+          await compute(
+            definition,
+            createActionSource(`${gameId}/${runId}/${eventId}`),
+            undefined as never,
+          ),
         );
       },
     ),

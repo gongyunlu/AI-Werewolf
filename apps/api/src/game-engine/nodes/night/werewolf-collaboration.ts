@@ -1,6 +1,6 @@
 import { failAfterEffect, failModelCall, settleGameActions } from '../../core/game-failure-policy';
 import { createHash } from 'node:crypto';
-import { ChatOpenAI } from '@langchain/openai';
+import { HumanMessage } from '@langchain/core/messages';
 import { ROLES } from '@ai-werewolf/shared';
 import { z } from 'zod';
 import type { GameGraphState, PlayerState } from '../../core/types';
@@ -211,40 +211,32 @@ async function shouldContinueDiscussion(
     const modelName =
       experiment?.auxiliaryModel ??
       context.configService.getOrThrow('ARK_DEFAULT_MODEL', { infer: true });
-    const model = new ChatOpenAI({
-      apiKey: context.configService.get('ARK_API_KEY', { infer: true }),
-      model: modelName,
-      configuration: { baseURL: context.configService.get('ARK_BASE_URL', { infer: true }) },
-      temperature: 0,
-      timeout: context.configService.get('LLM_CALL_TIMEOUT_MS') ?? 300_000,
-      maxRetries: 0,
-    });
-
-    const responseText = await saveNodeValue(context, 'coordination', async () => {
-      const response = await context.agentRuntime.runModelCall(
+    const responseText = await saveNodeValue(context, 'coordination', () =>
+      context.agentRuntime.generateText(
         modelName,
-        (callSignal) =>
-          model.invoke(coordinationPrompt.text, {
-            signal: callSignal,
-            ...context.langfuse.trace({
-              runName: 'wolf-coordination',
-              gameId: state.gameId,
-              playerId: state.gameId, // 协调判断不绑定单个玩家，以 gameId 兜底
-              modelName,
-              scenario: 'night_action',
-              promptName: coordinationPrompt.name,
-              promptVersion: coordinationPrompt.version,
-              promptSource: coordinationPrompt.source,
-              promptOrigin: coordinationPrompt.origin,
-            }),
-          }),
+        [new HumanMessage(coordinationPrompt.text)],
         context.signal,
-      );
-      return response.content.toString();
-    });
-    const decision = responseText.trim().toUpperCase();
-
-    return decision === 'YES';
+        undefined,
+        (retry) =>
+          context.langfuse.trace({
+            runName: 'wolf-coordination' + (retry ? '-retry' : ''),
+            gameId: state.gameId,
+            playerId: state.gameId,
+            modelName,
+            scenario: 'night_action',
+            promptName: coordinationPrompt.name,
+            promptVersion: coordinationPrompt.version,
+            promptSource: coordinationPrompt.source,
+            promptOrigin: coordinationPrompt.origin,
+          }),
+        undefined,
+        'coordination',
+        undefined,
+        { temperature: 0, disableReasoning: false },
+        z.enum(['YES', 'NO']),
+      ),
+    );
+    return responseText === 'YES';
   } catch (error) {
     failModelCall(error, context, `[狼人讨论] 第${currentRound}轮协调判断失败`);
   }

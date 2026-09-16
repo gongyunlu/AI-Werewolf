@@ -4,7 +4,7 @@ import type { EmbeddingService } from '../memory/embedding.service';
 import { MEMORY_EMBEDDING_DIMENSION } from '../memory/embedding.service';
 import type { MemoryService } from '../memory/memory.service';
 import type { PromptService } from '../observability/prompt.service';
-import type { StructuredLlmService } from '../observability/structured-llm.service';
+import type { ModelGenerationService } from '../llm/model-generation.service';
 import { MemoryMaintenanceService, maintenancePlan } from './memory-maintenance.service';
 
 function createMockPrisma() {
@@ -57,7 +57,7 @@ describe('MemoryMaintenanceService', () => {
       createMockEmbeddingService() as unknown as EmbeddingService,
       { embedMemories: jest.fn() } as unknown as MemoryService,
       { render: jest.fn() } as unknown as PromptService,
-      { invoke: jest.fn() } as unknown as StructuredLlmService,
+      { invoke: jest.fn() } as unknown as ModelGenerationService,
     );
     prisma.player.findMany.mockResolvedValue([
       { id: 'p1', agentId: 'a1', memoryLabelSnapshot: 'label1' },

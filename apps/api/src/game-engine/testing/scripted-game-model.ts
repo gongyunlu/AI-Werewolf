@@ -91,9 +91,16 @@ export class ScriptedGameModel {
         },
       }),
       stream: async (messages: BaseMessage[], options: { signal: AbortSignal }) => {
-        const request = await this.request(model, messages, options.signal, 'stream');
+        const request = await this.request(
+          model,
+          messages,
+          options.signal,
+          model === 'mock-coordinator' ? 'coordination' : 'stream',
+        );
         return (async function* () {
-          for (const content of [`${request.seat}号发言。`, '请结合公开信息判断。']) {
+          for (const content of model === 'mock-coordinator'
+            ? ['YES']
+            : [`${request.seat}号发言。`, '请结合公开信息判断。']) {
             options.signal.throwIfAborted();
             yield { content };
           }

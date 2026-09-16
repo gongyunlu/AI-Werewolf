@@ -1,7 +1,8 @@
 import { OpenAIClient } from '@langchain/openai';
 import { isNativeError } from 'node:util/types';
 
-export type ModelFailureCode = 'transient' | 'invalid_output' | 'circuit_open';
+export type ModelFailureCode =
+  'transient' | 'invalid_output' | 'circuit_open' | 'fatal' | 'deadline' | 'budget_exhausted';
 export type ModelCallMode = 'invoke' | 'stream';
 type TimeoutPhase = 'first_chunk' | 'idle' | 'total';
 
@@ -17,6 +18,7 @@ export interface ModelFailureDetails {
   finishReason?: string;
   inputTokens?: number;
   outputTokens?: number;
+  partialOutput?: boolean;
 }
 
 /** 失败分类决定调用策略，不生成替代行动。 */
@@ -109,6 +111,7 @@ export class ModelCallGuard {
     call: (signal: AbortSignal, reportProgress: () => void) => Promise<T>,
     parentSignal?: AbortSignal,
     mode: ModelCallMode = 'invoke',
+    maxDurationMs?: number,
   ): Promise<T> {
     parentSignal?.throwIfAborted();
     const circuit = this.circuits.get(route) ?? {
@@ -119,7 +122,11 @@ export class ModelCallGuard {
     };
     this.circuits.set(route, circuit);
     if (circuit.openUntil > Date.now() || circuit.probing)
-      throw new ModelCallError('circuit_open', undefined, circuit.openUntil);
+      throw new ModelCallError(
+        'circuit_open',
+        undefined,
+        circuit.probing ? Date.now() + this.options.cooldownMs : circuit.openUntil,
+      );
     const probe = circuit.openUntil > 0;
     if (probe) circuit.probing = true;
     const generation = circuit.generation;
@@ -135,7 +142,10 @@ export class ModelCallGuard {
       expired = { timeoutPhase, timeoutMs };
       controller.abort(new DOMException(`模型调用超时: ${timeoutPhase}`, 'TimeoutError'));
     };
-    const totalMs = mode === 'stream' ? this.options.streamTimeoutMs : this.options.timeoutMs;
+    const totalMs = Math.min(
+      maxDurationMs ?? Infinity,
+      mode === 'stream' ? this.options.streamTimeoutMs : this.options.timeoutMs,
+    );
     const timeout = setTimeout(() => expire('total', totalMs), totalMs);
     let progressTimeout: ReturnType<typeof setTimeout> | undefined;
     if (mode === 'stream') {

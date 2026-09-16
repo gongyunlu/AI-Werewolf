@@ -1,3 +1,6 @@
+import { ModelGenerationService } from '../llm/model-generation.service';
+import { JobModelStages } from '../llm/job-model-stages';
+import { RedisService } from '../redis/redis.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
@@ -25,6 +28,8 @@ export class ReflectionWorkerService extends WorkerHost {
   private readonly logger = new Logger(ReflectionWorkerService.name);
 
   constructor(
+    private readonly generations: ModelGenerationService,
+    private readonly redis: RedisService,
     private readonly prisma: PrismaService,
     private readonly judgeService: JudgeService,
     private readonly gameReviewService: GameReviewService,
@@ -36,7 +41,15 @@ export class ReflectionWorkerService extends WorkerHost {
     super();
   }
 
-  async process(job: Job<ReflectJobData>): Promise<void> {
+  async process(job: Job<ReflectJobData>, token?: string): Promise<void> {
+    token ??= job.token;
+    if (!token) throw new Error('模型任务缺少 Worker 执行令牌');
+    return this.generations.withJob(new JobModelStages(this.redis, job, token), () =>
+      this.consume(job),
+    );
+  }
+
+  private async consume(job: Job<ReflectJobData>): Promise<void> {
     const { gameId, playerId, force, suffix } = job.data;
 
     try {

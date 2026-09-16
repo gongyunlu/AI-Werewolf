@@ -1,7 +1,7 @@
 import { ReflectionService } from './reflection.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PromptService } from '../observability/prompt.service';
-import { StructuredLlmService } from '../observability/structured-llm.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
 import { MemoryService, type CreateMemoryInput } from '../memory/memory.service';
 import { GameReviewService } from './game-review.service';
 import { FACTIONS, ROLES } from '@ai-werewolf/shared';
@@ -40,7 +40,10 @@ function createMocks() {
   const promptService = {
     render: jest.fn().mockResolvedValue({ text: 'rendered', name: 'x', version: 1 }),
   };
-  const structuredLlm = { invoke: jest.fn() };
+  const structuredLlm = {
+    freezeJobInput: jest.fn((_key: string, create: () => Promise<unknown>) => create()),
+    invoke: jest.fn(),
+  };
   const memoryService = {
     createMemories: jest.fn((inputs: CreateMemoryInput[], _tx?: unknown) =>
       inputs.map((input, i) => ({ id: `m${i}`, content: input.content })),
@@ -55,7 +58,7 @@ function createMocks() {
   const service = new ReflectionService(
     prisma as unknown as PrismaService,
     promptService as unknown as PromptService,
-    structuredLlm as unknown as StructuredLlmService,
+    structuredLlm as unknown as ModelGenerationService,
     memoryService as unknown as MemoryService,
     gameReviewService as unknown as GameReviewService,
   );

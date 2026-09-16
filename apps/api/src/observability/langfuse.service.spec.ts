@@ -1,3 +1,4 @@
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 import { HumanMessage } from '@langchain/core/messages';
 import { Langfuse } from 'langfuse-langchain';
 import { LangfuseService } from './langfuse.service';
@@ -238,6 +239,7 @@ it.each(['glm-5.3', 'minimax-m3', 'doubao-seed-2-0-pro-260215'])(
       LANGFUSE_HOST: 'https://trace.test',
       ARK_API_KEY: 'provider-secret',
       ARK_BASE_URL: 'https://provider.test/v3',
+      MODEL_CAPABILITIES: testModelCapabilities('https://provider.test/v3', [modelName]),
       LLM_FIRST_CHUNK_TIMEOUT_MS: 5000,
       LLM_STREAM_IDLE_TIMEOUT_MS: 5000,
       LLM_STREAM_MAX_DURATION_MS: 10000,

@@ -1,10 +1,8 @@
 import { Logger } from '@nestjs/common';
 import { config as loadEnv } from 'dotenv';
 import { resolve } from 'node:path';
-import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { createCliModels } from '../llm/cli-models';
 import { z } from 'zod';
-import { resolveModelCapability } from '../llm/model-capability';
 import { RoleSchema } from '@ai-werewolf/shared';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
@@ -61,10 +59,11 @@ async function main(): Promise<void> {
     throw new Error('缺少必要环境变量（DATABASE_URL/ARK_API_KEY/ARK_DEFAULT_MODEL/ARK_BASE_URL）');
   }
 
+  const models = createCliModels();
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
-  await prisma.$connect();
 
   try {
+    await prisma.$connect();
     const rows = await prisma.$queryRaw<Array<{ id: string; trigger: string; action: string }>>`
       SELECT id,
              COALESCE(metadata->>'trigger', content) AS trigger,
@@ -81,30 +80,26 @@ async function main(): Promise<void> {
       return;
     }
 
-    const model = new ChatOpenAI({
-      apiKey,
-      model: modelName,
-      configuration: { baseURL: baseUrl },
-      streaming: false,
-      timeout: 300_000,
-      maxRetries: 0,
-    }).withStructuredOutput(z.toJSONSchema(TriggerTagSchema), {
-      method: resolveModelCapability(modelName).protocol,
-    });
-
     let done = 0;
     let failed = 0;
     for (const row of rows) {
       try {
-        const raw = await model.invoke([
-          new SystemMessage(SYSTEM_PROMPT),
-          new HumanMessage(`触发条件：${row.trigger}\n行动：${row.action}`),
-        ]);
-        const tag = TriggerTagSchema.parse(raw);
+        const { output: tag } = await models.generations.invoke({
+          schema: TriggerTagSchema,
+          system: SYSTEM_PROMPT,
+          user: `触发条件：${row.trigger}\n行动：${row.action}`,
+          modelName,
+          runName: 'lesson-trigger',
+          scenario: 'memory',
+          gameId: 'lesson-backfill',
+          playerId: row.id,
+          signal: models.signal,
+        });
         // 用 jsonb 合并追加 role/scenario，保留原有 trigger/action/evidence
         await updateLessonMetadata(prisma, row.id, tag);
         done += 1;
       } catch (error) {
+        models.signal.throwIfAborted();
         failed += 1;
         logger.warn(
           `回填失败 id=${row.id}：${error instanceof Error ? error.message : String(error)}`,
@@ -114,7 +109,11 @@ async function main(): Promise<void> {
 
     logger.log(`lesson trigger 回填完成：成功 ${done} 条，失败 ${failed} 条`);
   } finally {
-    await prisma.$disconnect();
+    try {
+      await models.close();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
 }
 

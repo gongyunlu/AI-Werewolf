@@ -1,68 +1,81 @@
-import { ConfigService } from '@nestjs/config';
-import type { Env } from '../config/env.validation';
 import { EmbeddingService, MEMORY_EMBEDDING_DIMENSION } from './embedding.service';
-
-const mockEmbedQuery = jest.fn();
-const mockEmbedDocuments = jest.fn();
-
-jest.mock('@langchain/openai', () => ({
-  OpenAIEmbeddings: jest.fn().mockImplementation(() => ({
-    embedQuery: mockEmbedQuery,
-    embedDocuments: mockEmbedDocuments,
-  })),
-}));
-
-const createVector = (value = 0.1): number[] =>
-  Array<number>(MEMORY_EMBEDDING_DIMENSION).fill(value);
-
-describe('EmbeddingService', () => {
-  let service: EmbeddingService;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    const config = {
-      get: jest.fn((key: keyof Env) => {
-        const values: Partial<Env> = {
-          ARK_API_KEY: 'test-key',
-          ARK_EMBEDDING_MODEL: 'test-embedding-model',
-          ARK_BASE_URL: 'https://example.com',
-        };
-        return values[key];
+const vector = () => Array<number>(MEMORY_EMBEDDING_DIMENSION).fill(0.1);
+let service: EmbeddingService;
+let fetch: jest.SpyInstance;
+beforeEach(() => {
+  const env: Record<string, unknown> = {
+    ARK_API_KEY: 'test-key',
+    ARK_EMBEDDING_MODEL: 'embedding',
+    ARK_BASE_URL: 'https://embedding.test/v1',
+    LLM_CALL_TIMEOUT_MS: 500,
+  };
+  fetch = jest.spyOn(globalThis, 'fetch');
+  service = new EmbeddingService({ get: (key: string) => env[key] } as never);
+});
+afterEach(() => jest.restoreAllMocks());
+function respond(vectors: number[][]) {
+  fetch.mockImplementation(async () =>
+    Response.json({
+      data: vectors.map((embedding, index) => ({ index, embedding })),
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    }),
+  );
+}
+it('真实 SDK 返回 2048 维有限向量', async () => {
+  respond([vector()]);
+  await expect(service.embedText('测试记忆')).resolves.toEqual(vector());
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+it('错维度与错数量均明确失败', async () => {
+  respond([[0.1]]);
+  await expect(service.embedText('测试记忆')).rejects.toThrow('维度无效');
+  respond([vector()]);
+  await expect(service.embedTexts(['甲', '乙'])).rejects.toThrow('数量异常');
+});
+it.each([NaN, Infinity])('拒绝非有限数值 %s', (value) => {
+  const values = vector();
+  values[7] = value;
+  expect(() => service.assertValidVector(values)).toThrow('数值无效');
+});
+it('429 不触发 SDK 或 AsyncCaller 隐藏重试', async () => {
+  fetch.mockImplementation(async () =>
+    Response.json(
+      { error: { message: 'rate limited', type: 'rate_limit_error' } },
+      { status: 429 },
+    ),
+  );
+  await expect(service.embedText('测试记忆')).rejects.toMatchObject({ code: 'transient' });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+it('取消传到底层 HTTP 请求，不只停止外层等待', async () => {
+  const controller = new AbortController();
+  let requestSignal: AbortSignal | undefined;
+  fetch.mockImplementation(
+    (_url, init) =>
+      new Promise((_resolve, reject) => {
+        requestSignal = init.signal;
+        requestSignal!.addEventListener('abort', () => reject(requestSignal!.reason), {
+          once: true,
+        });
+        controller.abort(new Error('停止向量化'));
       }),
-    } as unknown as ConfigService<Env, true>;
-    service = new EmbeddingService(config);
+  );
+  await expect(service.embedText('测试记忆', controller.signal)).rejects.toThrow('停止向量化');
+  expect(requestSignal?.aborted).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+it('分批保持单次最多十条，错误索引不能错绑向量', async () => {
+  fetch.mockImplementation(async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    expect(body.input.length).toBeLessThanOrEqual(10);
+    return Response.json({
+      data: body.input.map((_text: string, index: number) => ({ index, embedding: vector() })),
+    });
   });
-
-  it('返回 2048 维有限数值向量', async () => {
-    const vector = createVector();
-    mockEmbedQuery.mockResolvedValue(vector);
-
-    await expect(service.embedText('测试记忆')).resolves.toBe(vector);
-  });
-
-  it('拒绝维度与数据库契约不符的模型输出', async () => {
-    mockEmbedQuery.mockResolvedValue(Array<number>(64).fill(0.1));
-
-    await expect(service.embedText('测试记忆')).rejects.toThrow(
-      'Embedding 向量维度无效：期望 2048 维，实际 64 维',
-    );
-  });
-
-  it.each([Number.NaN, Number.POSITIVE_INFINITY])('拒绝非有限数值 %s', async (value) => {
-    const vector = createVector();
-    vector[7] = value;
-    mockEmbedQuery.mockResolvedValue(vector);
-
-    await expect(service.embedText('测试记忆')).rejects.toThrow(
-      'Embedding 向量数值无效：索引 7 不是有限数值',
-    );
-  });
-
-  it('校验批量响应的向量数量', async () => {
-    mockEmbedDocuments.mockResolvedValue([createVector()]);
-
-    await expect(service.embedTexts(['记忆 A', '记忆 B'])).rejects.toThrow(
-      'Embedding 服务返回数量异常：期望 2 条，实际 1 条',
-    );
-  });
+  expect(await service.embedTexts(Array<string>(11).fill('测试'))).toHaveLength(11);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  fetch.mockImplementation(async () =>
+    Response.json({ data: [{ index: 1, embedding: vector() }] }),
+  );
+  await expect(service.embedText('错位')).rejects.toThrow('索引');
 });

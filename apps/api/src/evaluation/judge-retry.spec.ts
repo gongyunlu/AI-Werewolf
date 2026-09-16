@@ -106,7 +106,10 @@ function harness(actionType = 'speech') {
       ) => {
         const key = `${runId}/${eventId}`;
         if (!results.has(key))
-          results.set(key, await compute(definition, createActionSource(`${gameId}/${key}`)));
+          results.set(
+            key,
+            await compute(definition, createActionSource(`${gameId}/${key}`), undefined as never),
+          );
       },
     ),
   };

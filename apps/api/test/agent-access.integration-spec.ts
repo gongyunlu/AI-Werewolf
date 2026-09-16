@@ -1,3 +1,4 @@
+import { testModelCapabilities } from '../src/testing/model-capabilities.fixture';
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
@@ -63,6 +64,17 @@ describe('局内模型调用使用的接入端点', () => {
       .mockRejectedValue(new Error('Agent access tests prohibit network access'));
     config = {
       AGENT_SECRET_KEY: SECRET_KEY,
+      MODEL_CAPABILITIES: JSON.stringify(
+        ['https://mock.invalid', 'https://deepseek.example/v1', 'https://relay.example/v1'].flatMap(
+          (url) =>
+            JSON.parse(
+              testModelCapabilities(url, [
+                'mock-coordinator',
+                ...Array.from({ length: 18 }, (_, index) => `mock-seat-${index + 1}`),
+              ]),
+            ),
+        ),
+      ),
       GAME_MAX_DURATION_MS: 600_000,
       LLM_CALL_TIMEOUT_MS: 10_000,
     };

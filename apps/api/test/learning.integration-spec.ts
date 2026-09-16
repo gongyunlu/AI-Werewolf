@@ -8,7 +8,7 @@ import { GlobalMemoryService } from '../src/memory/global-memory.service';
 import type { EmbeddingService } from '../src/memory/embedding.service';
 import { MemoryMaintenanceService } from '../src/memory-maintenance/memory-maintenance.service';
 import { PromptService } from '../src/observability/prompt.service';
-import type { StructuredLlmService } from '../src/observability/structured-llm.service';
+import type { ModelGenerationService } from '../src/llm/model-generation.service';
 import { createLearningTestDatabase } from './helpers/learning-test-database';
 import { withLearningTestQueues } from './helpers/learning-test-queues';
 import { EVALUATION_VERSION } from '../src/evaluation/evaluation-version';
@@ -58,7 +58,10 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
     embedTexts: jest.fn(),
     assertValidVector: jest.fn(),
   };
-  const llm = { invoke: jest.fn() };
+  const llm = {
+    freezeJobInput: jest.fn((_key: string, create: () => Promise<unknown>) => create()),
+    invoke: jest.fn(),
+  };
   const queue = { getJob: jest.fn(), add: jest.fn() };
   const pattern = { title: '规律', content: '发言应说明判断依据', importance: 0.8 };
 
@@ -89,7 +92,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
       {
         render: jest.fn().mockResolvedValue({ text: 'test', name: 'test', version: null }),
       } as unknown as PromptService,
-      llm as unknown as StructuredLlmService,
+      llm as unknown as ModelGenerationService,
     );
     const agent = await prisma.agent.create({
       data: { name: randomUUID(), defaultModelName: 'mock', memoryLabel: 'test' },
@@ -539,18 +542,24 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
         render: jest.fn().mockResolvedValue({ text: '隔离测试', name: 'test', version: null }),
       } as unknown as PromptService;
       const reviewOutput = { narrative: '新复盘', patterns: [], turningPoints: [] };
-      const reviewLlm = { invoke: jest.fn().mockResolvedValue({ output: reviewOutput }) };
+      const reviewLlm = {
+        freezeJobInput: jest.fn((_key: string, create: () => Promise<unknown>) => create()),
+        invoke: jest.fn().mockResolvedValue({ output: reviewOutput }),
+      };
       const review = new GameReviewService(
         prisma,
         prompts,
-        reviewLlm as unknown as StructuredLlmService,
+        reviewLlm as unknown as ModelGenerationService,
       );
       const reflectionOutput = { summary: '新反思', lessons: [], playerModels: [] };
-      const reflectionLlm = { invoke: jest.fn().mockResolvedValue({ output: reflectionOutput }) };
+      const reflectionLlm = {
+        freezeJobInput: jest.fn((_key: string, create: () => Promise<unknown>) => create()),
+        invoke: jest.fn().mockResolvedValue({ output: reflectionOutput }),
+      };
       const reflection = new ReflectionService(
         prisma,
         prompts,
-        reflectionLlm as unknown as StructuredLlmService,
+        reflectionLlm as unknown as ModelGenerationService,
         memories,
         review,
       );
@@ -917,9 +926,13 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
           embedding as unknown as EmbeddingService,
           memories,
           {} as PromptService,
-          llm as unknown as StructuredLlmService,
+          llm as unknown as ModelGenerationService,
         );
-        const maintenanceHost = new MaintenanceWorkerService(realMaintenance);
+        const maintenanceHost = new MaintenanceWorkerService(
+          realMaintenance,
+          { withJob: (_store: unknown, run: () => unknown) => run() } as never,
+          connection as never,
+        );
         const queueService = new ReflectionQueueService(
           reflectionQueue,
           connection as unknown as RedisService,
@@ -929,6 +942,8 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
           expect(await maintenanceQueue.getJob('maintenance_' + g.id)).toBeUndefined();
         });
         const reflectionHost = new ReflectionWorkerService(
+          { withJob: (_store: unknown, run: () => unknown) => run() } as never,
+          connection as never,
           prisma,
           {} as JudgeService,
           {} as GameReviewService,
@@ -978,7 +993,7 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
           embedding as unknown as EmbeddingService,
           memories,
           {} as PromptService,
-          llm as unknown as StructuredLlmService,
+          llm as unknown as ModelGenerationService,
         );
         const run = realMaintenance.runForGame.bind(realMaintenance);
         const calls = jest
@@ -986,7 +1001,11 @@ describe('学习维护：隔离 PostgreSQL/pgvector', () => {
           .mockRejectedValueOnce(new Error('test database unavailable'))
           .mockRejectedValueOnce(new Error('test database unavailable'))
           .mockImplementation(run);
-        const host = new MaintenanceWorkerService(realMaintenance);
+        const host = new MaintenanceWorkerService(
+          realMaintenance,
+          { withJob: (_store: unknown, run: () => unknown) => run() } as never,
+          connection as never,
+        );
         workers.push(
           new Worker(MEMORY_MAINTENANCE_QUEUE, (job) => host.process(job), {
             connection,

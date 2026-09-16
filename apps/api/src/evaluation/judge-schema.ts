@@ -9,7 +9,11 @@ export type JudgeVerdict = z.infer<typeof JudgeVerdictSchema>;
 export const JudgeOutputSchema = z.object({
   verdict: JudgeVerdictSchema,
   score: z.number().int().min(0).max(100),
-  reasoning: z.string().min(1).max(500),
+  reasoning: z
+    .string()
+    .min(1)
+    .max(500)
+    .refine((text) => text.trim().length > 0, '理由不能只有空白'),
 });
 export type JudgeOutput = z.infer<typeof JudgeOutputSchema>;
 
@@ -17,10 +21,8 @@ export type JudgeOutput = z.infer<typeof JudgeOutputSchema>;
  * 发言批量评估的结构化输出。
  *
  * index 对应 prompt 时间线里的 `[发言#n]` 序号，是评分映射回具体事件的唯一依据。
- * 弱模型（deepseek-v4-flash 等）在 jsonSchema 结构化输出下频繁漏标 index（1~2 条发言也漏），
- * prompt 强调 + 单次重试仍拦不住，反复失败重试白烧调用，故放宽为可选。
- * 运行时只在「条数对齐且全部漏标」时按输出顺序回填（全漏标说明模型只是没写该字段而非乱序，
- * 顺序即时间线顺序，无错位风险）；部分漏标仍由 validateSpeechOutput 抛错重试，不静默错位。
+ * 保留既有兼容规则：条数对齐且全部漏标时，按时间线顺序解释；部分漏标拒绝采用。
+ * 目标数量、索引范围和唯一性在阶段结果保存前校验，失败进入统一的输出修正政策。
  */
 export const SpeechJudgeOutputSchema = z.object({
   items: z
@@ -36,9 +38,7 @@ export type SpeechJudgeOutput = z.infer<typeof SpeechJudgeOutputSchema>;
 /**
  * 运行时校验发言评分的 index 映射能否安全落到事件。
  *
- * zod 能保证「index 是正整数」，表达不了「落在 1..targetCount 且唯一」这类
- * 依赖运行时 targetCount 的约束，故在 upsert 前补一层后校验：
- * 非法输出抛错让 job 失败重试，而不是静默错位写入。
+ * 由动态 Schema 传入本次目标数量，拒绝缺失、越界或重复的索引。
  */
 export function validateSpeechOutput(items: SpeechJudgeOutput['items'], targetCount: number): void {
   if (items.length !== targetCount) {
@@ -59,4 +59,18 @@ export function validateSpeechOutput(items: SpeechJudgeOutput['items'], targetCo
     }
     seen.add(idx);
   }
+}
+
+/** 先完成目标映射校验，再允许阶段结果进入恢复缓存。 */
+export function speechJudgeSchema(targetCount: number) {
+  return SpeechJudgeOutputSchema.superRefine((output, ctx) => {
+    const items = output.items.every((item) => item.index == null)
+      ? output.items.map((item, index) => ({ ...item, index: index + 1 }))
+      : output.items;
+    try {
+      validateSpeechOutput(items, targetCount);
+    } catch (error) {
+      ctx.addIssue({ code: 'custom', message: (error as Error).message });
+    }
+  });
 }

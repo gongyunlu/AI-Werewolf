@@ -6,6 +6,8 @@ import { PromptService } from '../observability/prompt.service';
 import { validateEnv, type Env } from '../config/env.validation';
 import { PlayerTurnService } from '../player-turn/player-turn.service';
 import { ModelCallService } from '../llm/model-call.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 import { replayDecision, type DecisionReplaySnapshot } from '../player-turn/decision-replay';
 import { PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
 import { buildVoteSchema } from '../game-executor/vote-turn.adapter';
@@ -20,6 +22,7 @@ function setup(modelName = 'glm-5.3', overrides: Partial<Env> = {}) {
   const values: Record<string, unknown> = {
     ARK_API_KEY: 'test-key',
     ARK_BASE_URL: 'https://provider.test/v3',
+    MODEL_CAPABILITIES: testModelCapabilities('https://provider.test/v3', [modelName]),
     TURN_REFLECTION_MAX_ROUNDS: 0,
     LLM_CALL_TIMEOUT_MS: 1000,
     LLM_FIRST_CHUNK_TIMEOUT_MS: 1000,
@@ -151,26 +154,26 @@ it('SDK 包装的连接失败只重试一次终稿，不重复思考，日志保
   expect(JSON.stringify(warn.mock.calls)).not.toContain('https://provider.test');
 });
 
-it('连续连接失败耗尽原有一次重试后明确失败，不保存替代决策', async () => {
+it('连续连接失败耗尽三次请求额度后明确失败，不保存替代决策', async () => {
   const { runtime, context, responses, requests } = setup();
-  responses.push(thinking(), connectionReset(), connectionReset());
+  responses.push(thinking(), connectionReset(), connectionReset(), connectionReset());
 
   await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
     code: 'transient',
     details: { errorType: 'APIConnectionError' },
     cause: { cause: { cause: { code: 'ECONNRESET' } } },
   });
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(4);
   expect(requests[2]).toEqual(requests[1]);
   expect(context.replay?.decision).toBeUndefined();
 });
 
-it('流式思考的连接失败不会因新分类而重放整轮', async () => {
+it('流式思考的未输出有效片段时，连接失败最多请求三次', async () => {
   const { runtime, context, responses, requests } = setup();
-  responses.push(connectionReset());
+  responses.push(connectionReset(), connectionReset(), connectionReset());
 
   await expect(runtime.streamSpeech(context)).rejects.toMatchObject({ code: 'transient' });
-  expect(requests).toHaveLength(1);
+  expect(requests).toHaveLength(3);
 });
 
 it.each([
@@ -224,10 +227,11 @@ it.each([401, 403])('HTTP %s 认证与权限错误仍立即终止，不套用连
   expect(context.replay?.decision).toBeUndefined();
 });
 
-it('持续流内过载耗尽原有一次重试，保留供应商错误码且不伪造 HTTP 状态', async () => {
+it('持续流内过载耗尽三次请求额度，保留供应商错误码且不伪造 HTTP 状态', async () => {
   const { runtime, context, responses, requests } = setup();
   responses.push(
     thinking(),
+    providerStreamError('ServerOverloaded'),
     providerStreamError('ServerOverloaded'),
     providerStreamError('ServerOverloaded'),
   );
@@ -237,7 +241,7 @@ it('持续流内过载耗尽原有一次重试，保留供应商错误码且不�
     details: { providerCode: 'ServerOverloaded' },
     cause: { code: 'ServerOverloaded', status: undefined },
   });
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(4);
 });
 
 function streamResponse(deltas: object[], finishReason = 'stop', outputTokens?: number) {
@@ -441,10 +445,7 @@ it.each(['first_chunk', 'idle', 'total'] as const)(
     });
     responses.push(thinking());
     const stream = controlledStream();
-    // 思考轮的成功样本会稀释熔断比例，首次失败不必然打开熔断，structured 还会立刻重试一次。
-    // 重试同样受保护约束，所以让它也拿到片段、命中同一阶段。
-    const retry = controlledStream();
-    responses.push(stream.response, retry.response);
+    responses.push(stream.response);
     const result = runtime.decide(context, decisionSchema);
     const rejected = expect(result).rejects.toMatchObject({
       code: 'transient',
@@ -458,7 +459,6 @@ it.each(['first_chunk', 'idle', 'total'] as const)(
     stream.send({ content: ' ', reasoning_content: '\n' });
     if (phase === 'total') stream.send({ reasoning_content: '仍在分析' });
     await jest.advanceTimersByTimeAsync(42);
-    if (phase !== 'first_chunk') retry.send({ reasoning_content: '复核后仍无结论' });
     await jest.advanceTimersByTimeAsync(200);
     await rejected;
     expect(warn).toHaveBeenCalledWith(
@@ -469,9 +469,8 @@ it.each(['first_chunk', 'idle', 'total'] as const)(
       }),
     );
     expect(context.replay?.decision).toBeUndefined();
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(2);
     stream.end();
-    retry.end();
     await jest.advanceTimersByTimeAsync(1);
   },
 );
@@ -705,20 +704,23 @@ it('Retry-After 冷却结束前不发请求，结束后只重试一次并成功'
   expect(requests).toHaveLength(3);
 });
 
-it('熔断已经打开时思考轮不等待，本轮直接以 circuit_open 结束', async () => {
+it('共享路由熔断时等待冷却，之后使用同一路由完成', async () => {
   jest.useFakeTimers();
   const { runtime, context, responses, requests } = setup('glm-5.3', {
+    LLM_CIRCUIT_MIN_SAMPLES: 1,
     LLM_CIRCUIT_COOLDOWN_MS: 1000,
   });
-  responses.push(rateLimited());
-  await expect(runtime.streamSpeech(context)).rejects.toMatchObject({ code: 'transient' });
-  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
-    code: 'circuit_open',
+  responses.push(providerStreamError('ServerOverloaded', false, true));
+  await expect(runtime.streamSpeech(context, { onThinking: jest.fn() })).rejects.toMatchObject({
+    code: 'transient',
   });
+  responses.push(thinking(), toolResult());
+  const result = runtime.decide(context, decisionSchema);
+  await jest.advanceTimersByTimeAsync(999);
   expect(requests).toHaveLength(1);
-  await jest.advanceTimersByTimeAsync(1000);
-  expect(requests).toHaveLength(1);
-  expect(context.replay?.decision).toBeUndefined();
+  await jest.advanceTimersByTimeAsync(2);
+  await expect(result).resolves.toEqual(valid);
+  expect(requests).toHaveLength(3);
 });
 
 it('等待 Retry-After 时取消会立即退出，冷却结束也不再请求', async () => {
@@ -741,21 +743,21 @@ it('等待 Retry-After 时取消会立即退出，冷却结束也不再请求', 
   expect(context.replay?.decision).toBeUndefined();
 });
 
-it('冷却后的第二次调用仍失败时直接终止，不再次等待或请求', async () => {
+it('连续限流最多发出三次请求，然后终止', async () => {
   jest.useFakeTimers();
   const { runtime, context, responses, requests } = setup('glm-5.3', {
     LLM_CIRCUIT_COOLDOWN_MS: 1000,
   });
-  responses.push(thinking(), rateLimited(), rateLimited());
+  responses.push(thinking(), rateLimited(), rateLimited(), rateLimited());
   const result = runtime.decide(context, decisionSchema);
   const rejected = expect(result).rejects.toMatchObject({
     code: 'transient',
     details: { httpStatus: 429 },
   });
-  await jest.advanceTimersByTimeAsync(1000);
+  await jest.advanceTimersByTimeAsync(2001);
   await rejected;
   await jest.advanceTimersByTimeAsync(1000);
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(4);
 });
 
 it('Retry-After 超过现有流式总期限时保留错误，不提前请求', async () => {
@@ -765,48 +767,52 @@ it('Retry-After 超过现有流式总期限时保留错误，不提前请求', a
   });
   responses.push(thinking(), rateLimited('6'));
   await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
-    code: 'transient',
-    details: { httpStatus: 429 },
+    code: 'deadline',
   });
   await jest.advanceTimersByTimeAsync(6000);
   expect(requests).toHaveLength(2);
 });
 
-it('半开路由已有探测时立即报告，不额外等待或发出第二个探测', async () => {
+it('半开路由已有探测时等待，探测完成前不额外发请求', async () => {
   jest.useFakeTimers();
   const { runtime, context, responses, requests } = setup('glm-5.3', {
+    LLM_CIRCUIT_MIN_SAMPLES: 1,
     LLM_CIRCUIT_COOLDOWN_MS: 1000,
   });
-  responses.push(rateLimited());
-  await expect(runtime.streamSpeech(context)).rejects.toMatchObject({ code: 'transient' });
+  responses.push(providerStreamError('ServerOverloaded', false, true));
+  await expect(runtime.streamSpeech(context, { onThinking: jest.fn() })).rejects.toMatchObject({
+    code: 'transient',
+  });
   await jest.advanceTimersByTimeAsync(1000);
   const stream = controlledStream();
-  responses.push(stream.response, toolResult());
+  responses.push(stream.response, toolResult(), thinking(), toolResult());
   const probe = runtime.decide(context, decisionSchema);
   await jest.advanceTimersByTimeAsync(1);
-  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
-    code: 'circuit_open',
-  });
+  const other = runtime.decide(context, decisionSchema);
+  await jest.advanceTimersByTimeAsync(1);
   expect(requests).toHaveLength(2);
-  stream.send({ content: '探测轮的初判。' }, 'stop');
+  stream.send({ content: '探测初判。' }, 'stop');
   stream.end();
   await expect(probe).resolves.toEqual(valid);
-  expect(requests).toHaveLength(3);
+  await jest.advanceTimersByTimeAsync(1000);
+  await expect(other).resolves.toEqual(valid);
+  expect(requests).toHaveLength(5);
 });
 
-it('JSON Schema 输出被截断时进入修正机会', async () => {
+it('JSON Schema 输出被截断时终止且不重试', async () => {
   const { runtime, context, responses, requests } = setup('kimi-k3');
   responses.push(
     thinking(),
     completion({ content: '{' }, 'length'),
     completion({ content: JSON.stringify(valid) }),
   );
-  await expect(runtime.decide(context, decisionSchema)).resolves.toEqual(valid);
-  expect(requests).toHaveLength(3);
-  expect(requests[2].messages.at(-1).content).toContain('长度上限');
+  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
+    details: { reason: 'truncated_output' },
+  });
+  expect(requests).toHaveLength(2);
 });
 
-it('GLM 工具调用前被截断应报长度问题，重试耗尽也不保存动作', async () => {
+it('GLM 工具调用前被截断应报长度问题，不重试也不保存动作', async () => {
   const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
   const { runtime, context, responses, requests } = setup('glm-5.3');
   responses.push(
@@ -818,8 +824,7 @@ it('GLM 工具调用前被截断应报长度问题，重试耗尽也不保存动
     code: 'invalid_output',
     details: { reason: 'truncated_output', finishReason: 'length', outputTokens: 4096 },
   });
-  expect(requests).toHaveLength(3);
-  expect(requests[2].messages.at(-1).content).toContain('长度上限');
+  expect(requests).toHaveLength(2);
   expect(requests[1].messages.at(-1).content).toContain('extract 工具');
   expect(warn).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -830,12 +835,14 @@ it('GLM 工具调用前被截断应报长度问题，重试耗尽也不保存动
   );
 });
 
-it('工具参数已能解析但结束原因为 length 时，仍需重新取得完整结果', async () => {
+it('工具参数已能解析但结束原因为 length 时，仍拒绝且不重试', async () => {
   const { runtime, context, responses, requests } = setup('glm-5.3');
   responses.push(thinking(), toolResult(valid, 'length'), toolResult());
-  await expect(runtime.decide(context, decisionSchema)).resolves.toEqual(valid);
-  expect(requests).toHaveLength(3);
-  expect(context.replay?.decision).toEqual(valid.decision);
+  await expect(runtime.decide(context, decisionSchema)).rejects.toMatchObject({
+    details: { reason: 'truncated_output' },
+  });
+  expect(requests).toHaveLength(2);
+  expect(context.replay?.decision).toBeUndefined();
 });
 
 it('保留原始响应后，损坏的工具 JSON 仍按解析错误重试', async () => {
@@ -869,6 +876,7 @@ it('决策和流式请求均不注入 token 上限', async () => {
     REDIS_URL: 'redis://localhost:6379',
     ARK_API_KEY: 'test-key',
     ARK_BASE_URL: 'https://provider.test/v3',
+    MODEL_CAPABILITIES: testModelCapabilities('https://provider.test/v3', ['glm-5.3']),
     ARK_DEFAULT_MODEL: 'glm-5.3',
   });
   const { runtime, context, fetch, requests } = setup('glm-5.3', {
@@ -992,6 +1000,7 @@ it.each(['doubao-seed-evolving', 'doubao-seed-2.1-turbo'])(
       REDIS_URL: 'redis://localhost:6379',
       ARK_API_KEY: 'test-key',
       ARK_BASE_URL: 'https://provider.test/v3',
+      MODEL_CAPABILITIES: testModelCapabilities('https://provider.test/v3', [modelName]),
       ARK_DEFAULT_MODEL: modelName,
     });
     const { runtime, context, responses, requests } = setup(modelName, {
@@ -1088,7 +1097,7 @@ it('结构化响应头已返回但正文挂起，仍触发首个有效片段超�
   await jest.advanceTimersByTimeAsync(101);
   await jest.advanceTimersByTimeAsync(101);
   await rejected;
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(2);
   attempt.close();
   retry.close();
   await jest.advanceTimersByTimeAsync(1);
@@ -1161,16 +1170,21 @@ it.each(
       ),
     ) as DecisionReplaySnapshot;
     const traces: object[] = [];
+    const tracing = {
+      trace: (params: object) => {
+        traces.push(params);
+        return { callbacks: [], metadata: {}, tags: [], runName: 'replay' };
+      },
+    };
     const turns = new PlayerTurnService(
       config as never,
-      new ModelCallService(config as never),
+      new ModelGenerationService(
+        config as never,
+        new ModelCallService(config as never),
+        tracing as never,
+      ),
       prompts,
-      {
-        trace: (params: object) => {
-          traces.push(params);
-          return { callbacks: [] };
-        },
-      } as never,
+      tracing as never,
     );
     feed();
     const replay = await replayDecision(turns, snapshot, { gameId: 'replay', playerId: 'p' });

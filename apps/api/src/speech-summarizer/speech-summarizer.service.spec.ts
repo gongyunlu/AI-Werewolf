@@ -1,3 +1,7 @@
+import { ModelCallService } from '../llm/model-call.service';
+import { ModelGenerationService } from '../llm/model-generation.service';
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
+import { AIMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { ROLES } from '@ai-werewolf/shared';
 import type { ConfigService } from '@nestjs/config';
@@ -20,9 +24,17 @@ const AGENT_BASE_URL = 'https://api.deepseek.com';
 const ARK_BASE_URL = 'https://ark.example/api/v3';
 
 function build(accessBaseUrl: string | null) {
-  // 判断链只需走通，返回空列表即可；本用例断言的是调用落在哪个端点上。
+  const output = {
+    judgments: [
+      { speechId: 'speech-1', speaker: 3, trustScore: 50, suspicious: false, notes: '待观察' },
+    ],
+  };
   jest.mocked(ChatOpenAI).mockReturnValue({
-    pipe: jest.fn().mockReturnValue({ invoke: jest.fn().mockResolvedValue({ judgments: [] }) }),
+    withStructuredOutput: jest.fn().mockReturnValue({
+      invoke: jest
+        .fn()
+        .mockResolvedValue({ parsed: output, raw: new AIMessage(JSON.stringify(output)) }),
+    }),
   } as never);
 
   const prisma = {
@@ -31,7 +43,7 @@ function build(accessBaseUrl: string | null) {
       findMany: jest
         .fn()
         .mockResolvedValueOnce([])
-        .mockResolvedValue([{ id: 'speech-1', content: { seatNo: 2, speech: '我认4号真预。' } }]),
+        .mockResolvedValue([{ id: 'speech-1', content: { seatNo: 3, speech: '我认4号真预。' } }]),
     },
     player: {
       findMany: jest.fn().mockResolvedValue([
@@ -44,6 +56,7 @@ function build(accessBaseUrl: string | null) {
           modelName: 'deepseek-flash',
           accessBaseUrl,
         },
+        { seatNo: 3, role: null },
       ]),
     },
     game: { findUnique: jest.fn().mockResolvedValue({ experiment: null }) },
@@ -62,6 +75,9 @@ function build(accessBaseUrl: string | null) {
         AGENT_SECRET_KEY: SECRET_KEY,
         ARK_API_KEY: 'ark-env-key',
         ARK_BASE_URL,
+        MODEL_CAPABILITIES: testModelCapabilities(accessBaseUrl ?? ARK_BASE_URL, [
+          'deepseek-flash',
+        ]),
       })[key],
   } as unknown as ConfigService<Env, true>;
 
@@ -77,11 +93,20 @@ function build(accessBaseUrl: string | null) {
       .mockResolvedValue({ name: 'summarizer/judgment', version: 1, text: 'prompt' }),
   } as unknown as PromptService;
 
-  const service = new SpeechSummarizerService(config, prisma, judgments, prompts, {
-    trace: jest.fn().mockReturnValue({}),
-  } as unknown as LangfuseService);
+  const trace = {
+    trace: jest.fn().mockReturnValue({ callbacks: [], metadata: {} }),
+  } as unknown as LangfuseService;
+  const generations = new ModelGenerationService(config, new ModelCallService(config), trace);
+  const service = new SpeechSummarizerService(
+    config,
+    prisma,
+    judgments,
+    prompts,
+    trace,
+    generations,
+  );
 
-  return { service };
+  return { service, prisma, judgments, prompts };
 }
 
 describe('逐玩家判断使用玩家自己的接入', () => {
@@ -113,4 +138,26 @@ describe('逐玩家判断使用玩家自己的接入', () => {
       }),
     );
   });
+});
+
+it('Schema 和 Prompt 共用可见发言集合，已判断他人后不再请求本人发言', async () => {
+  const { service, prisma, judgments, prompts } = build(null);
+  const speeches = [
+    { id: 'speech-1', content: { seatNo: 3, speech: '可见发言' } },
+    { id: 'dead', content: { seatNo: 4, speech: '当前过滤不包含的发言' } },
+    { id: 'self', content: { seatNo: 2, speech: '自己的发言' } },
+  ];
+  jest
+    .mocked(prisma.event.findMany)
+    .mockReset()
+    .mockImplementation((async (args: any) => (args.where.day === 1 ? speeches : [])) as never);
+  await service.generateDaySummaries('game-1', 1);
+  const variables = jest.mocked(prompts.render).mock.calls[0][1] as Record<string, string>;
+  expect(variables.speeches).toContain('speech-1');
+  expect(variables.speeches).not.toContain('dead');
+  expect(variables.speeches).not.toContain('self');
+  const count = jest.mocked(ChatOpenAI).mock.calls.length;
+  jest.mocked(judgments.getJudgmentsByDay).mockResolvedValue([{ speechId: 'speech-1' }] as never);
+  await service.generateDaySummaries('game-1', 1);
+  expect(ChatOpenAI).toHaveBeenCalledTimes(count);
 });

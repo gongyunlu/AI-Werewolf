@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { StructuredLlmService } from './structured-llm.service';
+import { ModelGenerationService } from './model-generation.service';
+import { ModelCallService } from './model-call.service';
+import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 import { ChatOpenAI } from '@langchain/openai';
 
 const schema = z.object({ score: z.number() });
@@ -15,15 +17,34 @@ jest.mock('@langchain/openai', () => ({
 }));
 
 function createService(outputs: unknown[]) {
-  mockInvoke.mockImplementation(async () => outputs.shift());
-  const configService = {
-    get: jest.fn().mockImplementation((key: string) => {
-      if (key === 'JUDGE_MODEL') return 'glm-4';
-      return 'stub';
-    }),
+  mockInvoke.mockImplementation(async () => {
+    const output = outputs.shift();
+    return {
+      parsed: output,
+      raw: {
+        content: output === undefined ? '' : JSON.stringify(output),
+        additional_kwargs: {},
+        response_metadata: {},
+      },
+    };
+  });
+  const values: Record<string, unknown> = {
+    JUDGE_MODEL: 'judge-v1',
+    ARK_BASE_URL: 'https://judge.test/v1',
+    ARK_API_KEY: 'test-key',
   };
-  const langfuse = { trace: jest.fn().mockReturnValue({}) };
-  return new StructuredLlmService(configService as never, langfuse as never);
+  return configuredService(values);
+}
+function configuredService(values: Record<string, unknown>) {
+  const config = {
+    get: (key: string) =>
+      key === 'MODEL_CAPABILITIES'
+        ? testModelCapabilities(String(values.ARK_BASE_URL), ['judge-v1', 'judge-v2'])
+        : values[key],
+  } as never;
+  return new ModelGenerationService(config, new ModelCallService(config), {
+    trace: () => ({ callbacks: [], metadata: {}, tags: [], runName: 'judge' }),
+  } as never);
 }
 
 const baseOptions = {
@@ -36,17 +57,17 @@ const baseOptions = {
   playerId: 'player-1',
 };
 
-describe('StructuredLlmService', () => {
+describe('分析入口复用单次模型调用', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it('模型未产出结构化结果时抛出可定位异常，而不是在重试路径崩成 TypeError', async () => {
-    const service = createService([undefined]);
+    const service = createService([undefined, undefined]);
 
-    await expect(service.invoke(baseOptions)).rejects.toThrow('未返回结构化输出');
-    // 不得进入重试：重试消息里 JSON.stringify(undefined) 会让 AIMessage 构造函数崩溃
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    await expect(service.invoke(baseOptions)).rejects.toMatchObject({ code: 'invalid_output' });
+    // 两次空结果明确失败，不会在构造修正消息时崩成 TypeError。
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
   });
 
   it('输出非空但不合 schema 时仍走单次重试', async () => {
@@ -54,7 +75,7 @@ describe('StructuredLlmService', () => {
 
     await expect(service.invoke(baseOptions)).resolves.toEqual({
       output: { score: 80 },
-      modelName: 'glm-4',
+      modelName: 'judge-v1',
     });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
   });
@@ -69,7 +90,7 @@ describe('StructuredLlmService', () => {
       refineUser,
     });
 
-    expect(result).toEqual({ output: { score: 60 }, modelName: 'glm-4' });
+    expect(result).toEqual({ output: { score: 60 }, modelName: 'judge-v1' });
     expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(refineUser).toHaveBeenCalledWith({ score: 90 });
   });
@@ -80,14 +101,14 @@ describe('StructuredLlmService', () => {
       ARK_BASE_URL: 'https://old-model.invalid/v1',
       ARK_API_KEY: 'old-key',
     };
-    const service = new StructuredLlmService(
-      { get: (key: string) => configuration[key] } as never,
-      { trace: jest.fn(() => ({})) } as never,
-    );
+    const service = configuredService(configuration);
     const frozen = service.captureConfiguration();
     configuration.ARK_BASE_URL = 'https://new-model.invalid/v1';
     configuration.ARK_API_KEY = 'new-endpoint-key';
-    mockInvoke.mockResolvedValue({ score: 80 });
+    mockInvoke.mockResolvedValue({
+      parsed: { score: 80 },
+      raw: { content: '{"score":80}', additional_kwargs: {}, response_metadata: {} },
+    });
     await expect(service.invoke({ ...baseOptions, ...frozen })).rejects.toThrow(/端点/);
     expect(ChatOpenAI).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalled();
@@ -99,14 +120,14 @@ describe('StructuredLlmService', () => {
       ARK_BASE_URL: 'https://same-model.invalid/v1',
       ARK_API_KEY: 'old-key',
     };
-    const service = new StructuredLlmService(
-      { get: (key: string) => configuration[key] } as never,
-      { trace: jest.fn(() => ({})) } as never,
-    );
+    const service = configuredService(configuration);
     const frozen = service.captureConfiguration();
     configuration.JUDGE_MODEL = 'judge-v2';
     configuration.ARK_API_KEY = 'rotated-key';
-    mockInvoke.mockResolvedValue({ score: 80 });
+    mockInvoke.mockResolvedValue({
+      parsed: { score: 80 },
+      raw: { content: '{"score":80}', additional_kwargs: {}, response_metadata: {} },
+    });
     await expect(service.invoke({ ...baseOptions, ...frozen })).resolves.toMatchObject({
       modelName: 'judge-v1',
     });

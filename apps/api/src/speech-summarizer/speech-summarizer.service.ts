@@ -2,9 +2,9 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { GameRecoveryService } from '../game-recovery/game-recovery.service';
 import type { Prisma } from '../generated/prisma/client';
 import { ConfigService } from '@nestjs/config';
-import { ChatOpenAI } from '@langchain/openai';
+import { ModelGenerationService } from '../llm/model-generation.service';
+import { z } from 'zod';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { JsonOutputParser } from '@langchain/core/output_parsers';
 import { PrismaService } from '../prisma/prisma.service';
 import { ACTION_TYPES, VISIBILITY_TYPES, ROLES, SEER_CHECK_RESULTS } from '@ai-werewolf/shared';
 import { AgentJudgmentService, AgentJudgment } from '../agent-judgment/agent-judgment.service';
@@ -78,6 +78,7 @@ export class SpeechSummarizerService {
     private readonly agentJudgmentService: AgentJudgmentService,
     private readonly promptService: PromptService,
     private readonly langfuse: LangfuseService,
+    private readonly generations: ModelGenerationService,
     @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
@@ -157,9 +158,13 @@ export class SpeechSummarizerService {
       groups.get(key)!.speeches.push(content.speech || '(未发言)');
     }
 
-    if (groups.size === 0) return;
-
-    const summaries = await this.callLLMForSummaries(gameId, Array.from(groups.values()));
+    // 部分摘要落库后恢复，仍需消费原批次输出。
+    const loadGroups = async () => Array.from(groups.values());
+    const pendingGroups = this.recovery?.current
+      ? await this.recovery.value('speech-summary-input', loadGroups)
+      : await loadGroups();
+    if (pendingGroups.length === 0) return;
+    const summaries = await this.callLLMForSummaries(gameId, pendingGroups);
 
     for (const s of summaries) {
       const persist = (tx: Prisma.TransactionClient) =>
@@ -227,7 +232,10 @@ export class SpeechSummarizerService {
               day,
             );
             const judgedIds = new Set(existing.map((j) => j.speechId));
-            const newSpeeches = todaySpeeches.filter((s) => !judgedIds.has(s.id));
+            const newSpeeches = visibleSpeeches(
+              todaySpeeches,
+              allAliveSeats.filter((s) => s !== seatNo),
+            ).filter((s) => !judgedIds.has(s.id));
             if (newSpeeches.length === 0) return;
 
             const { recentJudgments, olderJudgments } = await this.getLayeredHistoryJudgments(
@@ -263,15 +271,7 @@ export class SpeechSummarizerService {
               access,
             );
 
-            // LLM 偶发编造/抄错事件ID，若带着脏 speechId 直接入库会触发 FK 击穿整批判断：
-            // 先按本日真实发言事件ID过滤，仅入库可信条目。
-            const validSpeechIds = new Set(newSpeeches.map((s) => s.id));
-            const validJudgments = judgments.filter((j) => validSpeechIds.has(j.speechId));
-            if (validJudgments.length !== judgments.length) {
-              this.logger.warn(
-                `[逐玩家判断] ${seatNo}号位 ${judgments.length - validJudgments.length} 条判断的事件ID不存在，已丢弃（保留${validJudgments.length}条）`,
-              );
-            }
+            const validJudgments = judgments.map((row) => ({ ...row, day }));
             if (validJudgments.length > 0) {
               if (this.recovery?.current) {
                 await this.recovery.effect(`judgments/${agentId}/${day}`, (tx) =>
@@ -286,13 +286,8 @@ export class SpeechSummarizerService {
       );
     }
 
-    results.forEach((result, i) => {
-      if (result.status === 'rejected') {
-        this.logger.warn(
-          `[逐玩家判断] ${alivePlayers[i].seatNo}号位判断生成失败，跳过: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
-        );
-      }
-    });
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 
   /**
@@ -349,22 +344,12 @@ export class SpeechSummarizerService {
     visiblePlayerSeats: number[],
     modelName: string,
     access?: ModelAccess,
-  ): Promise<{ judgments: AgentJudgment[] }> {
+  ): Promise<{ judgments: Omit<AgentJudgment, 'day'>[] }> {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
       select: { experiment: true },
     });
     const experiment = readExperiment(game?.experiment);
-    const model = new ChatOpenAI({
-      apiKey: access?.apiKey ?? this.configService.get('ARK_API_KEY'),
-      model: modelName,
-      configuration: { baseURL: access?.baseUrl ?? this.configService.get('ARK_BASE_URL') },
-      temperature: 0.3, // 保持一定创造性，但不过度随机
-      // 关 SDK 重试：单次最多等 180s，覆盖 ARK 思考模型 3 分钟内的真实长生成（实测慢调用可达此量级）
-      maxRetries: 0,
-      timeout: 180000,
-    });
-
     const systemPrompt = this.loadSystemPromptTemplate(role, privateInfo, experiment?.roleContexts);
 
     const humanPrompt = await this.promptService.render(
@@ -379,14 +364,43 @@ export class SpeechSummarizerService {
 
     const messages = [new SystemMessage(systemPrompt), new HumanMessage(humanPrompt.text)];
 
-    const startAt = Date.now();
-    try {
-      const parser = new JsonOutputParser<any>();
-      const chain = model.pipe(parser);
-      const parsed = await chain.invoke(messages, {
-        signal: this.recovery?.current?.signal,
-        ...this.langfuse.trace({
-          runName: 'summarizer-judgment',
+    const allowed = visibleSpeeches(speeches, visiblePlayerSeats);
+    const schema = z.object({
+      judgments: z
+        .array(
+          z.object({
+            speechId: z.string().min(1),
+            speaker: z.number().int(),
+            trustScore: z.number().min(0).max(100),
+            suspicious: z.boolean(),
+            notes: z.string().max(100),
+            relationship: z
+              .enum(['teammate', 'checked_good', 'checked_wolf', 'silver'])
+              .nullable()
+              .optional(),
+          }),
+        )
+        .superRefine((rows, ctx) => {
+          if (
+            rows.length !== allowed.length ||
+            new Set(rows.map((row) => row.speechId)).size !== rows.length ||
+            rows.some(
+              (row) =>
+                !allowed.some(
+                  (speech) => speech.id === row.speechId && speech.content?.seatNo === row.speaker,
+                ),
+            )
+          )
+            ctx.addIssue({ code: 'custom', message: '判断必须完整且唯一对应本次可见发言' });
+        }),
+    });
+    const parsed = await this.generations.structured(
+      modelName,
+      schema,
+      messages,
+      (retry) =>
+        this.langfuse.trace({
+          runName: 'summarizer-judgment' + (retry ? '-retry' : ''),
           gameId,
           playerId,
           modelName,
@@ -398,66 +412,15 @@ export class SpeechSummarizerService {
           promptSource: humanPrompt.source,
           promptOrigin: humanPrompt.origin,
         }),
-      });
-      this.logger.log(
-        `[逐玩家判断] ${role} ${modelName} 输入${humanPrompt.text.length}字 耗时${Date.now() - startAt}ms`,
-      );
-
-      // 验证必要字段
-      const judgments = Array.isArray(parsed.judgments) ? parsed.judgments : [];
-
-      // 验证并过滤判断记录
-      const validJudgments = judgments
-        .filter((j: any) => {
-          // 基本字段验证
-          if (!j || typeof j !== 'object') return false;
-          if (typeof j.speaker !== 'number') return false;
-          if (typeof j.trustScore !== 'number') return false;
-          if (typeof j.suspicious !== 'boolean') return false;
-
-          if (j.speaker === privateInfo.seatNo) return false;
-
-          // 信任度范围验证
-          if (j.trustScore < 0 || j.trustScore > 100) {
-            j.trustScore = Math.max(0, Math.min(100, j.trustScore));
-          }
-
-          return true;
-        })
-        .map((j: any) => ({
-          speechId: j.speechId || '',
-          speaker: j.speaker,
-          trustScore: j.trustScore,
-          suspicious: j.suspicious,
-          notes: (j.notes || '').substring(0, 100), // 限制长度
-          relationship: j.relationship || null,
-        }));
-
-      return { judgments: validJudgments };
-    } catch (error) {
-      // 分层错误处理
-      const err = error as any; // TypeScript 类型断言
-      this.logger.warn(
-        `[逐玩家判断] ${role} ${modelName} 失败 耗时${Date.now() - startAt}ms 错误:${err?.name || err?.message || String(error)}`,
-      );
-
-      // 1. LLM 服务故障 → Fail Fast（让队列重试）
-      if (
-        err.name === 'APIConnectionError' ||
-        err.name === 'TimeoutError' ||
-        (err.status && err.status >= 500)
-      ) {
-        throw new Error(`摘要服务暂时不可用: ${err.message}`, { cause: error });
-      }
-
-      // 2. JSON 解析失败 → Silent Fail（LLM 返回格式错误，重试无意义）
-      if (error instanceof SyntaxError || err.name === 'JsonParseError') {
-        return { judgments: [] };
-      }
-
-      // 3. 其他未知错误 → Fail Fast
-      throw error;
-    }
+      this.recovery?.current?.signal,
+      undefined,
+      access,
+      undefined,
+      `summarizer-judgment/${playerId}`,
+      undefined,
+      { temperature: 0.3, timeoutMs: 180_000 },
+    );
+    return { judgments: parsed.judgments };
   }
 
   /**
@@ -474,16 +437,6 @@ export class SpeechSummarizerService {
     const experiment = readExperiment(game?.experiment);
     const modelName =
       experiment?.auxiliaryModel ?? this.configService.getOrThrow('ARK_DEFAULT_MODEL');
-    const model = new ChatOpenAI({
-      apiKey: this.configService.get('ARK_API_KEY'),
-      model: modelName,
-      configuration: { baseURL: this.configService.get('ARK_BASE_URL') },
-      temperature: 0.3,
-      // 关 SDK 重试：单次最多等 180s，覆盖 ARK 思考模型 3 分钟内的真实长生成（实测慢调用可达此量级）
-      maxRetries: 0,
-      timeout: 180000,
-    });
-
     const systemPrompt = await this.promptService.render(
       PROMPT_NAMES.summarizerGlobalSummary,
       undefined,
@@ -498,16 +451,36 @@ export class SpeechSummarizerService {
 
     const messages = [new SystemMessage(systemPrompt.text), new HumanMessage(humanPrompt)];
 
-    const startAt = Date.now();
-    try {
-      const parser = new JsonOutputParser<{ summaries: SpeechSummary[] }>();
-      const chain = model.pipe(parser);
-      const parsed = await chain.invoke(messages, {
-        signal: this.recovery?.current?.signal,
-        ...this.langfuse.trace({
-          runName: 'summarizer-global-summary',
+    const schema = z.object({
+      summaries: z
+        .array(
+          z.object({
+            day: z.number().int(),
+            seatNo: z.number().int(),
+            summary: z.string().min(1),
+          }),
+        )
+        .superRefine((rows, ctx) => {
+          if (
+            rows.length !== groups.length ||
+            new Set(rows.map((row) => `${row.day}/${row.seatNo}`)).size !== rows.length ||
+            rows.some(
+              (row) =>
+                !groups.some((group) => group.day === row.day && group.seatNo === row.seatNo),
+            )
+          )
+            ctx.addIssue({ code: 'custom', message: '摘要必须完整且唯一对应本次发言分组' });
+        }),
+    });
+    const parsed = await this.generations.structured(
+      modelName,
+      schema,
+      messages,
+      (retry) =>
+        this.langfuse.trace({
+          runName: 'summarizer-global-summary' + (retry ? '-retry' : ''),
           gameId,
-          playerId: gameId, // 全局摘要不绑定单个玩家，以 gameId 兜底
+          playerId: gameId,
           modelName,
           scenario: 'summarizer',
           promptName: systemPrompt.name,
@@ -515,22 +488,15 @@ export class SpeechSummarizerService {
           promptSource: systemPrompt.source,
           promptOrigin: systemPrompt.origin,
         }),
-      });
-      this.logger.log(
-        `[全局发言摘要] ${groups.length}条 输入${humanPrompt.length}字 耗时${Date.now() - startAt}ms`,
-      );
-      return parsed.summaries || [];
-    } catch (error) {
-      this.logger.warn(
-        `[全局发言摘要] 失败 耗时${Date.now() - startAt}ms: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      // 降级：返回简单摘要
-      return groups.map((g) => ({
-        day: g.day,
-        seatNo: g.seatNo,
-        summary: g.speeches.join('；').substring(0, 30) + '...',
-      }));
-    }
+      this.recovery?.current?.signal,
+      undefined,
+      undefined,
+      undefined,
+      'summarizer-global-summary',
+      undefined,
+      { temperature: 0.3, timeoutMs: 180_000 },
+    );
+    return parsed.summaries;
   }
 
   /**
@@ -640,25 +606,11 @@ export class SpeechSummarizerService {
   private formatSpeeches(speeches: any[], visiblePlayerSeats: number[]): string {
     const lines: string[] = [];
 
-    for (const speech of speeches) {
+    for (const speech of visibleSpeeches(speeches, visiblePlayerSeats)) {
       const content = speech.content;
-
-      // 类型检查
-      if (!content || typeof content !== 'object') {
-        continue;
-      }
 
       const seatNo = content.seatNo;
       const speechText = content.speech;
-
-      // 验证 seatNo
-      if (typeof seatNo !== 'number') {
-        continue;
-      }
-
-      if (!visiblePlayerSeats.includes(seatNo)) {
-        continue;
-      }
 
       if (!speechText || speechText.trim() === '') {
         lines.push(`${seatNo}号位：（未发言）`);
@@ -758,4 +710,12 @@ export class SpeechSummarizerService {
 
     return { recentJudgments, olderJudgments };
   }
+}
+
+/** 与 Prompt 使用相同的可见发言集合，避免要求回答未提供的事件。 */
+function visibleSpeeches<T extends { content: unknown }>(speeches: T[], seats: number[]): T[] {
+  return speeches.filter((speech) => {
+    const content = speech.content as { seatNo?: unknown } | null;
+    return content && typeof content.seatNo === 'number' && seats.includes(content.seatNo);
+  });
 }

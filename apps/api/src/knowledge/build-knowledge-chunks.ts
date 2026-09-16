@@ -3,10 +3,8 @@ import { config as loadEnv } from 'dotenv';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { createCliModels } from '../llm/cli-models';
 import { z } from 'zod';
-import { resolveModelCapability } from '../llm/model-capability';
 import { RoleSchema } from '@ai-werewolf/shared';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
@@ -59,7 +57,6 @@ const MIN_CHUNK = 300; // 目标下限（作为合并是否充分的参考，不
 /** 超长单小节阈值：达到该长度即按段落拆成多个 300~500 字块，不硬截断尾内容 */
 const OVER_MAX = 500;
 
-const EMBEDDING_DIMENSION = 2048; // doubao-embedding-vision 输出 2048 维，写库前校验
 const EMBEDDING_BATCH_SIZE = 10; // 火山方舟 embedding API 单次请求上限 10 条
 
 const EMBEDDING_PROMPT = [
@@ -228,24 +225,6 @@ function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
-/** 校验 2048 维向量，对齐 EmbeddingService.assertValidVector（本脚本不依赖 Nest 注入） */
-function assertValidVector(vector: unknown): asserts vector is number[] {
-  if (!Array.isArray(vector)) {
-    throw new Error('Embedding 向量格式无效：期望数字数组');
-  }
-  if (vector.length !== EMBEDDING_DIMENSION) {
-    throw new Error(
-      `Embedding 向量维度无效：期望 ${EMBEDDING_DIMENSION} 维，实际 ${vector.length} 维`,
-    );
-  }
-  const invalidIndex = vector.findIndex(
-    (value) => typeof value !== 'number' || !Number.isFinite(value),
-  );
-  if (invalidIndex !== -1) {
-    throw new Error(`Embedding 向量数值无效：索引 ${invalidIndex} 不是有限数值`);
-  }
-}
-
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   const apiKey = process.env.ARK_API_KEY;
@@ -265,10 +244,11 @@ async function main(): Promise<void> {
   // --limit=N：只蒸馏前 N 块（冒烟用，验证 ARK 通路；<0 表示不限）
   const limitOpt = process.argv.find((arg) => arg.startsWith('--limit='));
   const chunkLimit = limitOpt ? Number(limitOpt.slice('--limit='.length)) : -1;
+  const models = createCliModels();
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
-  await prisma.$connect();
 
   try {
+    await prisma.$connect();
     // 1. 读语料 → 切块
     const rawChunks: RawChunk[] = [];
     for (const sourceFile of SOURCE_FILES) {
@@ -329,33 +309,27 @@ async function main(): Promise<void> {
       logger.log(
         `--limit=${chunkLimit}：仅蒸馏前 ${Math.min(chunkLimit, rawChunks.length)} 块（冒烟）`,
       );
-    const distillModel = new ChatOpenAI({
-      apiKey,
-      model: modelName,
-      configuration: { baseURL: baseUrl },
-      streaming: false,
-      timeout: 300_000,
-      maxRetries: 0,
-    }).withStructuredOutput(z.toJSONSchema(DistillChunkSchema), {
-      method: resolveModelCapability(modelName).protocol,
-    });
-
     let distillSuccess = 0;
     let distillFailed = 0;
     const successful: BuiltChunk[] = [];
     for (let i = 0; i < toDistill.length; i++) {
       const chunk = toDistill[i];
       try {
-        const raw = await distillModel.invoke([
-          new SystemMessage(EMBEDDING_PROMPT),
-          new HumanMessage(
-            `来源：${chunk.sourceFile} / ${chunk.articleTitle}\n${chunk.sectionTitle ? `小节：${chunk.sectionTitle}\n` : ''}正文：\n${chunk.content}`,
-          ),
-        ]);
-        const distilled = DistillChunkSchema.parse(raw);
+        const { output: distilled } = await models.generations.invoke({
+          schema: DistillChunkSchema,
+          modelName,
+          system: EMBEDDING_PROMPT,
+          user: `来源：${chunk.sourceFile} / ${chunk.articleTitle}\n${chunk.sectionTitle ? `小节：${chunk.sectionTitle}\n` : ''}正文：\n${chunk.content}`,
+          runName: 'knowledge-distill',
+          scenario: 'knowledge',
+          gameId: 'knowledge-build',
+          playerId: knowledgeSourceHash(chunk),
+          signal: models.signal,
+        });
         successful.push({ ...chunk, distilled });
         distillSuccess += 1;
       } catch (error) {
+        models.signal.throwIfAborted();
         distillFailed += 1;
         logger.warn(
           `蒸馏失败 第 ${i + 1}/${toDistill.length} 块：${error instanceof Error ? error.message : String(error)}`,
@@ -385,6 +359,7 @@ async function main(): Promise<void> {
         });
         inserted.push(row);
       } catch (error) {
+        models.signal.throwIfAborted();
         insertFailed += 1;
         logger.warn(
           `落库失败 ${chunk.sourceFile}/${chunk.articleTitle}：${
@@ -419,30 +394,22 @@ async function main(): Promise<void> {
         inserted.push({ id: chunk.id, content: knowledgeEmbeddingText(chunk) });
     }
 
-    // 4. embedding：按 10 条分批 embedDocuments，校验维度后逐块 UPDATE
-    const embeddings = new OpenAIEmbeddings({
-      apiKey,
-      model: embeddingModel,
-      configuration: { baseURL: baseUrl },
-    });
-
+    // 4. embedding：按 10 条分批生成已校验向量，再逐块 UPDATE
     let embedded = 0;
     for (let i = 0; i < inserted.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = inserted.slice(i, i + EMBEDDING_BATCH_SIZE);
       try {
-        const vectors = await embeddings.embedDocuments(batch.map((row) => row.content));
-        if (vectors.length !== batch.length) {
-          throw new Error(
-            `Embedding 服务返回数量异常：期望 ${batch.length} 条，实际 ${vectors.length} 条`,
-          );
-        }
+        const vectors = await models.embedding.embedTexts(
+          batch.map((row) => row.content),
+          models.signal,
+        );
         for (let j = 0; j < batch.length; j++) {
           const vector = vectors[j];
-          assertValidVector(vector);
           await writeKnowledgeEmbedding(prisma, batch[j], vector, embeddingModel);
           embedded += 1;
         }
       } catch (error) {
+        models.signal.throwIfAborted();
         logger.warn(
           `embedding 批次失败 第 ${i + 1}-${Math.min(i + EMBEDDING_BATCH_SIZE, inserted.length)} 块：${
             error instanceof Error ? error.message : String(error)
@@ -466,7 +433,11 @@ async function main(): Promise<void> {
     logger.log('role 分布：' + roleDist.map((r) => `${r.role}=${r.count}`).join(', '));
     logger.log('scenario 分布：' + scenarioDist.map((s) => `${s.scenario}=${s.count}`).join(', '));
   } finally {
-    await prisma.$disconnect();
+    try {
+      await models.close();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
 }
 

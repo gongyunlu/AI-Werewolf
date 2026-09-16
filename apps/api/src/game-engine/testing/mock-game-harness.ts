@@ -9,6 +9,8 @@ import { PrismaService } from '@/prisma/prisma.service';
 import { RedisService } from '@/redis/redis.service';
 import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
 import { ModelCallService } from '@/llm/model-call.service';
+import { ModelGenerationService } from '@/llm/model-generation.service';
+import { testModelCapabilities } from '@/testing/model-capabilities.fixture';
 import { PlayerTurnService } from '@/player-turn/player-turn.service';
 import { MemoryService } from '@/memory/memory.service';
 import { GlobalMemoryService } from '@/memory/global-memory.service';
@@ -53,6 +55,10 @@ export async function createMockGame(
     ARK_API_KEY: 'mock-key',
     ARK_BASE_URL: 'https://mock.invalid',
     ARK_DEFAULT_MODEL: 'mock-coordinator',
+    MODEL_CAPABILITIES: testModelCapabilities('https://mock.invalid', [
+      'mock-coordinator',
+      ...Array.from({ length: 18 }, (_, i) => `mock-seat-${i + 1}`),
+    ]),
     TURN_REFLECTION_MAX_ROUNDS: 0,
     GAME_MAX_DAYS: 5,
     GAME_MAX_DURATION_MS: 60_000,
@@ -156,6 +162,7 @@ export async function createMockGame(
       GameWorkerService,
       AgentRuntimeService,
       ModelCallService,
+      ModelGenerationService,
       PlayerTurnService,
       EventWriterService,
       PromptService,

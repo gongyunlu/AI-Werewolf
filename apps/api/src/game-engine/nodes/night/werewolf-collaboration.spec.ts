@@ -46,7 +46,7 @@ it('整夜只抽一次发言顺序，第二轮沿用同一顺序', async () => {
       contentDurationMs: 0,
     }),
     recordExperienceUsages: jest.fn(),
-    runModelCall: jest.fn().mockResolvedValue({ content: 'YES' }),
+    generateText: jest.fn().mockResolvedValue('YES'),
   };
   const context = {
     agentRuntime: runtime,
@@ -97,7 +97,7 @@ it('两轮狼聊传入真实顺序与完成状态，某位发言失败则整轮�
       contentDurationMs: 0,
     }),
     recordExperienceUsages: jest.fn(),
-    runModelCall: jest.fn().mockResolvedValue({ content: 'YES' }),
+    generateText: jest.fn().mockResolvedValue('YES'),
   };
   const context = {
     agentRuntime: runtime,
