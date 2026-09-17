@@ -230,6 +230,7 @@ async function shouldContinueDiscussion(
             promptOrigin: coordinationPrompt.origin,
           }),
         undefined,
+        undefined,
         'coordination',
         undefined,
         { temperature: 0, disableReasoning: false },

@@ -1,5 +1,6 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { GameRecoveryService } from '@/game-recovery/game-recovery.service';
+import { fenceExecution } from '@/game-recovery/execution-fence';
 import { PrismaService } from '@/prisma/prisma.service';
 import type { Prisma } from '@/generated/prisma/client';
 import { recordEventDelivery } from '@/event-bus/record-event-delivery';
@@ -690,7 +691,7 @@ export class EventWriterService {
       scope.signal?.throwIfAborted();
       return result;
     };
-    if (this.recovery?.current) {
+    if (this.recovery?.current && !scope.execution) {
       if (this.recovery.current.execution.gameId !== scope.gameId)
         throw new Error('领域提交与当前执行对局不符');
       return this.recovery.effect(label, (tx) => run(tx), {
@@ -698,7 +699,11 @@ export class EventWriterService {
         allowFinished: true,
       });
     }
-    return this.prisma.$transaction((tx) => run(tx));
+    // 显式执行身份由批次记录去重，图路径不再写旧效果完成日志。
+    return this.prisma.$transaction(async (tx) => {
+      if (scope.execution) await fenceExecution(tx, scope.execution, true);
+      return run(tx);
+    });
   }
 
   private draft(data: EventDraft): EventDraft {

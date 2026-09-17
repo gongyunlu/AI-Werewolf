@@ -11,10 +11,12 @@ import { SpeechSummarizerService } from '../speech-summarizer/speech-summarizer.
 import { throwIfAborted } from '../llm/abort.utils';
 import type { ModelAccess } from '../llm/model-call.service';
 import { ModelGenerationService } from '../llm/model-generation.service';
-import { PlayerTurnService } from '../player-turn/player-turn.service';
-import { resolvePlayerAccess } from '../agents/agent-access';
+import type { ModelStageStore } from '../llm/model-stage';
+import { resolveModelCapability, type ModelCapability } from '../llm/model-capability';
+import { PlayerTurnService, type TurnGenerationContext } from '../player-turn/player-turn.service';
+import { resolvePlayerAccess, type PlayerAccessSource } from '../agents/agent-access';
 import { PromptService } from '../observability/prompt.service';
-import type { ActionSource } from '../observability/action-source';
+import { createActionSource, type ActionSource } from '../observability/action-source';
 import { submissionKey } from '../game-engine/events/submission-protocol';
 import { PROMPT_NAMES, PLAYER_TURN_PROMPT_NAMES } from '../observability/prompt-templates';
 import type { Env } from '../config/env.validation';
@@ -74,10 +76,27 @@ interface AgentContext {
   scenario: AgentScenario;
   /** 该玩家在本局固定使用的接入端点；缺省时用环境变量默认接入。密钥不写入任何快照或追踪。 */
   access?: ModelAccess;
+  /** 由调用方给定的阶段存储；缺省时回落到执行器作用域内的存储。 */
+  stages?: ModelStageStore;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的记忆使用关系 */
   pendingMemoryUsages: Array<{ memoryId: string; triggerMatched: boolean }>;
   /** 已注入 Prompt、待行为 Event 成功落库后确认的攻略使用关系 */
   pendingKnowledgeUsages: Array<{ chunkId: string }>;
+}
+
+/** 图准备节点的产物，只包含生成和采用需要的资料，凭据在生成时解析。 */
+export interface PreparedTurnInput extends Omit<TurnGenerationContext, 'access' | 'stages'> {
+  actionKey: string;
+  source: ActionSource;
+  prompts: FrozenPrompts;
+  replay: Record<string, unknown>;
+  reflectionMaxRounds: number;
+  accessSource: PlayerAccessSource;
+  capability: ModelCapability;
+  pendingMemoryUsages: AgentContext['pendingMemoryUsages'];
+  pendingKnowledgeUsages: AgentContext['pendingKnowledgeUsages'];
+  retrievalId?: string;
+  experiment: boolean;
 }
 
 /**
@@ -196,6 +215,89 @@ export class AgentRuntimeService {
         },
       ),
     };
+  }
+
+  async prepareTurnInput(input: TurnContextRequest): Promise<PreparedTurnInput> {
+    const context = await this.prepareContext(input);
+    if (!context.actionKey || !context.prompts || !context.replay)
+      throw new Error('持久回合缺少行动身份、Prompt 或决策快照');
+    const { player } = context;
+    const accessSource = {
+      agentId: player.agentId,
+      accessBaseUrl: player.accessBaseUrl ?? this.configService.get('ARK_BASE_URL'),
+      accessUsesDefault: player.accessUsesDefault || !player.accessBaseUrl,
+    };
+    if (!accessSource.accessBaseUrl) throw new Error('持久回合缺少模型接入端点');
+    return JSON.parse(
+      JSON.stringify({
+        actionKey: context.actionKey,
+        source: createActionSource(context.actionKey),
+        systemPrompt: context.systemPrompt,
+        player: {
+          id: player.id,
+          gameId: player.gameId,
+          modelName: player.modelName,
+          seatNo: player.seatNo,
+          role: player.role,
+        },
+        accessSource,
+        capability: resolveModelCapability(
+          player.modelName,
+          accessSource.accessBaseUrl,
+          this.configService.get('MODEL_CAPABILITIES'),
+        ),
+        scenario: context.scenario,
+        prompts: context.prompts,
+        replay: context.replay,
+        reflectionMaxRounds: this.configService.get('TURN_REFLECTION_MAX_ROUNDS'),
+        pendingMemoryUsages: context.pendingMemoryUsages,
+        pendingKnowledgeUsages: context.pendingKnowledgeUsages,
+        retrievalId: context.retrievalId,
+        experiment: Boolean(context.experiment),
+      }),
+    ) as PreparedTurnInput;
+  }
+
+  async decidePrepared<T>(
+    input: PreparedTurnInput,
+    schema: z.ZodType,
+    stages: ModelStageStore,
+    signal?: AbortSignal,
+  ): Promise<{ reasoning: string; decision: T }> {
+    throwIfAborted(signal);
+    if (
+      !input.source ||
+      input.source.actionKey !== input.actionKey ||
+      !input.source.attemptId ||
+      !input.source.startedAt ||
+      !input.source.traceId ||
+      !input.prompts ||
+      !input.replay ||
+      !input.accessSource ||
+      !input.accessSource.accessBaseUrl ||
+      !input.capability ||
+      input.reflectionMaxRounds === undefined
+    )
+      throw new Error('持久回合缺少冻结输入或原来源');
+    const access: ModelAccess = {
+      baseUrl: input.accessSource.accessBaseUrl,
+      capability: input.capability,
+      apiKey: async () => {
+        const resolved = await resolvePlayerAccess(
+          this.prisma,
+          this.configService.get('AGENT_SECRET_KEY'),
+          input.accessSource,
+          {
+            baseUrl: this.configService.get('ARK_BASE_URL'),
+            apiKey: this.configService.get('ARK_API_KEY'),
+          },
+        );
+        return resolved!.apiKey;
+      },
+    };
+    return this.playerTurn.decide<T>({ ...input, access, stages }, schema, signal, {
+      frozenSource: input.source,
+    });
   }
 
   /** 普通投票全员共享水位；恢复时沿用节点已冻结的截止序号。 */

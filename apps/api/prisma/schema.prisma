@@ -53,6 +53,8 @@ model Game {
   execution         GameExecution?
   effectBatchCommits EffectBatchCommit[]
   eventDeliveries   EventDeliveryOutbox[]
+  graphCheckpoints  GraphCheckpoint[]
+  graphCheckpointWrites GraphCheckpointWrite[]
 
   @@map("games")
 }
@@ -554,6 +556,38 @@ model GameExecutionStep {
 
   @@id([gameId, key])
   @@map("game_execution_steps")
+}
+
+// 图执行进度：每个 superstep 的状态快照，与业务执行权校验同事务写入。
+model GraphCheckpoint {
+  gameId             String   @map("game_id") @db.Uuid
+  checkpointNs       String   @default("") @map("checkpoint_ns") @db.VarChar(200)
+  checkpointId       String   @map("checkpoint_id") @db.VarChar(120)
+  parentCheckpointId String?  @map("parent_checkpoint_id") @db.VarChar(120)
+  checkpoint         Json     @db.JsonB
+  metadata           Json?    @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@id([gameId, checkpointNs, checkpointId])
+  @@map("graph_checkpoints")
+}
+
+// 分支待写值，含已完成分支的产出；恢复时据此跳过已完成的调用。
+model GraphCheckpointWrite {
+  gameId       String @map("game_id") @db.Uuid
+  checkpointNs String @default("") @map("checkpoint_ns") @db.VarChar(200)
+  checkpointId String @map("checkpoint_id") @db.VarChar(120)
+  taskId       String @map("task_id") @db.VarChar(120)
+  idx          Int
+  channel      String @db.VarChar(120)
+  value        Json   @db.JsonB
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@id([gameId, checkpointNs, checkpointId, taskId, idx])
+  @@map("graph_checkpoint_writes")
 }
 
 // 一次检索的完整候选与过滤记录，零命中和故障也独立记录。

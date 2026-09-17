@@ -9,6 +9,7 @@ import { PromptService, type RenderedPrompt } from '../observability/prompt.serv
 import { PROMPT_NAMES } from '../observability/prompt-templates';
 import type { ModelAccess } from '../llm/model-call.service';
 import { ModelGenerationService } from '../llm/model-generation.service';
+import type { ModelStageStore } from '../llm/model-stage';
 import { throwIfAborted } from '../llm/abort.utils';
 import { type ActionSource } from '../observability/action-source';
 
@@ -30,6 +31,8 @@ export interface TurnGenerationContext {
   reflectionMaxRounds?: number;
   /** 该玩家在本局固定使用的接入端点；缺省时用环境变量默认接入。 */
   access?: ModelAccess;
+  /** 由调用方给定的阶段存储；缺省时回落到执行器作用域内的存储。 */
+  stages?: ModelStageStore;
 }
 
 /** 单次模型调用要带上的一局标识，不含随轮次变化的字段。 */
@@ -118,6 +121,7 @@ export class PlayerTurnService {
       onContent,
       contentTrace,
       context.access,
+      context.stages,
       'final',
       (id) => {
         if (context.source) context.source.outputObservationId = id;
@@ -142,10 +146,12 @@ export class PlayerTurnService {
       reflectionMaxRounds?: number;
       /** 重放历史回合时使用的冻结输出契约。 */
       frozenOutputSchema?: Record<string, unknown>;
+      /** 持久准备节点已保存的来源，恢复时必须复用。 */
+      frozenSource?: ActionSource;
     } = {},
   ): Promise<{ reasoning: string; decision: T }> {
     throwIfAborted(signal);
-    await this.beginAttempt(context);
+    await this.beginAttempt(context, options.frozenSource);
     const outputSchema = z.object({
       reasoning: z.string().min(1).describe('依据本局可见信息，解释本次最终动作的理由'),
       decision: zodSchema,
@@ -266,6 +272,7 @@ export class PlayerTurnService {
               promptOrigin: prompt.origin,
             }),
           context.access,
+          context.stages,
           `thinking/${round}`,
         ),
       );
@@ -323,7 +330,7 @@ export class PlayerTurnService {
       signal,
       wireSchema,
       context.access,
-      undefined,
+      context.stages,
       'final',
       (id) => {
         if (context.source) context.source.outputObservationId = id;
@@ -331,12 +338,13 @@ export class PlayerTurnService {
     );
   }
 
-  private async beginAttempt(context: TurnGenerationContext): Promise<void> {
+  private async beginAttempt(context: TurnGenerationContext, frozen?: ActionSource): Promise<void> {
     if (!context.actionKey) return;
     context.source = await this.modelCalls.beginAttempt(
       context.actionKey,
       context.player.gameId,
       context.player.id,
+      frozen,
     );
   }
 }

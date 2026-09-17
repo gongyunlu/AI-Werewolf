@@ -11,8 +11,10 @@ import {
   type ModelFailureDetails,
 } from '../llm/model-call-guard';
 import { decodeRecoveryValue, encodeRecoveryValue } from './recovery-value';
+import { ExecutionOwnershipError, fenceExecution } from './execution-fence';
+import { createStageRecordStore } from './stage-record-store';
 import { SseBroadcasterService } from '../sse/sse-broadcaster.service';
-import type { ModelStageState, ModelStageStore } from '../llm/model-stage';
+import type { ModelStageStore } from '../llm/model-stage';
 
 /** version 同时约束旧执行器的步骤顺序与持久格式，改变步骤键时必须升级。 */
 export interface RecoveryManifest {
@@ -57,11 +59,7 @@ type SavedResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: ModelFailureCode; retryAt?: number; details: ModelFailureDetails };
 
-export class ExecutionOwnershipError extends Error {
-  constructor() {
-    super('当前执行者已失去对局执行权');
-  }
-}
+export { ExecutionOwnershipError } from './execution-fence';
 
 /** 节点结果、模型输入输出和领域写入使用同一局的持久执行记录。 */
 @Injectable()
@@ -80,30 +78,22 @@ export class GameRecoveryService {
   modelStageStore(): ModelStageStore | undefined {
     const scope = this.current;
     if (!scope) return undefined;
+    const store = createStageRecordStore({
+      prisma: this.prisma,
+      identity: {
+        gameId: scope.execution.gameId,
+        generation: scope.execution.generation,
+        owner: scope.owner,
+      },
+      prefix: `${scope.prefix}model-stage`,
+      signal: scope.signal,
+    });
     return {
-      update: async (label, change) => {
+      update: (label, change) => {
         scope.signal.throwIfAborted();
         if (scope.manifest.version !== 2)
           throw new ConflictException('旧执行记录缺少单次请求预算，不能重启尚未保存的模型阶段');
-        const key = `${scope.prefix}model-stage/${label}`;
-        return this.prisma.$transaction(async (tx) => {
-          await this.fence(tx, scope);
-          const old = await tx.gameExecutionStep.findUnique({
-            where: { gameId_key: { gameId: scope.execution.gameId, key } },
-          });
-          const state = change(old ? decodeRecoveryValue<ModelStageState>(old.output) : undefined);
-          const data = {
-            output: encodeRecoveryValue(state),
-            completed: !!(state.output || state.failure),
-          };
-          await tx.gameExecutionStep.upsert({
-            where: { gameId_key: { gameId: scope.execution.gameId, key } },
-            create: { gameId: scope.execution.gameId, key, ...data },
-            update: data,
-          });
-          scope.signal.throwIfAborted();
-          return state;
-        });
+        return store.update(label, change);
       },
     };
   }
@@ -435,21 +425,16 @@ export class GameRecoveryService {
     });
   }
 
-  private async fence(tx: Prisma.TransactionClient, scope: ExecutionScope, allowFinished = false) {
-    const checked = await tx.gameExecution.updateMany({
-      where: {
+  private fence(tx: Prisma.TransactionClient, scope: ExecutionScope, allowFinished = false) {
+    return fenceExecution(
+      tx,
+      {
         gameId: scope.execution.gameId,
         generation: scope.execution.generation,
         owner: scope.owner,
-        game: {
-          status: allowFinished
-            ? { in: [GAME_STATUSES.RUNNING, GAME_STATUSES.FINISHED] }
-            : GAME_STATUSES.RUNNING,
-        },
       },
-      data: { heartbeatAt: new Date() },
-    });
-    if (!checked.count) throw new ExecutionOwnershipError();
+      allowFinished,
+    );
   }
 
   private async save<T>(scope: ExecutionScope, key: string, value: SavedResult<T>) {

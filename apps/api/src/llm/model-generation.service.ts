@@ -65,7 +65,16 @@ export class ModelGenerationService {
     @Optional() private readonly recovery?: GameRecoveryService,
   ) {}
 
-  async beginAttempt(actionKey: string, gameId: string, playerId: string): Promise<ActionSource> {
+  async beginAttempt(
+    actionKey: string,
+    gameId: string,
+    playerId: string,
+    frozen?: ActionSource,
+  ): Promise<ActionSource> {
+    if (frozen) {
+      this.langfuse.startAttempt(frozen, gameId, playerId);
+      return frozen;
+    }
     const create = async () => {
       const source = createActionSource(actionKey);
       this.langfuse.startAttempt(source, gameId, playerId);
@@ -96,6 +105,7 @@ export class ModelGenerationService {
       trace: TraceConfig,
       signal: AbortSignal,
       repair?: string,
+      access?: ModelAccess,
     ) => Promise<T>,
     options: {
       signal?: AbortSignal;
@@ -108,6 +118,7 @@ export class ModelGenerationService {
       durationMs?: number;
     },
   ): Promise<T> {
+    const access = options.access ? { ...options.access } : undefined;
     const capability = this.calls.capability(modelName, options.access);
     const identity = {
       modelName,
@@ -133,9 +144,12 @@ export class ModelGenerationService {
         ),
       ),
       store: options.stages ?? this.jobs.getStore() ?? this.recovery?.modelStageStore(),
+      prepareRequest: async () => {
+        if (access && typeof access.apiKey === 'function') access.apiKey = await access.apiKey();
+      },
       call: async (attempt, repair, signal) => {
         const trace = traceFor(attempt > 1);
-        const value = await call(messages, trace, signal, repair);
+        const value = await call(messages, trace, signal, repair, access);
         return { value, observationId: trace.observationId };
       },
     });
@@ -151,6 +165,7 @@ export class ModelGenerationService {
     onToken?: (token: string) => void,
     trace?: TraceConfig | ((retry: boolean) => TraceConfig),
     access?: ModelAccess,
+    stages?: ModelStageStore,
     label?: string,
     onAdopt?: (id?: string) => void,
     settings?: ModelRequestSettings,
@@ -163,18 +178,26 @@ export class ModelGenerationService {
       typeof trace === 'function'
         ? trace
         : () => trace ?? { callbacks: [], metadata: {}, tags: [], runName: 'text' },
-      (input, attemptTrace, requestSignal, repair) =>
+      (input, attemptTrace, requestSignal, repair, requestAccess) =>
         this.calls.streamText(
           modelName,
           repair ? [...input, new HumanMessage(repair)] : input,
           requestSignal,
           onToken,
           attemptTrace,
-          access,
+          requestAccess,
           settings,
           validate,
         ),
-      { signal, access, label, onReplay: onToken, onAdopt, durationMs: settings?.timeoutMs },
+      {
+        signal,
+        access,
+        stages,
+        label,
+        onReplay: onToken,
+        onAdopt,
+        durationMs: settings?.timeoutMs,
+      },
     );
   }
 
@@ -196,7 +219,7 @@ export class ModelGenerationService {
       messages,
       { wireSchema, settings },
       traceFor,
-      (input, trace, requestSignal, repair) =>
+      (input, trace, requestSignal, repair, requestAccess) =>
         this.calls.structured(
           modelName,
           schema,
@@ -204,7 +227,7 @@ export class ModelGenerationService {
           () => trace,
           requestSignal,
           wireSchema,
-          access,
+          requestAccess,
           settings,
           repair,
         ),

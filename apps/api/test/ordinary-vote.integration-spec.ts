@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -399,10 +399,37 @@ describe('普通投票采用：脚本模型与真实隔离 PostgreSQL', () => {
             VOTE_TEST_MODE: mode,
           },
         },
-      ).catch((error: { code: number; stdout: string; stderr: string }) => {
-        if (error.code !== 73) throw new Error(error.stdout + error.stderr);
-        throw error;
-      });
+      ).catch(
+        async (error: {
+          code: number;
+          signal?: string;
+          killed?: boolean;
+          stdout: string;
+          stderr: string;
+        }) => {
+          if (error.code !== 73) {
+            const diagnostics = resolve(__dirname, '../../../docs/verification');
+            await mkdir(diagnostics, { recursive: true });
+            await writeFile(
+              resolve(diagnostics, `ordinary-child-${fixture.gameId}-${mode}.json`),
+              JSON.stringify(
+                {
+                  mode,
+                  ...error,
+                  artifact: await readFile(path, 'utf8').catch(() => null),
+                },
+                null,
+                2,
+              ),
+            );
+            throw new Error(
+              `投票子进程 ${mode} 退出 code=${error.code} signal=${error.signal} killed=${error.killed}\n${error.stdout}\n${error.stderr}`,
+              { cause: error },
+            );
+          }
+          throw error;
+        },
+      );
     try {
       await expect(child('generate')).rejects.toMatchObject({ code: 73 });
       const turns = JSON.parse(await readFile(path, 'utf8')) as VoteTurnCandidate[];

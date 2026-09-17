@@ -189,6 +189,64 @@ describe('启动投递：隔离数据库与脚本模型', () => {
       prefix,
     });
     let configuredWorker: Worker | undefined;
+    const observedAt = Date.now();
+    const timeline: Array<Record<string, unknown>> = [];
+    const record = (event: string, details: Record<string, unknown> = {}) => {
+      timeline.push({ event, elapsedMs: Date.now() - observedAt, ...details });
+    };
+    events.on('active', ({ jobId }) => record('队列活动通知', { jobId }));
+    events.on('completed', ({ jobId }) => record('队列完成通知', { jobId }));
+    events.on('failed', ({ jobId, failedReason }) =>
+      record('队列失败通知', { jobId, failedReason }),
+    );
+    events.on('error', (error) => {
+      record('队列通知错误', { error: error.message });
+      process.stderr.write(JSON.stringify(timeline.at(-1)) + '\n');
+    });
+    let failed = false;
+    const snapshot = async (point: string) => {
+      try {
+        const actual = await producer.getJob(gameId);
+        process.stderr.write(
+          JSON.stringify({
+            point,
+            db,
+            consumerDb: (consumerQueue.opts.connection as { db?: number }).db,
+            elapsedMs: Date.now() - observedAt,
+            timeline,
+            job: actual
+              ? {
+                  state: await actual.getState(),
+                  processedOn: actual.processedOn,
+                  finishedOn: actual.finishedOn,
+                  attemptsMade: actual.attemptsMade,
+                  failedReason: actual.failedReason,
+                }
+              : null,
+            execution: await prisma.gameExecution.findUnique({
+              where: { gameId },
+              select: {
+                generation: true,
+                owner: true,
+                dispatchPending: true,
+                deadline: true,
+                heartbeatAt: true,
+              },
+            }),
+            game: await prisma.game.findUnique({ where: { id: gameId }, select: { status: true } }),
+            eventCount: await prisma.event.count({ where: { gameId } }),
+            modelRequests: game.model.requests.length,
+          }) + '\n',
+        );
+      } catch (error) {
+        process.stderr.write(
+          JSON.stringify({
+            point,
+            diagnosticError: error instanceof Error ? error.message : String(error),
+          }) + '\n',
+        );
+      }
+    };
     try {
       const client = await producer.getBackend().client;
       if (client.status !== 'ready')
@@ -203,19 +261,81 @@ describe('启动投递：隔离数据库与脚本模型', () => {
       );
       await new GameLaunchService(games, configuredDispatch).start(gameId);
       const job = (await configuredDelivery.getJob(gameId))!;
-      configuredWorker = new Worker('game-queue', (queuedJob) => game.worker.process(queuedJob), {
-        connection: consumerQueue.opts.connection,
-        prefix,
+      const claimed = deferred();
+      const notified = deferred();
+      events.on('completed', ({ jobId }) => {
+        if (jobId === job.id) notified.resolve();
       });
-      await job.waitUntilFinished(events, 5_000);
+      let claimedJob: { id?: string; data: GameJobData } | undefined;
+      let processing: Promise<void> | undefined;
+      configuredWorker = new Worker(
+        'game-queue',
+        (queuedJob) => {
+          claimedJob = queuedJob;
+          processing = game.worker.process(queuedJob);
+          claimed.resolve();
+          return processing;
+        },
+        { connection: consumerQueue.opts.connection, prefix },
+      );
+      configuredWorker.on('active', (active) => record('工作进程领取任务', { jobId: active.id }));
+      configuredWorker.on('completed', (completed) =>
+        record('工作进程完成任务', { jobId: completed.id }),
+      );
+      configuredWorker.on('failed', (failedJob, error) =>
+        record('工作进程失败', { jobId: failedJob?.id, error: error.message }),
+      );
+      configuredWorker.on('error', (error) => {
+        record('工作进程错误', { error: error.message });
+        process.stderr.write(JSON.stringify(timeline.at(-1)) + '\n');
+      });
+      // 分别约束领取和完成通知；完整脚本对局仍受套件原有期限约束。
+      record('等待领取开始');
+      let claimTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          claimed.promise,
+          new Promise<never>((_resolve, reject) => {
+            claimTimeout = setTimeout(
+              () => reject(new Error('消费者在 5000ms 内没有领取任务')),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(claimTimeout);
+      }
+      expect(claimedJob).toMatchObject({ id: job.id, data: job.data });
+      await processing;
+      record('脚本对局完成，等待队列完成通知');
+      let notificationTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          notified.promise,
+          new Promise<never>((_resolve, reject) => {
+            notificationTimeout = setTimeout(
+              () => reject(new Error('队列在 5000ms 内没有发出本任务的完成通知')),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(notificationTimeout);
+      }
+      expect(await job.getState()).toBe('completed');
       expect(await prisma.game.findUniqueOrThrow({ where: { id: gameId } })).toMatchObject({
         status: 'finished',
       });
       expect(await execution()).toMatchObject({ dispatchPending: false, owner: null });
       expect(await prisma.event.count({ where: { gameId, actionType: 'game_started' } })).toBe(1);
       expect(await prisma.event.count({ where: { gameId, actionType: 'game_ended' } })).toBe(1);
+    } catch (error) {
+      failed = true;
+      await snapshot('原断言失败');
+      throw error;
     } finally {
       await configuredWorker?.close();
+      if (failed) await snapshot('等待现有任务退出后');
       await events.close();
       await producer.obliterate({ force: true });
       await producer.close();

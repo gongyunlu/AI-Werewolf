@@ -37,11 +37,13 @@ it('独立进程恢复每轮模型阶段及保守请求次数', async () => {
           undefined,
           undefined,
           undefined,
+          undefined,
           'thinking/0',
         );
         await generations.streamText(
           'script',
           [new HumanMessage('第二轮')],
+          undefined,
           undefined,
           undefined,
           undefined,

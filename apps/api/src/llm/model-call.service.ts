@@ -5,7 +5,11 @@ import { HumanMessage, type AIMessage, type BaseMessage } from '@langchain/core/
 import { z } from 'zod';
 import type { Env } from '../config/env.validation';
 import type { TraceConfig } from '../observability/langfuse.service';
-import { resolveModelCapability, structuredProtocol } from './model-capability';
+import {
+  resolveModelCapability,
+  structuredProtocol,
+  type ModelCapability,
+} from './model-capability';
 import { throwIfAborted } from './abort.utils';
 import { ModelCallGuard, ModelCallError, type ModelCallMode } from './model-call-guard';
 import {
@@ -19,7 +23,9 @@ import { canonicalJson } from './canonical-json';
 /** 单次调用使用的接入端点；缺省时回落到环境变量里的默认接入。密钥只在本进程内传递。 */
 export interface ModelAccess {
   baseUrl: string;
-  apiKey: string;
+  /** 持久结果重放不需要凭据；函数仅在准备实际请求时求值，不进入快照。 */
+  apiKey: string | (() => Promise<string>);
+  capability?: ModelCapability;
 }
 
 export interface ModelRequestSettings {
@@ -54,24 +60,27 @@ export class ModelCallService {
   }
 
   capability(modelName: string, access?: ModelAccess) {
-    return resolveModelCapability(
-      modelName,
-      this.resolveAccess(access).baseUrl,
-      this.configService.get('MODEL_CAPABILITIES'),
+    return (
+      access?.capability ??
+      resolveModelCapability(
+        modelName,
+        this.resolveAccess(access).baseUrl,
+        this.configService.get('MODEL_CAPABILITIES'),
+      )
     );
   }
 
-  private createModel(
+  private async createModel(
     modelName: string,
     access?: ModelAccess,
     options?: ModelRequestSettings,
-  ): ChatOpenAI {
+  ): Promise<ChatOpenAI> {
     const { baseUrl, apiKey } = this.resolveAccess(access);
     // 发言链路里思考由独立调用生成，供应商思维链属纯冗余，关掉可省下大部分生成耗时。
     const disableReasoning =
       options?.disableReasoning === true && this.capability(modelName, access).disableReasoning;
     return new ChatOpenAI({
-      apiKey,
+      apiKey: typeof apiKey === 'function' ? await apiKey() : apiKey,
       model: modelName,
       configuration: { baseURL: baseUrl },
       streaming: true,
@@ -128,7 +137,10 @@ export class ModelCallService {
     settings?: ModelRequestSettings,
     validate?: z.ZodType<string>,
   ): Promise<string> {
-    const model = this.createModel(modelName, access, { disableReasoning: true, ...settings });
+    const model = await this.createModel(modelName, access, {
+      disableReasoning: true,
+      ...settings,
+    });
     const progress = { ...trace?.metadata, runName: trace?.runName, ...createStreamProgress() };
     let fullContent = '';
     let pendingWhitespace = '';
@@ -179,7 +191,7 @@ export class ModelCallService {
     settings?: ModelRequestSettings,
     repair?: string,
   ): Promise<z.infer<S>> {
-    const baseModel = this.createModel(modelName, access, settings);
+    const baseModel = await this.createModel(modelName, access, settings);
 
     const capability = this.capability(modelName, access);
     const method = capability.protocol;

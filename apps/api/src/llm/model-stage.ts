@@ -38,6 +38,8 @@ export async function runModelStage<T>(options: {
   signal?: AbortSignal;
   store?: ModelStageStore;
   repairFor?: (error: ModelCallError) => string;
+  /** 缓存未命中时准备凭据等请求依赖；失败不预占次数，也不记为模型失败。 */
+  prepareRequest?: () => Promise<void>;
   call: (
     attempt: number,
     repair: string | undefined,
@@ -73,6 +75,8 @@ export async function runModelStage<T>(options: {
     if (waitMs >= state.deadline - Date.now()) throw new ModelCallError('deadline');
     if (waitMs) await wait(waitMs, signal);
     signal.throwIfAborted();
+    await options.prepareRequest?.();
+    signal.throwIfAborted();
     // 与修正输入一并预占；预占后进程退出仍然计数，不退还可能已经发出的请求。
     state = await update((current) => {
       const next = initialize(current);
@@ -91,7 +95,8 @@ export async function runModelStage<T>(options: {
       if (error instanceof ModelCallError && error.code === 'circuit_open' && error.retryAt) {
         // 本地熔断在 SDK 之前拒绝，请求确定未发出；等待不消费请求额度。
         state = await update((current) => {
-          if (current?.attempts !== attempt) throw new Error('模型阶段被并发改写', { cause: error });
+          if (current?.attempts !== attempt)
+            throw new Error('模型阶段被并发改写', { cause: error });
           return { ...current, attempts: attempt - 1, retryAt: error.retryAt };
         });
         continue;

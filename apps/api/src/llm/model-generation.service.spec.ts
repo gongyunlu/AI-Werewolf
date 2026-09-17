@@ -3,6 +3,7 @@ import { ModelGenerationService } from './model-generation.service';
 import { ModelCallService } from './model-call.service';
 import { testModelCapabilities } from '../testing/model-capabilities.fixture';
 import { ChatOpenAI } from '@langchain/openai';
+import type { ModelStageState, ModelStageStore } from './model-stage';
 
 const schema = z.object({ score: z.number() });
 
@@ -68,6 +69,45 @@ describe('分析入口复用单次模型调用', () => {
     await expect(service.invoke(baseOptions)).rejects.toMatchObject({ code: 'invalid_output' });
     // 两次空结果明确失败，不会在构造修正消息时崩成 TypeError。
     expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('凭据准备失败不占预算，修好后可请求，已存结果不再解析凭据', async () => {
+    const service = createService([{ score: 80 }]);
+    let state: ModelStageState | undefined;
+    const stages: ModelStageStore = {
+      update: async (_label, change) => (state = change(state)),
+    };
+    const credentials = jest.fn<Promise<string>, []>().mockRejectedValue(new Error('凭据暂不可用'));
+    const access = { baseUrl: 'https://judge.test/v1', apiKey: credentials };
+    const request = () =>
+      service.structured(
+        'judge-v1',
+        schema,
+        [],
+        () => ({ callbacks: [], metadata: {}, tags: [], runName: 'test' }),
+        undefined,
+        undefined,
+        access,
+        stages,
+        'final',
+      );
+
+    await expect(request()).rejects.toThrow('凭据暂不可用');
+    expect(state?.attempts).toBe(0);
+    expect(state?.failure).toBeUndefined();
+    expect(ChatOpenAI).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalled();
+
+    credentials.mockResolvedValue('rotated-key');
+    await expect(request()).resolves.toEqual({ score: 80 });
+    const saved = structuredClone(state);
+    expect(saved?.attempts).toBe(1);
+    expect(ChatOpenAI).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'rotated-key' }));
+    credentials.mockRejectedValue(new Error('已撤销密钥'));
+    await expect(request()).resolves.toEqual({ score: 80 });
+    expect(credentials).toHaveBeenCalledTimes(2);
+    expect(state).toEqual(saved);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 
   it('输出非空但不合 schema 时仍走单次重试', async () => {

@@ -38,6 +38,6 @@ import { VOTE_TURN_PORT } from '../game-engine/ports/vote-turn.port';
     { provide: VOTE_TURN_PORT, useExisting: VoteTurnAdapter },
     GameExecutorService,
   ],
-  exports: [GameExecutorService],
+  exports: [GameExecutorService, VOTE_TURN_PORT, VoteTurnAdapter],
 })
 export class GameExecutorModule {}

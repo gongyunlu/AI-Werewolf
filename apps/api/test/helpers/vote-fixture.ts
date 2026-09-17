@@ -5,8 +5,13 @@ import { VoteTurnAdapter } from '../../src/game-executor/vote-turn.adapter';
 import { createMockGame } from '../../src/game-engine/testing/mock-game-harness';
 import { MockGameStore } from '../../src/game-engine/testing/mock-game-store';
 import type { KnowledgeRetrievalOptions } from '../../src/knowledge/knowledge.service';
+import type { Env } from '../../src/config/env.validation';
 
-export async function createVoteFixture(prisma: PrismaService, existingGameId?: string) {
+export async function createVoteFixture(
+  prisma: PrismaService,
+  existingGameId?: string,
+  overrides: Partial<Env> = {},
+) {
   await prisma.ruleset.upsert({
     where: { id: 'standard6p' },
     update: {},
@@ -49,6 +54,7 @@ export async function createVoteFixture(prisma: PrismaService, existingGameId?: 
       KNOWLEDGE_INJECTION: true,
       GAME_MAX_DURATION_MS: 600_000,
       ARK_EMBEDDING_MODEL: 'test-embedding',
+      ...overrides,
     },
     { prisma, gameId, recovery: true },
   );

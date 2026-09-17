@@ -19,8 +19,8 @@ export async function resolvePlayerAccess(
   prisma: PrismaService,
   secretKey: string | undefined,
   source: PlayerAccessSource,
-  defaultAccess?: ModelAccess,
-): Promise<ModelAccess | undefined> {
+  defaultAccess?: ModelAccess & { apiKey: string },
+): Promise<(ModelAccess & { apiKey: string }) | undefined> {
   if (source.accessUsesDefault) {
     if (!defaultAccess || defaultAccess.baseUrl !== source.accessBaseUrl) {
       throw new Error('默认接入端点已变化，无法用当前凭证继续原端点的对局');

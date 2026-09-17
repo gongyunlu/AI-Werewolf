@@ -207,6 +207,7 @@ export async function createMockGame(
     opts: { attempts: 3 },
   } as Job<GameJobData>;
   return {
+    config,
     store,
     model,
     bus,

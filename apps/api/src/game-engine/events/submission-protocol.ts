@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Event, Prisma } from '@/generated/prisma/client';
 import type { ActionSource } from '@/observability/action-source';
+import type { ExecutionIdentity } from '@/game-recovery/execution-fence';
 
 export interface SubmissionScope {
   gameId: string;
@@ -8,6 +9,8 @@ export interface SubmissionScope {
   signal?: AbortSignal;
   source?: ActionSource;
   sources?: Record<string, ActionSource | undefined>;
+  /** 由调用方给出的执行权归属；给出时提交先校验执行权再写入。 */
+  execution?: ExecutionIdentity;
 }
 
 export type CommittedEvent = Event & { replayed: boolean };

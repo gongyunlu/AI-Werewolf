@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import { AgentRuntimeService } from '@/agent-runtime/agent-runtime.service';
+import { AgentRuntimeService, type PreparedTurnInput } from '@/agent-runtime/agent-runtime.service';
+import type { ModelStageStore } from '@/llm/model-stage';
+import type { TurnContextRequest } from '@/agent-runtime/turn-context';
 import { ModelCallError } from '@/llm/model-call-guard';
 import { legalVoteActions, type VoteAction } from '@/game-engine/rules/ordinary-vote';
 import type {
@@ -31,8 +33,12 @@ export class VoteTurnAdapter implements VoteTurnPort {
     return this.agentRuntime.voteVisibleThrough(gameId);
   }
 
-  async vote(request: VoteTurnRequest): Promise<VoteTurnCandidate> {
-    const context = await this.agentRuntime.prepareContextPublic({
+  prepare(request: VoteTurnRequest): Promise<PreparedTurnInput> {
+    return this.agentRuntime.prepareTurnInput(this.contextRequest(request));
+  }
+
+  private contextRequest(request: VoteTurnRequest): TurnContextRequest {
+    return {
       phaseInstanceId: request.phaseInstanceId,
       gameId: request.gameId,
       playerId: request.playerId,
@@ -46,17 +52,34 @@ export class VoteTurnAdapter implements VoteTurnPort {
         aliveSeats: request.aliveSeatNos,
       },
       additionalContext: `你只能投票给以下存活玩家之一：${request.legalSeatNos.join('号、')}号，或弃权。`,
-    });
+    };
+  }
+
+  async vote(
+    request: VoteTurnRequest,
+    execution?: { prepared: PreparedTurnInput; stages: ModelStageStore },
+  ): Promise<VoteTurnCandidate> {
+    // 图状态不能被生成器的观测引用和决策快照更新原地修改。
+    const context = execution
+      ? structuredClone(execution.prepared)
+      : await this.agentRuntime.prepareContextPublic(this.contextRequest(request));
     const schema = buildVoteSchema(request.legalSeatNos);
-    const { reasoning, decision } = await this.agentRuntime.decide<VoteAction>(
-      context,
-      schema,
-      request.signal,
-    );
+    const { reasoning, decision } = execution
+      ? await this.agentRuntime.decidePrepared<VoteAction>(
+          context as PreparedTurnInput,
+          schema,
+          execution.stages,
+          request.signal,
+        )
+      : await this.agentRuntime.decide<VoteAction>(
+          context as Awaited<ReturnType<AgentRuntimeService['prepareContextPublic']>>,
+          schema,
+          request.signal,
+        );
     const parsed = schema.safeParse(decision);
     if (!parsed.success) throw new ModelCallError('invalid_output');
     if (!context.source || !context.replay) throw new Error('普通投票缺少采用来源或决策快照');
-    // 继续复用原 context/decision 恢复键；只把明确摘取的 JSON 数据交给提交器。
+    // 只把明确摘取的 JSON 数据交给提交器。
     return JSON.parse(
       JSON.stringify({
         reference: {
